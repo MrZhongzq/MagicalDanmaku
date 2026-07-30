@@ -1,0 +1,19 @@
+{
+  "cmd": "SEND_GIFT",
+  "data": {
+    "uid": 20285041,
+    "uname": "路人甲",
+    "face": "http://i1.hdslb.com/bfs/face/aaa.jpg",
+    "giftId": 30607,
+    "giftName": "小心心",
+    "num": 3,
+    "coin_type": "silver",
+    "total_coin": 0,
+    "price": 0,
+    "action": "投喂",
+    "timestamp": 1614439816,
+    "guard_level": 0,
+    "batch_combo_id": "",
+    "medal_info": {"medal_level": 0, "medal_name": "", "anchor_roomid": 0, "target_id": 0, "guard_level": 0, "is_lighted": 0, "anchor_uname": ""}
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "cmd": "SEND_GIFT",
+  "data": {
+    "uid": 87654321,
+    "uname": "土豪乙",
+    "face": "http://i1.hdslb.com/bfs/face/bbb.jpg",
+    "giftId": 31531,
+    "giftName": "小花花",
+    "num": 2,
+    "coin_type": "gold",
+    "total_coin": 2000,
+    "price": 1000,
+    "action": "投喂",
+    "timestamp": 1700000200,
+    "guard_level": 3,
+    "batch_combo_id": "batch:gift:combo_id:87654321:123:31531:1700000200.1",
+    "medal_info": {"medal_level": 25, "medal_name": "KKZ", "anchor_roomid": 1010, "anchor_uname": "某某主播", "target_id": 389088, "guard_level": 3, "is_lighted": 1}
+  }
+}
