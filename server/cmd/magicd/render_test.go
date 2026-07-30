@@ -96,3 +96,28 @@ func TestRenderNeverPanics(t *testing.T) {
 		}
 	}
 }
+
+func TestRenderOnlineRankList(t *testing.T) {
+	top := []event.RankUser{
+		{User: event.User{Username: "榜一"}, Rank: 1, Score: "55"},
+		{User: event.User{Username: "榜二"}, Rank: 2, Score: "34"},
+		{User: event.User{Username: "榜三"}, Rank: 3, Score: "33"},
+		{User: event.User{Username: "榜四"}, Rank: 4, Score: "20"},
+	}
+	got := Render(baseEvent(event.TypeOnlineRankUpdate, event.OnlineRankUpdate{Count: -1, Top: top}))
+	for _, want := range []string{"1.榜一(55)", "2.榜二(34)", "3.榜三(33)", "共 4 名"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("渲染结果缺少 %q，实际:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "榜四") {
+		t.Error("只应展示前 3 名，第 4 名不该出现")
+	}
+}
+
+func TestRenderOnlineRankCountTakesPrecedence(t *testing.T) {
+	got := Render(baseEvent(event.TypeOnlineRankUpdate, event.OnlineRankUpdate{Count: 233}))
+	if !strings.Contains(got, "高能榜人数 233") {
+		t.Errorf("Count >= 0 时应显示人数，实际:\n%s", got)
+	}
+}

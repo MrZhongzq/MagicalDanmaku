@@ -1,7 +1,6 @@
 package cmdmap
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 
@@ -81,18 +80,9 @@ type interactV2 struct {
 // 自 2024 年起 B 站已停止下发 INTERACT_WORD v1，进场、关注、分享
 // 三类事件全部改由本 CMD 承载，因此必须解码，不能走 Unknown 兜底。
 func mapInteractWordV2(ctx Context, raw json.RawMessage) ([]event.Event, error) {
-	data, err := unmarshalData(raw, "INTERACT_WORD_V2")
+	pb, err := decodePBField(raw, "INTERACT_WORD_V2")
 	if err != nil {
 		return nil, err
-	}
-
-	b64 := getString(data, "pb")
-	if b64 == "" {
-		return nil, fmt.Errorf("cmdmap: INTERACT_WORD_V2 缺少 pb 字段")
-	}
-	pb, err := base64.StdEncoding.DecodeString(b64)
-	if err != nil {
-		return nil, fmt.Errorf("cmdmap: INTERACT_WORD_V2 的 pb 不是合法 base64: %w", err)
 	}
 
 	var iw interactV2

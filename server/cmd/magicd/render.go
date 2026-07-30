@@ -53,7 +53,7 @@ func describe(ev event.Event) string {
 		if p.Count >= 0 {
 			return fmt.Sprintf("高能榜人数 %d", p.Count)
 		}
-		return fmt.Sprintf("高能榜前 %d 名更新", len(p.Top))
+		return rankText(p.Top)
 	case event.RoomStatsUpdate:
 		return statsText(p)
 	case event.Battle:
@@ -99,6 +99,25 @@ func coinLabel(coinType string, total int64) string {
 		return fmt.Sprintf("¥%.1f", float64(total)/1000)
 	}
 	return "免费"
+}
+
+// rankText 描述高能榜名次变化，只列出前几名以免刷屏。
+func rankText(top []event.RankUser) string {
+	if len(top) == 0 {
+		return "高能榜更新（空榜单）"
+	}
+	const show = 3
+	n := min(len(top), show)
+
+	parts := make([]string, 0, n)
+	for _, ru := range top[:n] {
+		parts = append(parts, fmt.Sprintf("%d.%s(%s)", ru.Rank, ru.User.Username, ru.Score))
+	}
+	s := strings.Join(parts, " ")
+	if len(top) > n {
+		s += fmt.Sprintf(" …共 %d 名", len(top))
+	}
+	return "高能榜 " + s
 }
 
 // statsText 描述房间统计变化。
