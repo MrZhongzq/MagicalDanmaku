@@ -1,0 +1,28 @@
+{
+  "cmd": "SUPER_CHAT_MESSAGE",
+  "data": {
+    "id": 1278390,
+    "uid": 389088,
+    "message": "最右边可以爬上去",
+    "price": 30,
+    "time": 60,
+    "start_time": 1613125845,
+    "end_time": 1613125905,
+    "user_info": {
+      "uname": "SC用户",
+      "face": "https://i0.hdslb.com/bfs/face/ccc.jpg",
+      "guard_level": 3,
+      "manager": 0,
+      "user_level": 20
+    },
+    "medal_info": {
+      "medal_level": 25,
+      "medal_name": "KKZ",
+      "anchor_roomid": 1010,
+      "anchor_uname": "某某主播",
+      "target_id": 389088,
+      "guard_level": 3,
+      "is_lighted": 1
+    }
+  }
+}

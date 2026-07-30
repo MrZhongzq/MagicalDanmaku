@@ -1,0 +1,6 @@
+{
+  "cmd": "SUPER_CHAT_MESSAGE_DELETE",
+  "data": {
+    "ids": [1278390, 1278391]
+  }
+}

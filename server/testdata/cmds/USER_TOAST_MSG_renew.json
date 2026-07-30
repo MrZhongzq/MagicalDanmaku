@@ -1,0 +1,15 @@
+{
+  "cmd": "USER_TOAST_MSG",
+  "data": {
+    "uid": 67756641,
+    "username": "老舰长",
+    "guard_level": 2,
+    "num": 3,
+    "price": 594000,
+    "unit": "月",
+    "role_name": "提督",
+    "is_auto_renew": 1,
+    "start_time": 1700000300,
+    "toast_msg": "老舰长 自动续费了提督"
+  }
+}
