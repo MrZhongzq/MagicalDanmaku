@@ -25,7 +25,11 @@ var MixinKeyEncTab = [64]int{
 }
 
 // wbiNameRe 从形如 .../ab12....ef.png 的地址中提取 32 位文件名。
-var wbiNameRe = regexp.MustCompile(`/([0-9a-fA-F]{32})\.png`)
+//
+// 刻意不限定为十六进制：B 站实际下发的虽是十六进制串，但该值只是
+// 一个不透明标识，推导算法对任意字符都成立。放宽为 \w 与原 C++ 实现
+// 一致，避免 B 站改动命名格式时静默失败。
+var wbiNameRe = regexp.MustCompile(`/(\w{32})\.png`)
 
 // forbiddenInValue 是签名前必须从参数值中剔除的字符。
 const forbiddenInValue = "!'()*"
