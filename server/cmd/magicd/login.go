@@ -28,11 +28,19 @@ func runLogin(args []string) error {
 		return err
 	}
 
-	fmt.Println("请用哔哩哔哩手机客户端扫描以下地址对应的二维码：")
+	fmt.Println("请用哔哩哔哩手机客户端扫描下方二维码：")
 	fmt.Println()
+	art, err := renderQR(qr.URL)
+	if err != nil {
+		// 渲染失败不阻断登录：地址本身仍可用。
+		fmt.Println("（二维码渲染失败，请手动打开下面的地址）")
+	} else {
+		fmt.Print(art)
+	}
+	fmt.Println()
+	fmt.Println("若终端显示错乱，可复制以下地址到手机浏览器或二维码生成器：")
 	fmt.Println("   " + qr.URL)
 	fmt.Println()
-	fmt.Println("（可把该地址粘贴到任意二维码生成器中显示，或直接在手机上打开）")
 	fmt.Println("等待扫码中，按 Ctrl+C 取消...")
 
 	ticker := time.NewTicker(2 * time.Second)

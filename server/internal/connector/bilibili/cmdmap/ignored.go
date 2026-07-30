@@ -30,6 +30,12 @@ var ignoredCommands = []string{
 	"LOG_IN_NOTICE",                     // 登录提示
 	"SPREAD_SHOW_FEET_V2",               // 推广位
 	"RECOMMEND_CARD",                    // 推荐卡片
+
+	// 以下为 2026-07-31 真机抓包时观测到的高频噪声，
+	// 均为榜单/运营类推送，与弹幕机器人无关。
+	"RANK_CHANGED_V2",      // 房间排名变化，约每 10 秒一条
+	"POPULAR_RANK_CHANGED", // 人气排行变化，约每 60 秒一条
+	"DM_INTERACTION",       // 弹幕互动合并提示（连续弹幕、点赞聚合等）
 }
 
 func init() {

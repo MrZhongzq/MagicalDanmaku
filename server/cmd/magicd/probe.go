@@ -21,6 +21,8 @@ func runProbe(args []string) error {
 	room := fs.String("room", "", "直播间号（必填）")
 	cookieFile := fs.String("cookie-file", "", "Cookie 文件路径；留空则匿名连接")
 	typeFilter := fs.String("type", "", "只显示指定事件类型，逗号分隔，如 danmaku,gift")
+	dumpCmd := fs.String("dump", "", "把指定 CMD 的原始 JSON 追加写入文件，逗号分隔，如 ONLINE_RANK_V3；用 all 表示全部")
+	dumpFile := fs.String("dump-file", "dump.jsonl", "原始 JSON 的输出文件，每行一条")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -65,10 +67,17 @@ func runProbe(args []string) error {
 	fmt.Printf("直播间 %s（%s）标题：%s  状态：%s\n\n",
 		info.RoomID, info.ParentAreaName+"/"+info.AreaName, info.Title, status)
 
+	dumper, err := newDumper(*dumpCmd, *dumpFile)
+	if err != nil {
+		return err
+	}
+	defer dumper.Close()
+
 	c := bilibili.NewClient(info.RoomID, apiClient)
 
 	go func() {
 		for ev := range c.Events() {
+			dumper.Write(ev)
 			if allow != nil && !allow[ev.Type] {
 				continue
 			}

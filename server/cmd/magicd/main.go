@@ -18,12 +18,16 @@ const usage = `magicd —— 神奇弹幕服务端
         扫码登录，把 Cookie 写入文件（默认输出到标准输出）
 
   magicd probe -room <房间号> [-cookie-file cookie.txt] [-type <事件类型>]
-        连接直播间并打印实时事件流
+                             [-dump <CMD名>] [-dump-file dump.jsonl]
+        连接直播间并打印实时事件流；-dump 可把指定 CMD 的原始 JSON 落盘，
+        用于采集样本、补写映射
 
 示例:
   magicd login -o cookie.txt
   magicd probe -room 21452505 -cookie-file cookie.txt
   magicd probe -room 21452505 -cookie-file cookie.txt -type danmaku,gift
+  magicd probe -room 21452505 -cookie-file cookie.txt -dump unknown
+  magicd probe -room 21452505 -cookie-file cookie.txt -dump ONLINE_RANK_V3
 `
 
 func main() {
