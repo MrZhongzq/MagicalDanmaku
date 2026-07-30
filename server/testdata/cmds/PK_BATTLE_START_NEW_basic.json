@@ -1,0 +1,13 @@
+{
+  "cmd": "PK_BATTLE_START_NEW",
+  "pk_id": 12345678,
+  "pk_status": 201,
+  "timestamp": 1700000700,
+  "data": {
+    "battle_type": 2,
+    "init_info": {"room_id": 21452505, "best_uname": ""},
+    "match_info": {"room_id": 33333, "best_uname": "对面主播"},
+    "pk_start_time": 1700000700,
+    "pk_end_time": 1700001000
+  }
+}
