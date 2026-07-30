@@ -1,0 +1,10 @@
+{
+  "cmd": "ONLINE_RANK_V2",
+  "data": {
+    "rank_type": "gold-rank",
+    "list": [
+      {"uid": 111, "name": "榜一", "face": "https://i0.hdslb.com/bfs/face/g1.jpg", "rank": 1, "score": "12000", "guard_level": 3},
+      {"uid": 222, "name": "榜二", "face": "https://i0.hdslb.com/bfs/face/g2.jpg", "rank": 2, "score": "8000", "guard_level": 0}
+    ]
+  }
+}

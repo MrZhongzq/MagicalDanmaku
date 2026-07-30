@@ -1,0 +1,6 @@
+{
+  "cmd": "ROOM_BLOCK_MSG",
+  "uid": 99999999,
+  "uname": "被禁言的人",
+  "data": {"uid": 99999999, "uname": "被禁言的人", "operator": 1}
+}

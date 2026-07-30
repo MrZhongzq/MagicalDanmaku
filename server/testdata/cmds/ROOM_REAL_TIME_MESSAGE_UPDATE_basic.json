@@ -1,0 +1,4 @@
+{
+  "cmd": "ROOM_REAL_TIME_MESSAGE_UPDATE",
+  "data": {"roomid": 21452505, "fans": 12345, "fans_club": 678, "red_notice": -1}
+}

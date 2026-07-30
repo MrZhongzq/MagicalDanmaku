@@ -1,0 +1,10 @@
+{
+  "cmd": "ROOM_CHANGE",
+  "data": {
+    "title": "今天也在唱歌",
+    "area_id": 21,
+    "area_name": "视频唱见",
+    "parent_area_id": 1,
+    "parent_area_name": "娱乐"
+  }
+}
