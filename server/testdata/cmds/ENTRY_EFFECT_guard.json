@@ -1,0 +1,10 @@
+{
+  "cmd": "ENTRY_EFFECT",
+  "data": {
+    "uid": 55555555,
+    "copy_writing": "欢迎舰长 <%舰长用户%> 进入直播间",
+    "face": "https://i0.hdslb.com/bfs/face/eee.jpg",
+    "privilege_type": 3,
+    "trigger_time": 1700000600000000000
+  }
+}

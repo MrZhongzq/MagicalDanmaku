@@ -1,0 +1,11 @@
+{
+  "cmd": "INTERACT_WORD",
+  "data": {
+    "msg_type": 3,
+    "uid": 44444444,
+    "uname": "分享用户",
+    "timestamp": 1700000500,
+    "roomid": 22639465,
+    "fans_medal": {"medal_level": 0, "medal_name": ""}
+  }
+}

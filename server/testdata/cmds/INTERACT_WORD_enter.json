@@ -1,0 +1,20 @@
+{
+  "cmd": "INTERACT_WORD",
+  "data": {
+    "msg_type": 1,
+    "uid": 20285041,
+    "uname": "进场用户",
+    "uname_color": "",
+    "timestamp": 1617974941,
+    "roomid": 22639465,
+    "identities": [1],
+    "fans_medal": {
+      "anchor_roomid": 0, "guard_level": 0, "is_lighted": 0,
+      "medal_level": 0, "medal_name": "", "target_id": 0
+    },
+    "uinfo": {
+      "base": {"face": "https://i0.hdslb.com/bfs/face/ddd.jpg", "uname": "进场用户"},
+      "wealth": {"level": 12}
+    }
+  }
+}

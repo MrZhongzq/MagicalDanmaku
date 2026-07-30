@@ -1,0 +1,14 @@
+{
+  "cmd": "INTERACT_WORD",
+  "data": {
+    "msg_type": 2,
+    "uid": 33333333,
+    "uname": "新粉丝",
+    "timestamp": 1700000400,
+    "roomid": 22639465,
+    "fans_medal": {
+      "anchor_roomid": 1010, "anchor_uname": "某某主播", "guard_level": 3,
+      "is_lighted": 1, "medal_level": 15, "medal_name": "KKZ", "target_id": 389088
+    }
+  }
+}

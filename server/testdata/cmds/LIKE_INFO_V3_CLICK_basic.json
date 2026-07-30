@@ -1,0 +1,13 @@
+{
+  "cmd": "LIKE_INFO_V3_CLICK",
+  "data": {
+    "uid": 66666666,
+    "uname": "点赞用户",
+    "like_text": "为主播点赞了",
+    "fans_medal": {"medal_level": 0, "medal_name": ""},
+    "uinfo": {
+      "base": {"face": "https://i0.hdslb.com/bfs/face/fff.jpg", "uname": "点赞用户"},
+      "wealth": {"level": 5}
+    }
+  }
+}
