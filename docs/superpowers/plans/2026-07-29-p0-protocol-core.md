@@ -1480,8 +1480,9 @@ func TestDanmuMsgGuardAndMedal(t *testing.T) {
 	if d.ReplyToName != "某某主播" {
 		t.Errorf("ReplyToName = %q", d.ReplyToName)
 	}
-	if d.Color != "#54ee98" {
-		t.Errorf("Color = %q, 期望 #54ee98", d.Color)
+	// 样本中 textColor 为 5566168，即 0x54eed8
+	if d.Color != "#54eed8" {
+		t.Errorf("Color = %q, 期望 #54eed8", d.Color)
 	}
 }
 ```
