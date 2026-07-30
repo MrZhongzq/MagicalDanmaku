@@ -76,3 +76,9 @@ Desktop.ini
 .gradle/
 kk.key
 build/
+# Go 构建产物
+/magicd
+/magicd.exe
+/server/magicd
+/server/magicd.exe
+cookie.txt
