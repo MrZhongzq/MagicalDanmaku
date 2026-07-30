@@ -82,3 +82,6 @@ build/
 /server/magicd
 /server/magicd.exe
 cookie.txt
+
+# 构建产物
+/dist/

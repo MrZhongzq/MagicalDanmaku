@@ -1,0 +1,106 @@
+name: CI
+
+# 每次推送与 PR 都跑：格式、静态检查、测试、竞态检测、交叉编译。
+on:
+  push:
+    branches:
+      - master
+      - "refactor/**"
+    paths:
+      - "server/**"
+      - ".github/workflows/ci.yml"
+      - ".goreleaser.yaml"
+  pull_request:
+    paths:
+      - "server/**"
+      - ".github/workflows/ci.yml"
+      - ".goreleaser.yaml"
+
+# 同一分支的新推送会取消仍在跑的旧任务，避免排队浪费。
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: 测试与静态检查
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: server/go.mod
+          cache-dependency-path: server/go.sum
+
+      - name: 检查格式
+        working-directory: server
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "以下文件未格式化，请运行 gofmt -w ：" >&2
+            echo "$unformatted" >&2
+            exit 1
+          fi
+
+      - name: 静态检查
+        working-directory: server
+        run: go vet ./...
+
+      - name: 测试
+        working-directory: server
+        run: go test ./... -count=1
+
+      # Linux runner 自带 gcc，竞态检测可直接跑。
+      - name: 竞态检测
+        working-directory: server
+        run: go test ./... -race -count=1
+
+      - name: 确认依赖清单已整理
+        working-directory: server
+        run: |
+          go mod tidy
+          if ! git diff --exit-code go.mod go.sum; then
+            echo "go.mod/go.sum 未整理，请运行 go mod tidy" >&2
+            exit 1
+          fi
+
+  cross-build:
+    name: 交叉编译预检
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        goos: [linux, darwin, windows]
+        goarch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: server/go.mod
+          cache-dependency-path: server/go.sum
+
+      - name: 构建 ${{ matrix.goos }}/${{ matrix.goarch }}
+        working-directory: server
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: go build -trimpath -o /dev/null ./cmd/magicd
+
+  goreleaser-check:
+    name: 校验发布配置
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: server/go.mod
+          cache-dependency-path: server/go.sum
+
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          version: "~> v2"
+          args: check

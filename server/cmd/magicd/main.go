@@ -9,6 +9,8 @@ package main
 import (
 	"fmt"
 	"os"
+
+	"github.com/MrZhongzq/MagicalDanmaku/server/internal/buildinfo"
 )
 
 const usage = `magicd —— 神奇弹幕服务端
@@ -28,6 +30,9 @@ const usage = `magicd —— 神奇弹幕服务端
   magicd probe -room 21452505 -cookie-file cookie.txt -type danmaku,gift
   magicd probe -room 21452505 -cookie-file cookie.txt -dump unknown
   magicd probe -room 21452505 -cookie-file cookie.txt -dump ONLINE_RANK_V3
+
+  magicd version
+        显示版本信息
 `
 
 func main() {
@@ -42,6 +47,9 @@ func main() {
 		err = runLogin(os.Args[2:])
 	case "probe":
 		err = runProbe(os.Args[2:])
+	case "version", "-v", "--version":
+		fmt.Println(buildinfo.Get().Detail())
+		return
 	case "-h", "--help", "help":
 		fmt.Print(usage)
 		return

@@ -1,0 +1,39 @@
+name: Release
+
+# 推送 v 开头的 tag 时出全平台包并发布到 GitHub Releases。
+#
+#   git tag -a v7.0.0 -m "..." && git push origin v7.0.0
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: 构建并发布
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # GoReleaser 生成变更日志需要完整历史与 tag。
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: server/go.mod
+          cache-dependency-path: server/go.sum
+
+      # 发版前再跑一遍测试，避免把坏版本推出去。
+      - name: 测试
+        working-directory: server
+        run: go test ./... -count=1
+
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

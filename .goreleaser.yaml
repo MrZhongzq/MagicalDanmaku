@@ -1,0 +1,100 @@
+# GoReleaser 配置：打 tag 时由 CI 出全平台包并发布到 GitHub Releases。
+#
+# 目标平台与 ldflags 必须与 scripts/build.sh 保持一致——后者是本地
+# 日常验证用的零依赖脚本，两者出的产物应当等价。
+#
+# 本地预演（不发布、不要求打 tag）：
+#   goreleaser release --snapshot --clean
+version: 2
+
+project_name: magicd
+
+before:
+  hooks:
+    - go mod tidy -C server
+
+builds:
+  - id: magicd
+    dir: server
+    main: ./cmd/magicd
+    binary: magicd
+    # 静态二进制，无 libc 依赖，可直接丢进 scratch 镜像。
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X github.com/MrZhongzq/MagicalDanmaku/server/internal/buildinfo.Version={{ .Version }}
+      - -X github.com/MrZhongzq/MagicalDanmaku/server/internal/buildinfo.Commit={{ .ShortCommit }}
+      - -X github.com/MrZhongzq/MagicalDanmaku/server/internal/buildinfo.Date={{ .Date }}
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - id: default
+    ids:
+      - magicd
+    # 产物名形如 magicd_v7.0.0_linux_amd64.tar.gz
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    # Windows 用户多数没有 tar，单独出 zip。
+    formats:
+      - tar.gz
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: checksums.txt
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  # 按提交类型分组，与仓库使用的中文 conventional commits 对应。
+  use: git
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - "^ci:"
+  groups:
+    - title: 新功能
+      regexp: '^feat(\(.+\))?:'
+      order: 0
+    - title: 问题修复
+      regexp: '^fix(\(.+\))?:'
+      order: 1
+    - title: 性能优化
+      regexp: '^perf(\(.+\))?:'
+      order: 2
+    - title: 其他改动
+      order: 999
+
+release:
+  draft: false
+  prerelease: auto
+  footer: |
+    ---
+
+    ## 安装
+
+    下载对应平台的压缩包，解压后直接运行 `magicd`。二进制为静态链接，
+    无需安装任何运行时依赖。
+
+    校验完整性：
+    ```
+    sha256sum -c checksums.txt
+    ```
