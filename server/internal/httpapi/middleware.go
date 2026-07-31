@@ -1,10 +1,13 @@
 package httpapi
 
 import (
+	"context"
 	"net/http"
 	"runtime/debug"
 	"strings"
 	"time"
+
+	"github.com/MrZhongzq/MagicalDanmaku/server/internal/store"
 )
 
 // withRecover 拦住处理器里的 panic。
@@ -125,4 +128,37 @@ func (i *interceptor) Flush() {
 	if f, ok := i.ResponseWriter.(http.Flusher); ok {
 		f.Flush()
 	}
+}
+
+// ctxKey 是本包放进 context 的键类型，避免与其他包碰撞。
+type ctxKey int
+
+const ctxKeyUser ctxKey = iota
+
+// sessionCookieName 是会话 Cookie 的名字。
+const sessionCookieName = "magicd_session"
+
+// requireAuth 要求请求带有效会话，并把用户放进 context。
+func (s *Server) requireAuth(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		c, err := r.Cookie(sessionCookieName)
+		if err != nil || c.Value == "" {
+			respondError(w, http.StatusUnauthorized, "未登录")
+			return
+		}
+		u, err := s.store.LookupSession(r.Context(), c.Value)
+		if err != nil {
+			// 会话无效与会话过期对客户端是同一件事：重新登录
+			respondError(w, http.StatusUnauthorized, "会话无效或已过期，请重新登录")
+			return
+		}
+		h(w, r.WithContext(context.WithValue(r.Context(), ctxKeyUser, u)))
+	}
+}
+
+// userFrom 取出当前用户。只应在 requireAuth 之后的处理器里调用；
+// 取不到说明路由注册漏了 requireAuth，是编程错误。
+func userFrom(ctx context.Context) *store.User {
+	u, _ := ctx.Value(ctxKeyUser).(*store.User)
+	return u
 }

@@ -77,6 +77,12 @@ func New(st *store.Store, opts Options) *Server {
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/health", s.handleHealth)
 
+	// 认证。登录与登出都用 POST：SameSite=Lax 不拦截跨站顶层 GET 导航，
+	// 所以一切改变状态的接口都不能用 GET。
+	s.mux.HandleFunc("POST /api/auth/login", s.handleLogin)
+	s.mux.HandleFunc("POST /api/auth/logout", s.handleLogout)
+	s.mux.HandleFunc("GET /api/auth/me", s.requireAuth(s.handleMe))
+
 	// 仅测试用：验证 panic 恢复中间件。生产路由表里不该有它，
 	// 但把它放在这里比在测试里另起一个 mux 更能保证测的是真实中间件链。
 	s.mux.HandleFunc("GET /api/test/panic", func(http.ResponseWriter, *http.Request) {
