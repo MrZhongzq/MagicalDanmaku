@@ -1,28 +1,27 @@
 package rules
 
 import (
-	"context"
 	"sync"
 	"time"
-
-	"github.com/MrZhongzq/MagicalDanmaku/server/internal/ratelimit"
 )
 
-// Cooldown 实现三层节流。
+// Cooldown 实现绑定内的业务节流。
 //
-//	全局限流   防账号触发风控，复用 P0 的 ratelimit.Limiter
-//	冷却组     多规则共享节流，如 greeting / thanks
-//	规则冷却   单规则最小触发间隔
+//	冷却组   多规则共享节流，如 greeting / thanks
+//	规则冷却  单规则最小触发间隔
 //
-// 三层依次检查，任一不通过即跳过本次触发——不排队、不延迟发送。
+// 两层依次检查，任一不通过即跳过本次触发——不排队、不延迟发送。
 // 弹幕时效性强，迟到几十秒的欢迎语没有意义，堆积的队列反而会在
 // 冷却结束后集中喷发。
+//
+// 防风控的发送限流**不在这里**：它是账号级的，同一账号的全部直播间
+// 必须共享，因此归 account.Account 持有（见 account 包）。本类型只管
+// 单个「账号-直播间」绑定内部的业务节流。
 //
 // 命名冷却组取代原项目的 msgCds[100] 编号通道：运营不必再记住
 // 「3 号通道是关注答谢」，且在 P4 的 WebUI 中可直接下拉选择。
 type Cooldown struct {
-	global ratelimit.Limiter
-	now    func() time.Time
+	now func() time.Time
 
 	mu             sync.Mutex
 	ruleLastFired  map[string]time.Time // 规则名 → 上次触发时间
@@ -31,15 +30,11 @@ type Cooldown struct {
 }
 
 // NewCooldown 创建节流器。now 可为 nil，此时使用 time.Now。
-func NewCooldown(global ratelimit.Limiter, now func() time.Time) *Cooldown {
+func NewCooldown(now func() time.Time) *Cooldown {
 	if now == nil {
 		now = time.Now
 	}
-	if global == nil {
-		global = ratelimit.NewInterval(0)
-	}
 	return &Cooldown{
-		global:         global,
 		now:            now,
 		ruleLastFired:  make(map[string]time.Time),
 		groupLastFired: make(map[string]time.Time),
@@ -87,12 +82,4 @@ func (c *Cooldown) Allow(r Rule) bool {
 		c.groupLastFired[r.CooldownGroup] = now
 	}
 	return true
-}
-
-// WaitGlobal 等待全局限流放行。
-//
-// 与 Allow 分开是因为全局限流需要真正阻塞等待，而规则级与组级
-// 只是纯时间比较。动作真正发送前调用本方法。
-func (c *Cooldown) WaitGlobal(ctx context.Context) error {
-	return c.global.Wait(ctx)
 }

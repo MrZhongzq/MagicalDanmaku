@@ -1,11 +1,8 @@
 package rules
 
 import (
-	"context"
 	"testing"
 	"time"
-
-	"github.com/MrZhongzq/MagicalDanmaku/server/internal/ratelimit"
 )
 
 // fakeClock 提供可控的时间源。
@@ -16,7 +13,7 @@ func (c *fakeClock) Advance(d time.Duration) { c.t = c.t.Add(d) }
 
 func newTestCooldown() (*Cooldown, *fakeClock) {
 	clk := &fakeClock{t: time.Unix(1700000000, 0)}
-	return NewCooldown(ratelimit.NewInterval(0), clk.Now), clk
+	return NewCooldown(clk.Now), clk
 }
 
 func TestCooldownAllowsFirstFire(t *testing.T) {
@@ -127,35 +124,5 @@ func TestCooldownDoesNotRecordWhenBlocked(t *testing.T) {
 	clk.Advance(6 * time.Second)
 	if !cd.Allow(r) {
 		t.Error("被拦截的尝试不应刷新冷却起点（t=11 距 t=0 已超 10s）")
-	}
-}
-
-func TestCooldownWaitGlobal(t *testing.T) {
-	cd := NewCooldown(ratelimit.NewInterval(60*time.Millisecond), time.Now)
-	ctx := context.Background()
-
-	if err := cd.WaitGlobal(ctx); err != nil {
-		t.Fatalf("首次 WaitGlobal 失败: %v", err)
-	}
-	start := time.Now()
-	if err := cd.WaitGlobal(ctx); err != nil {
-		t.Fatalf("第二次 WaitGlobal 失败: %v", err)
-	}
-	if d := time.Since(start); d < 40*time.Millisecond {
-		t.Errorf("第二次应受全局限流约束，实际间隔 %v", d)
-	}
-}
-
-func TestCooldownWaitGlobalRespectsContext(t *testing.T) {
-	cd := NewCooldown(ratelimit.NewInterval(5*time.Second), time.Now)
-	ctx := context.Background()
-	if err := cd.WaitGlobal(ctx); err != nil {
-		t.Fatalf("首次失败: %v", err)
-	}
-
-	ctx2, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
-	defer cancel()
-	if err := cd.WaitGlobal(ctx2); err == nil {
-		t.Error("ctx 超时后应返回错误")
 	}
 }

@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/event"
-	"github.com/MrZhongzq/MagicalDanmaku/server/internal/ratelimit"
 )
 
 // failingBot 让指定次数的发送失败，用于测试错误隔离。
@@ -57,7 +56,6 @@ func newTestExecutor(bot BotAPI) *Executor {
 		Bot:               bot,
 		Renderer:          NewRenderer(rand.New(rand.NewSource(1))),
 		Script:            NewSandbox(SandboxOptions{Timeout: 200 * time.Millisecond, Bot: bot}),
-		Cooldown:          NewCooldown(ratelimit.NewInterval(0), time.Now),
 		DefaultBlockHours: 1,
 	})
 }
@@ -260,7 +258,6 @@ func TestExecuteScriptTimeoutIsReported(t *testing.T) {
 		Bot:      bot,
 		Renderer: NewRenderer(rand.New(rand.NewSource(1))),
 		Script:   NewSandbox(SandboxOptions{Timeout: 50 * time.Millisecond, Bot: bot}),
-		Cooldown: NewCooldown(ratelimit.NewInterval(0), time.Now),
 	})
 
 	r := Rule{Name: "死循环", Do: []Action{{Type: ActionScript, Script: `while(true){}`}}}

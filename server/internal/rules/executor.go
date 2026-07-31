@@ -16,7 +16,6 @@ type ExecutorOptions struct {
 	Bot               BotAPI
 	Renderer          *Renderer
 	Script            *Sandbox
-	Cooldown          *Cooldown
 	DefaultBlockHours int
 	Logger            *slog.Logger
 }
@@ -26,7 +25,6 @@ type Executor struct {
 	bot        BotAPI
 	renderer   *Renderer
 	script     *Sandbox
-	cooldown   *Cooldown
 	blockHours int
 	log        *slog.Logger
 }
@@ -43,7 +41,6 @@ func NewExecutor(opts ExecutorOptions) *Executor {
 		bot:        opts.Bot,
 		renderer:   opts.Renderer,
 		script:     opts.Script,
-		cooldown:   opts.Cooldown,
 		blockHours: opts.DefaultBlockHours,
 		log:        opts.Logger,
 	}
@@ -105,12 +102,8 @@ func (e *Executor) sendDanmaku(ctx context.Context, a Action, tr Trigger) error 
 		return nil
 	}
 
-	// 全局限流在真正发送前等待
-	if e.cooldown != nil {
-		if err := e.cooldown.WaitGlobal(ctx); err != nil {
-			return err
-		}
-	}
+	// 账号级发送限流由 BotAPI 的实现负责（见 account.Binding），
+	// 这里不再重复等待，否则实际间隔会翻倍。
 	return e.bot.SendDanmaku(text)
 }
 
@@ -134,11 +127,6 @@ func (e *Executor) blockUsers(ctx context.Context, a Action, tr Trigger) error {
 
 	var errs []error
 	for _, uid := range uids {
-		if e.cooldown != nil {
-			if err := e.cooldown.WaitGlobal(ctx); err != nil {
-				return err
-			}
-		}
 		if err := e.bot.Block(uid, hours); err != nil {
 			errs = append(errs, fmt.Errorf("禁言 %s 失败: %w", uid, err))
 		}
