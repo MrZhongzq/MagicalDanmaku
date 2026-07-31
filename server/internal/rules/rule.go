@@ -186,15 +186,38 @@ func (a Action) Validate() error {
 }
 
 // AggregateSpec 描述如何合并窗口内的事件。
+//
+// 窗口是滚动的：每来一个新事件就重置静默计时，因此「3 分钟内陆续进场」
+// 会被算作同一批。持续有人进场时静默期永不到来，故用 MaxWait 兜底。
 type AggregateSpec struct {
-	Window time.Duration // 缓冲时长
-	By     AggregateBy   // 分组键
+	// Window 是静默时长：最后一个事件之后再等这么久就结算。
+	Window time.Duration
+
+	// MaxWait 是从首个事件起的最长等待，0 表示不设上限。
+	//
+	// 注意这是个陷阱：活跃房间里若 Window 设得较长（如 3 分钟）又不设
+	// MaxWait，会因为总有人进场、静默期永不到来而一直不结算。
+	// 房间越热闹越该设它。
+	MaxWait time.Duration
+
+	// MinCount 是启用合并所需的最小条目数。
+	// 未达到时不合并，每个条目各自产出一条 Trigger。
+	// 0 或 1 表示总是合并。
+	MinCount int
+
+	By AggregateBy // 分组键
 }
 
 // Validate 校验合并规格。
 func (s AggregateSpec) Validate() error {
 	if s.Window <= 0 {
 		return fmt.Errorf("合并窗口必须大于 0")
+	}
+	if s.MaxWait > 0 && s.MaxWait < s.Window {
+		return fmt.Errorf("maxWait(%v) 不能小于 window(%v)", s.MaxWait, s.Window)
+	}
+	if s.MinCount < 0 {
+		return fmt.Errorf("minCount 不能为负")
 	}
 	switch s.By {
 	case AggregateByType, AggregateByUser, AggregateByGift:

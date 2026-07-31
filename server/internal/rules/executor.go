@@ -54,7 +54,7 @@ func (e *Executor) Execute(ctx context.Context, r Rule, tr Trigger) error {
 	var errs []error
 
 	for i, a := range r.Do {
-		if err := e.runAction(ctx, a, tr); err != nil {
+		if err := e.runAction(ctx, r.Name, a, tr); err != nil {
 			e.log.Warn("动作执行失败",
 				"rule", r.Name, "action", i+1, "type", a.Type, "err", err)
 			errs = append(errs, fmt.Errorf("第 %d 个动作(%s): %w", i+1, a.Type, err))
@@ -67,20 +67,21 @@ func (e *Executor) Execute(ctx context.Context, r Rule, tr Trigger) error {
 	return nil
 }
 
-// runAction 执行单个动作。
-func (e *Executor) runAction(ctx context.Context, a Action, tr Trigger) error {
+// runAction 执行单个动作。ruleName 仅用于日志。
+func (e *Executor) runAction(ctx context.Context, ruleName string, a Action, tr Trigger) error {
 	switch a.Type {
 	case ActionDanmaku:
-		return e.sendDanmaku(ctx, a, tr)
+		return e.sendDanmaku(ctx, ruleName, a, tr)
 	case ActionBlock:
-		return e.blockUsers(ctx, a, tr)
+		return e.blockUsers(ctx, ruleName, a, tr)
 	case ActionScript:
 		if e.script == nil {
 			return errors.New("rules: 未配置脚本沙箱")
 		}
 		return e.script.RunAction(a.Script, tr.Vars)
 	case ActionLog:
-		e.log.Info("规则触发", "type", tr.Type, "count", tr.Vars["count"], "vars", tr.Vars)
+		e.log.Info("规则触发", "rule", ruleName, "type", tr.Type,
+			"count", tr.Vars["count"], "vars", tr.Vars)
 		return nil
 	default:
 		return fmt.Errorf("rules: 未知的动作类型 %q", a.Type)
@@ -88,7 +89,7 @@ func (e *Executor) runAction(ctx context.Context, a Action, tr Trigger) error {
 }
 
 // sendDanmaku 渲染模板并发送弹幕。
-func (e *Executor) sendDanmaku(ctx context.Context, a Action, tr Trigger) error {
+func (e *Executor) sendDanmaku(ctx context.Context, ruleName string, a Action, tr Trigger) error {
 	if e.bot == nil {
 		return errors.New("rules: 未配置机器人接口")
 	}
@@ -104,13 +105,18 @@ func (e *Executor) sendDanmaku(ctx context.Context, a Action, tr Trigger) error 
 
 	// 账号级发送限流由 BotAPI 的实现负责（见 account.Binding），
 	// 这里不再重复等待，否则实际间隔会翻倍。
-	return e.bot.SendDanmaku(text)
+	if err := e.bot.SendDanmaku(text); err != nil {
+		return err
+	}
+	// 成功也记日志：运维时若只有出错才有输出，就无从知道机器人在做什么。
+	e.log.Info("已发送弹幕", "rule", ruleName, "text", text)
+	return nil
 }
 
 // blockUsers 禁言 Trigger 涉及的全部用户。
 //
 // 合并后的 Trigger 可能包含多个用户，逐个禁言。
-func (e *Executor) blockUsers(ctx context.Context, a Action, tr Trigger) error {
+func (e *Executor) blockUsers(ctx context.Context, ruleName string, a Action, tr Trigger) error {
 	if e.bot == nil {
 		return errors.New("rules: 未配置机器人接口")
 	}
@@ -129,7 +135,9 @@ func (e *Executor) blockUsers(ctx context.Context, a Action, tr Trigger) error {
 	for _, uid := range uids {
 		if err := e.bot.Block(uid, hours); err != nil {
 			errs = append(errs, fmt.Errorf("禁言 %s 失败: %w", uid, err))
+			continue
 		}
+		e.log.Info("已禁言用户", "rule", ruleName, "uid", uid, "hours", hours)
 	}
 	return errors.Join(errs...)
 }

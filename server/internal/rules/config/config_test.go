@@ -564,3 +564,57 @@ func TestBindingsFlattens(t *testing.T) {
 		t.Errorf("第一个绑定的规则 = %v", bs[0].Rules)
 	}
 }
+
+func TestParseAggregateRollingFields(t *testing.T) {
+	y := `
+accounts:
+  - name: A
+    cookieFile: a.txt
+    rooms:
+      - id: "1"
+        rules:
+          - name: 进场欢迎
+            on: [user_enter]
+            aggregate:
+              window: 3m
+              maxWait: 10m
+              minCount: 4
+              by: type
+            do: [{type: log}]
+`
+	c, err := Parse([]byte(y))
+	if err != nil {
+		t.Fatalf("Parse 失败: %v", err)
+	}
+	a := c.Accounts[0].Rooms[0].Rules[0].Aggregate
+	if a == nil {
+		t.Fatal("Aggregate 不应为 nil")
+	}
+	if a.Window != 3*time.Minute {
+		t.Errorf("Window = %v", a.Window)
+	}
+	if a.MaxWait != 10*time.Minute {
+		t.Errorf("MaxWait = %v", a.MaxWait)
+	}
+	if a.MinCount != 4 {
+		t.Errorf("MinCount = %d", a.MinCount)
+	}
+}
+
+func TestParseRejectsMaxWaitSmallerThanWindow(t *testing.T) {
+	y := `
+accounts:
+  - name: A
+    cookieFile: a.txt
+    rooms:
+      - id: "1"
+        rules:
+          - name: 坏合并
+            on: [user_enter]
+            aggregate: {window: 3m, maxWait: 10s, by: type}
+            do: [{type: log}]
+`
+	if _, err := Parse([]byte(y)); err == nil {
+		t.Error("maxWait 小于 window 应当在加载时报错")
+	}
+}

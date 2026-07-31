@@ -137,10 +137,22 @@ users           ["甲","乙","丙"] // 去重后的用户名数组
 
 ```go
 type AggregateSpec struct {
-    Window time.Duration // 缓冲时长
-    By     string        // 分组键：type / user / gift
+    Window   time.Duration // 静默时长：最后一个事件后再等这么久就结算
+    MaxWait  time.Duration // 从首个事件起的最长等待，0 表示不设上限
+    MinCount int           // 少于此数则不合并，每条各自触发
+    By       string        // 分组键：type / user / gift
 }
 ```
+
+窗口是**滚动**的：每来一个新事件就重置静默计时，因此「3 分钟内陆续进场」
+会被算作同一批。
+
+`MaxWait` 是必需的安全阀：热闹房间里总有人进场，静默期永远不会到来，
+不设它就一直不结算。房间越活跃越该设。
+
+`MinCount` 决定人少时的行为。「一波人进场合并欢迎」只在人确实多的时候
+才有意义——单独一个人被说成「欢迎 某某」比合并句式自然。未达阈值时
+每个条目各自产出一条 Trigger，走的仍是同一条规则与模板。
 
 窗口到期时**分两步处理，顺序不可颠倒**：
 

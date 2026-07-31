@@ -100,10 +100,14 @@ func runRun(args []string) error {
 
 		// 限流统一由 account.Binding 负责，这里传空限流器，
 		// 否则与 Binding 的等待叠加会让实际间隔翻倍。
+		actions := bilibili.NewActions(rt.api, ratelimit.NewInterval(0))
+		if b.MaxLength > 0 {
+			actions.SetMaxLength(b.MaxLength)
+		}
 		binding := &account.Binding{
 			Account: rt.acc,
 			RoomID:  info.RoomID,
-			Actions: bilibili.NewActions(rt.api, ratelimit.NewInterval(0)),
+			Actions: actions,
 		}
 
 		engine, err := rules.NewEngine(rules.EngineOptions{

@@ -260,3 +260,120 @@ func TestAggregateByTypeStillSeparatesDifferentGifts(t *testing.T) {
 		t.Errorf("辣条数量 = %d, 期望 7", counts["辣条"])
 	}
 }
+
+func TestAggregateMinCountEmitsIndividually(t *testing.T) {
+	// 人数不足 minCount 时不合并，每人各出一条 Trigger
+	c := &collector{}
+	agg := NewAggregator(AggregateSpec{
+		Window: time.Hour, By: AggregateByType, MinCount: 3,
+	}, c.add)
+	defer agg.Close()
+
+	agg.Add(enterEvent("1", "甲", 0))
+	agg.Add(enterEvent("2", "乙", 0))
+	agg.Flush()
+
+	got := c.all()
+	if len(got) != 2 {
+		t.Fatalf("人数 2 < minCount 3，应各出一条，实际 %d 条", len(got))
+	}
+	for i, tr := range got {
+		if cnt, _ := LookupPath(tr.Vars, "count"); cnt != 1 {
+			t.Errorf("第 %d 条的 count = %v, 期望 1", i+1, cnt)
+		}
+		if users := tr.Vars["users"].([]string); len(users) != 1 {
+			t.Errorf("第 %d 条的 users = %v, 期望单人", i+1, users)
+		}
+	}
+}
+
+func TestAggregateMinCountMergesWhenEnough(t *testing.T) {
+	c := &collector{}
+	agg := NewAggregator(AggregateSpec{
+		Window: time.Hour, By: AggregateByType, MinCount: 3,
+	}, c.add)
+	defer agg.Close()
+
+	agg.Add(enterEvent("1", "甲", 0))
+	agg.Add(enterEvent("2", "乙", 0))
+	agg.Add(enterEvent("3", "丙", 0))
+	agg.Flush()
+
+	got := c.all()
+	if len(got) != 1 {
+		t.Fatalf("人数 3 >= minCount 3，应合并为一条，实际 %d 条", len(got))
+	}
+	if cnt, _ := LookupPath(got[0].Vars, "count"); cnt != 3 {
+		t.Errorf("count = %v, 期望 3", cnt)
+	}
+}
+
+func TestAggregateMinCountZeroAlwaysMerges(t *testing.T) {
+	c := &collector{}
+	agg := NewAggregator(AggregateSpec{Window: time.Hour, By: AggregateByType}, c.add)
+	defer agg.Close()
+
+	agg.Add(enterEvent("1", "甲", 0))
+	agg.Flush()
+
+	if got := c.all(); len(got) != 1 {
+		t.Errorf("未设 minCount 时单人也应走合并路径，实际 %d 条", len(got))
+	}
+}
+
+func TestAggregateRollingWindowExtends(t *testing.T) {
+	// 滚动：每来一个事件就重置静默计时，持续有人时不断延后结算
+	c := &collector{}
+	agg := NewAggregator(AggregateSpec{
+		Window: 80 * time.Millisecond, By: AggregateByType,
+	}, c.add)
+	defer agg.Close()
+
+	agg.Add(enterEvent("1", "甲", 0))
+	time.Sleep(50 * time.Millisecond)
+	agg.Add(enterEvent("2", "乙", 0)) // 重置计时
+	time.Sleep(50 * time.Millisecond)
+	agg.Add(enterEvent("3", "丙", 0)) // 再次重置
+
+	// 此刻已过 100ms，若非滚动早该结算了
+	if got := c.all(); len(got) != 0 {
+		t.Fatalf("滚动窗口应被不断延后，实际已产出 %d 条", len(got))
+	}
+
+	time.Sleep(150 * time.Millisecond) // 静默超过 window
+	got := c.all()
+	if len(got) != 1 {
+		t.Fatalf("静默后应结算，实际 %d 条", len(got))
+	}
+	if cnt, _ := LookupPath(got[0].Vars, "count"); cnt != 3 {
+		t.Errorf("count = %v, 期望三人合并", cnt)
+	}
+}
+
+func TestAggregateMaxWaitCapsRolling(t *testing.T) {
+	// 持续有人进场时，maxWait 兜底强制结算，避免永不触发
+	c := &collector{}
+	agg := NewAggregator(AggregateSpec{
+		Window:  100 * time.Millisecond,
+		MaxWait: 150 * time.Millisecond,
+		By:      AggregateByType,
+	}, c.add)
+	defer agg.Close()
+
+	// 每 50ms 来一个人，静默窗口永远不会到期
+	for i := 0; i < 6; i++ {
+		agg.Add(enterEvent(string(rune('1'+i)), "用户", 0))
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	if got := c.all(); len(got) == 0 {
+		t.Fatal("maxWait 应强制结算，实际一条未出")
+	}
+}
+
+func TestAggregateSpecValidateRejectsBadMaxWait(t *testing.T) {
+	s := AggregateSpec{Window: 5 * time.Second, MaxWait: time.Second, By: AggregateByType}
+	if err := s.Validate(); err == nil {
+		t.Error("maxWait 小于 window 应当报错")
+	}
+}

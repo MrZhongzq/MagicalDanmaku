@@ -67,12 +67,22 @@ accounts:
               field: user.guardLevel
               op: '>'
               value: 0
-            # 合并窗口：一波人同时进场只发一条。
-            # 顺带解决同一次进场的重复事件——B 站会同时下发
-            # ENTRY_EFFECT（无昵称）与 INTERACT_WORD_V2（完整），
+            # 合并窗口是滚动的：每来一个人就把结算时间往后推，
+            # 因此「3 分钟内陆续进场」会被算作同一批。
+            #
+            # maxWait 是必须的安全阀：热闹房间里总有人进场，静默期
+            # 永远不会到来，不设它就一直不结算。
+            #
+            # minCount 决定人少时的行为：不足 4 人则不合并，
+            # 每人单独欢迎——一个人被说成「欢迎 某某」比合并句式自然。
+            #
+            # 这个窗口顺带解决了同一次进场的重复事件：B 站会同时下发
+            # ENTRY_EFFECT（只有 UID）与 INTERACT_WORD_V2（含昵称），
             # 窗口内按 UID 合并后取非空昵称。
             aggregate:
-              window: 3s
+              window: 3m
+              maxWait: 5m
+              minCount: 4
               by: type
             cooldownGroup: greeting
             do:

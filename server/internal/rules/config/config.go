@@ -47,6 +47,7 @@ type Account struct {
 	Name       string
 	CookieFile string
 	RateLimit  Duration // 该账号全部直播间共享的发送间隔
+	MaxLength  int      // 单条弹幕字符上限，0 表示用默认值
 	Rooms      []Room
 }
 
@@ -62,6 +63,7 @@ type Binding struct {
 	AccountName    string
 	CookieFile     string
 	RateLimit      time.Duration
+	MaxLength      int
 	RoomID         string
 	CooldownGroups map[string]time.Duration
 	Rules          []rules.Rule
@@ -80,6 +82,7 @@ func (c *Config) Bindings() []Binding {
 				AccountName:    a.Name,
 				CookieFile:     a.CookieFile,
 				RateLimit:      time.Duration(a.RateLimit),
+				MaxLength:      a.MaxLength,
 				RoomID:         r.ID,
 				CooldownGroups: groups,
 				Rules:          r.Rules,
@@ -99,6 +102,7 @@ type accountYAML struct {
 	Name       string     `yaml:"name"`
 	CookieFile string     `yaml:"cookieFile"`
 	RateLimit  Duration   `yaml:"rateLimit"`
+	MaxLength  int        `yaml:"maxLength"`
 	Rooms      []roomYAML `yaml:"rooms"`
 }
 
@@ -131,8 +135,10 @@ type conditionYAML struct {
 }
 
 type aggregateYAML struct {
-	Window Duration `yaml:"window"`
-	By     string   `yaml:"by"`
+	Window   Duration `yaml:"window"`
+	MaxWait  Duration `yaml:"maxWait"`
+	MinCount int      `yaml:"minCount"`
+	By       string   `yaml:"by"`
 }
 
 type actionYAML struct {
@@ -221,6 +227,7 @@ func Parse(data []byte) (*Config, error) {
 			Name:       ay.Name,
 			CookieFile: ay.CookieFile,
 			RateLimit:  ay.RateLimit,
+			MaxLength:  ay.MaxLength,
 		}
 
 		seenRoom := make(map[string]bool, len(ay.Rooms))
@@ -296,8 +303,10 @@ func convertRule(ry ruleYAML) (rules.Rule, error) {
 
 	if ry.Aggregate != nil {
 		r.Aggregate = &rules.AggregateSpec{
-			Window: time.Duration(ry.Aggregate.Window),
-			By:     rules.AggregateBy(ry.Aggregate.By),
+			Window:   time.Duration(ry.Aggregate.Window),
+			MaxWait:  time.Duration(ry.Aggregate.MaxWait),
+			MinCount: ry.Aggregate.MinCount,
+			By:       rules.AggregateBy(ry.Aggregate.By),
 		}
 	}
 

@@ -21,10 +21,11 @@ type Aggregator struct {
 	spec AggregateSpec
 	out  func(Trigger)
 
-	mu      sync.Mutex
-	buckets map[string]*bucket // 键：事件类型 + UID
-	timer   *time.Timer
-	closed  bool
+	mu       sync.Mutex
+	buckets  map[string]*bucket // 键：事件类型 + UID（+ 礼物名）
+	idle     *time.Timer        // 静默计时，每来一个事件就重置
+	deadline *time.Timer        // 最长等待，从首个事件起只设一次
+	closed   bool
 }
 
 // bucket 是同一 UID 同一类型的事件累积。
@@ -70,9 +71,29 @@ func (a *Aggregator) Add(ev event.Event) {
 		accumulateGift(b.vars, ev)
 	}
 
-	// 首个事件启动窗口
-	if a.timer == nil {
-		a.timer = time.AfterFunc(a.spec.Window, a.onTimeout)
+	// 滚动：每来一个事件都把静默计时推后
+	if a.idle == nil {
+		a.idle = time.AfterFunc(a.spec.Window, a.onTimeout)
+	} else {
+		a.idle.Reset(a.spec.Window)
+	}
+
+	// 最长等待只在首个事件时设一次，防止持续进人导致永不结算。
+	// 未配置则不设上限，即纯滚动。
+	if a.spec.MaxWait > 0 && a.deadline == nil {
+		a.deadline = time.AfterFunc(a.spec.MaxWait, a.onTimeout)
+	}
+}
+
+// stopTimersLocked 停掉两个计时器。调用者需持有锁。
+func (a *Aggregator) stopTimersLocked() {
+	if a.idle != nil {
+		a.idle.Stop()
+		a.idle = nil
+	}
+	if a.deadline != nil {
+		a.deadline.Stop()
+		a.deadline = nil
 	}
 }
 
@@ -90,10 +111,7 @@ func (a *Aggregator) onTimeout() {
 // Flush 立即结算当前窗口。
 func (a *Aggregator) Flush() {
 	a.mu.Lock()
-	if a.timer != nil {
-		a.timer.Stop()
-		a.timer = nil
-	}
+	a.stopTimersLocked()
 	triggers := a.drainLocked()
 	a.mu.Unlock()
 
@@ -110,10 +128,7 @@ func (a *Aggregator) Close() {
 		return
 	}
 	a.closed = true
-	if a.timer != nil {
-		a.timer.Stop()
-		a.timer = nil
-	}
+	a.stopTimersLocked()
 	triggers := a.drainLocked()
 	a.mu.Unlock()
 
@@ -125,7 +140,7 @@ func (a *Aggregator) Close() {
 // drainLocked 清空缓冲区并按 By 分组产出 Trigger。调用者需持有锁。
 func (a *Aggregator) drainLocked() []Trigger {
 	if len(a.buckets) == 0 {
-		a.timer = nil
+		a.stopTimersLocked()
 		return nil
 	}
 
@@ -134,7 +149,7 @@ func (a *Aggregator) drainLocked() []Trigger {
 		buckets = append(buckets, b)
 	}
 	a.buckets = make(map[string]*bucket)
-	a.timer = nil
+	a.stopTimersLocked()
 
 	// 按首次出现顺序排序，保证 users 数组顺序稳定可预测
 	sortBucketsBySeq(buckets)
@@ -148,6 +163,17 @@ func (a *Aggregator) drainLocked() []Trigger {
 			order = append(order, g)
 		}
 		groups[g] = append(groups[g], b)
+	}
+
+	// MinCount 未达标时不合并，每个条目各出一条 Trigger。
+	// 「一波人进场合并欢迎」只在人确实多的时候才有意义，
+	// 单独一个人被说成「欢迎 某某」比合并句式自然。
+	if a.spec.MinCount > 1 && len(buckets) < a.spec.MinCount {
+		out := make([]Trigger, 0, len(buckets))
+		for _, b := range buckets {
+			out = append(out, mergeBuckets([]*bucket{b}))
+		}
+		return out
 	}
 
 	out := make([]Trigger, 0, len(order))

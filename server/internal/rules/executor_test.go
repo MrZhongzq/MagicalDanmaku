@@ -3,6 +3,8 @@ package rules
 import (
 	"context"
 	"errors"
+	"fmt"
+	"log/slog"
 	"math/rand"
 	"strings"
 	"sync"
@@ -267,5 +269,114 @@ func TestExecuteScriptTimeoutIsReported(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "超时") {
 		t.Errorf("错误信息应提及超时，实际 %v", err)
+	}
+}
+
+// capturingHandler 捕获 slog 输出，用于断言日志行为。
+type capturingHandler struct {
+	mu      sync.Mutex
+	records []string
+}
+
+func (h *capturingHandler) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h *capturingHandler) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	line := r.Message
+	r.Attrs(func(a slog.Attr) bool {
+		line += " " + a.Key + "=" + fmt.Sprint(a.Value.Any())
+		return true
+	})
+	h.records = append(h.records, line)
+	return nil
+}
+
+func (h *capturingHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *capturingHandler) WithGroup(string) slog.Handler      { return h }
+
+func (h *capturingHandler) all() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	out := make([]string, len(h.records))
+	copy(out, h.records)
+	return out
+}
+
+func TestExecuteLogsSuccessfulSend(t *testing.T) {
+	// 只有出错才记日志的话，运维时无从知道机器人在做什么
+	h := &capturingHandler{}
+	bot := &failingBot{}
+	ex := NewExecutor(ExecutorOptions{
+		Bot:      bot,
+		Renderer: NewRenderer(rand.New(rand.NewSource(1))),
+		Logger:   slog.New(h),
+	})
+
+	r := Rule{Name: "进场欢迎", Do: []Action{
+		{Type: ActionDanmaku, Template: []string{"欢迎 {{.user.username}}"}},
+	}}
+	if err := ex.Execute(context.Background(), r, enterTrigger("1", "甲")); err != nil {
+		t.Fatalf("Execute 失败: %v", err)
+	}
+
+	var found bool
+	for _, line := range h.all() {
+		if strings.Contains(line, "已发送弹幕") &&
+			strings.Contains(line, "进场欢迎") &&
+			strings.Contains(line, "欢迎 甲") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("成功发送应记日志且含规则名与内容，实际日志:\n%v", h.all())
+	}
+}
+
+func TestExecuteLogsSuccessfulBlock(t *testing.T) {
+	h := &capturingHandler{}
+	bot := &failingBot{}
+	ex := NewExecutor(ExecutorOptions{
+		Bot:      bot,
+		Renderer: NewRenderer(rand.New(rand.NewSource(1))),
+		Logger:   slog.New(h),
+	})
+
+	r := Rule{Name: "广告禁言", Do: []Action{{Type: ActionBlock, Hours: 2}}}
+	if err := ex.Execute(context.Background(), r, enterTrigger("999", "坏人")); err != nil {
+		t.Fatalf("Execute 失败: %v", err)
+	}
+
+	var found bool
+	for _, line := range h.all() {
+		if strings.Contains(line, "已禁言用户") && strings.Contains(line, "999") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("成功禁言应记日志，实际日志:\n%v", h.all())
+	}
+}
+
+func TestExecuteDoesNotLogSkippedEmptyRender(t *testing.T) {
+	// 渲染为空时静默跳过，不该谎报「已发送」
+	h := &capturingHandler{}
+	ex := NewExecutor(ExecutorOptions{
+		Bot:      &failingBot{},
+		Renderer: NewRenderer(rand.New(rand.NewSource(1))),
+		Logger:   slog.New(h),
+	})
+
+	r := Rule{Name: "空模板", Do: []Action{
+		{Type: ActionDanmaku, Template: []string{"{{.不存在}}"}},
+	}}
+	if err := ex.Execute(context.Background(), r, enterTrigger("1", "甲")); err != nil {
+		t.Fatalf("Execute 失败: %v", err)
+	}
+
+	for _, line := range h.all() {
+		if strings.Contains(line, "已发送弹幕") {
+			t.Errorf("未真正发送时不该记「已发送」，实际: %q", line)
+		}
 	}
 }
