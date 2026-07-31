@@ -43,6 +43,20 @@ func (s *Server) requirePerm(p perm.Permission, h http.HandlerFunc) http.Handler
 			return
 		}
 		if !ok {
+			// 403 会带上 b.Label()（账号名@房间号），对一个连这个绑定
+			// 存不存在都不该知道的调用者来说，这个 403 本身就是泄漏。
+			// 只有对该绑定已有可见性的调用者才配收到带标签的 403；
+			// 完全没有可见性的调用者要收到和「绑定不存在」完全一样的 404，
+			// 二者不可区分——设计文档 §5 的要求。
+			visible, err := s.canSeeBinding(r.Context(), u, b)
+			if err != nil {
+				respondStoreError(w, err, "")
+				return
+			}
+			if !visible {
+				respondError(w, http.StatusNotFound, "绑定不存在")
+				return
+			}
 			respondError(w, http.StatusForbidden, "你在 %s 上没有 %s 权限", b.Label(), p)
 			return
 		}
@@ -74,6 +88,41 @@ func (s *Server) bindingByID(ctx context.Context, id int64) (*store.Binding, err
 		}
 	}
 	return nil, fmt.Errorf("store: 绑定 %d 不存在: %w", id, store.ErrNotFound)
+}
+
+// canSeeBinding 判断调用者对某一个绑定是否有任意可见性。
+//
+// 可见 = 管理员，或该绑定所属账号的所有者，或在该绑定上有任意授权
+// 记录（不论具体权限点是什么）。判定标准与 visibleBindings 完全
+// 一致，因为二者回答的是同一个问题——只是这里只查一个绑定，不必
+// 为了判断一个绑定就拉取并过滤全部绑定列表。
+//
+// requirePerm 用它决定 Can 返回 false 之后该回 404 还是 403：
+// 完全不可见 → 404（与「绑定不存在」不可区分）；
+// 可见但缺这一个权限点 → 403（对方已经知道这个绑定存在，不算泄漏）。
+func (s *Server) canSeeBinding(ctx context.Context, u *store.User, b *store.Binding) (bool, error) {
+	if u.IsAdmin {
+		return true, nil
+	}
+
+	owned, err := s.ownedAccountNames(ctx, u)
+	if err != nil {
+		return false, err
+	}
+	if owned[b.AccountName] {
+		return true, nil
+	}
+
+	ms, err := s.store.ListMemberships(ctx, u.Username)
+	if err != nil {
+		return false, err
+	}
+	for _, m := range ms {
+		if m.BindingID == b.ID {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // visibleBindings 返回调用者能看到的绑定。

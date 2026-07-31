@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -34,6 +35,12 @@ func mustBindingFor(t *testing.T, st *store.Store, ownerName, accountName, roomI
 	return b.ID
 }
 
+// 李四对这个绑定毫无可见性：不是所有者、没有任何授权记录、不是管理员。
+//
+// 期望值是 404 而不是 403：设计文档 §5 要求「不存在」与「对调用者
+// 不可见」返回不可区分的响应，否则调用者能靠 403 vs 404 的差异
+// 把 {binding} 从 1 遍历到 N，收集出全部账号名与房间号。
+// 这条测试原先断言 403，是本次修复前遗留的错误期望值。
 func TestGuardRejectsWithoutPermission(t *testing.T) {
 	srv, st := newTestServer(t)
 	owner := loginAs(t, srv, st, "张三", false)
@@ -45,8 +52,46 @@ func TestGuardRejectsWithoutPermission(t *testing.T) {
 	resp := jsonRequest(t, li, "GET", srv.URL+"/api/test/guarded/"+itoa(bid), "")
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusForbidden {
-		t.Errorf("无授权访问状态码 = %d, 期望 403", resp.StatusCode)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("无可见性访问状态码 = %d, 期望 404", resp.StatusCode)
+	}
+	var body map[string]string
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("解析报错: %v", err)
+	}
+	if strings.Contains(body["error"], "小号") || strings.Contains(body["error"], "123") {
+		t.Errorf("404 响应体不该泄漏账号名或房间号: %q", body["error"])
+	}
+}
+
+// 在其他绑定上有授权，不代表对这个绑定有可见性；那种用户访问应该
+// 和完全陌生的用户一样收到 404，且响应体不带任何标签信息。
+func TestGuardNoVisibilityOnThisBindingHidesLabel(t *testing.T) {
+	srv, st := newTestServer(t)
+	loginAs(t, srv, st, "张三", false)
+	loginAs(t, srv, st, "王五", false)
+	bidZhang := mustBindingFor(t, st, "张三", "张三的号", "111")
+	mustBindingFor(t, st, "王五", "王五的号", "222")
+
+	li := loginAs(t, srv, st, "李四", false)
+	if err := st.Grant(context.Background(), "李四", "王五的号", "222",
+		[]perm.Permission{perm.RuleRead}); err != nil {
+		t.Fatalf("授权报错: %v", err)
+	}
+
+	// 李四对张三的绑定毫无可见性（他被授权的是王五的绑定）
+	resp := jsonRequest(t, li, "GET", srv.URL+"/api/test/guarded/"+itoa(bidZhang), "")
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("状态码 = %d, 期望 404", resp.StatusCode)
+	}
+	var body map[string]string
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("解析报错: %v", err)
+	}
+	if strings.Contains(body["error"], "张三的号") || strings.Contains(body["error"], "111") {
+		t.Errorf("404 响应体泄漏了账号名或房间号: %q", body["error"])
 	}
 }
 
@@ -105,6 +150,31 @@ func TestGuardUnknownBinding(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("不存在的绑定状态码 = %d, 期望 404", resp.StatusCode)
+	}
+}
+
+// 处理器自己写的「绑定不存在」文案不能被 withNotFoundJSON 中间件
+// 改写成「接口 GET /xxx 不存在」。中间件只应替换 ServeMux 兜底的
+// 纯文本 404/405，不该吞掉处理器已经写好的响应体。
+func TestGuardUnknownBindingKeepsHandlerMessage(t *testing.T) {
+	srv, st := newTestServer(t)
+	admin := loginAs(t, srv, st, "管理员", true)
+
+	resp := jsonRequest(t, admin, "GET", srv.URL+"/api/test/guarded/999999", "")
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("状态码 = %d, 期望 404", resp.StatusCode)
+	}
+	var body map[string]string
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("解析报错: %v", err)
+	}
+	if !strings.Contains(body["error"], "绑定") {
+		t.Errorf("响应体应包含处理器自己写的「绑定」文案，实际 = %q", body["error"])
+	}
+	if strings.Contains(body["error"], "接口") {
+		t.Errorf("响应体被中间件改写成了「接口不存在」，处理器的文案丢了: %q", body["error"])
 	}
 }
 
