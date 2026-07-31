@@ -74,6 +74,31 @@ func TestListBindingsAdminGetsAllPermissions(t *testing.T) {
 	}
 }
 
+// 所有者在自己的绑定上应看到全部权限点。
+//
+// 若这里返回 []，前端会把按钮全灰掉，而 PATCH 其实能成——
+// 「列表说没权限、请求却成了」比直接报错更难查。
+func TestListBindingsGivesOwnerAllPermissions(t *testing.T) {
+	srv, st := newTestServer(t)
+	c := loginAs(t, srv, st, "张三", false)
+	mustBindingFor(t, st, "张三", "小号", "123")
+
+	resp := jsonRequest(t, c, "GET", srv.URL+"/api/bindings", "")
+	defer resp.Body.Close()
+
+	var got []bindingView
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("解析报错: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("绑定数 = %d, 期望 1", len(got))
+	}
+	if len(got[0].Permissions) != len(perm.All()) {
+		t.Errorf("所有者的权限点 = %v, 期望全部 %d 个",
+			got[0].Permissions, len(perm.All()))
+	}
+}
+
 func TestCreateBinding(t *testing.T) {
 	srv, st := newTestServer(t)
 	c := loginAs(t, srv, st, "张三", false)

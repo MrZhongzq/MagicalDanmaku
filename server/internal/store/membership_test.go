@@ -279,6 +279,59 @@ func TestListBindingMembers(t *testing.T) {
 	}
 }
 
+// 账号所有者对自己账号下的绑定拥有全部权限点。
+//
+// 所有者已经能删账号、删绑定、换 Cookie。不给他 rule:write 的话，
+// 他能把绑定整个删掉却不能把它停用——那是不一致，不是安全。
+func TestOwnerHasAllPermissionsOnOwnBindings(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	owner := mustUser(t, s, "张三")
+	a, err := s.CreateAccount(ctx, AccountInput{
+		Name: "主播号", Cookie: "c", OwnerID: owner,
+	})
+	if err != nil {
+		t.Fatalf("创建账号报错: %v", err)
+	}
+	b, err := s.UpsertBinding(ctx, a.ID, "123")
+	if err != nil {
+		t.Fatalf("创建绑定报错: %v", err)
+	}
+
+	// 所有者没有任何 memberships 行
+	for _, p := range perm.All() {
+		ok, err := s.Can(ctx, owner, b.ID, p)
+		if err != nil {
+			t.Fatalf("Can(%s) 报错: %v", p, err)
+		}
+		if !ok {
+			t.Errorf("所有者应拥有 %s", p)
+		}
+	}
+}
+
+// 所有权不跨账号：拥有甲账号不等于能碰乙账号的绑定
+func TestOwnershipDoesNotLeakAcrossAccounts(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	zhang := mustUser(t, s, "张三")
+	other := mustAccount(t, s, "别人的号") // mustAccount 建的所有者是 owner_别人的号
+	b, err := s.UpsertBinding(ctx, other, "999")
+	if err != nil {
+		t.Fatalf("创建绑定报错: %v", err)
+	}
+
+	ok, err := s.Can(ctx, zhang, b.ID, perm.RuleWrite)
+	if err != nil {
+		t.Fatalf("Can 报错: %v", err)
+	}
+	if ok {
+		t.Error("拥有别的账号不该给你这个账号的绑定上的权限")
+	}
+}
+
 func TestDeletingUserRemovesMemberships(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
