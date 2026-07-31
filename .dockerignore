@@ -1,0 +1,12 @@
+.git
+.github
+.superpowers
+docs
+web
+server
+scripts
+*.md
+*.yaml
+*.yml
+cookie*.txt
+dump*.jsonl
