@@ -154,6 +154,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET "+bl, s.requirePerm(perm.UserBlock, s.handleListBlockList))
 	s.mux.HandleFunc("POST "+bl, s.requirePerm(perm.UserBlock, s.handleAddToBlockList))
 	s.mux.HandleFunc("DELETE "+bl+"/{uid}", s.requirePerm(perm.UserBlock, s.handleRemoveFromBlockList))
+
+	// 业务日志：事件与动作在同一条时间线，走 event:read。
+	s.mux.HandleFunc("GET /api/bindings/{binding}/activity",
+		s.requirePerm(perm.EventRead, s.handleQueryActivity))
 }
 
 // testRoutes 注册仅供测试用的路由（/api/test/*）。
