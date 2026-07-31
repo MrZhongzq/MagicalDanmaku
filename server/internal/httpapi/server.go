@@ -143,6 +143,17 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("PUT "+rules+"/{name}", s.requirePerm(perm.RuleWrite, s.handlePutRule))
 	s.mux.HandleFunc("PATCH "+rules+"/{name}", s.requirePerm(perm.RuleWrite, s.handlePatchRule))
 	s.mux.HandleFunc("DELETE "+rules+"/{name}", s.requirePerm(perm.RuleWrite, s.handleDeleteRule))
+
+	// 冷却组：读走 rule:read，写走 rule:write。
+	cd := "/api/bindings/{binding}/cooldown-groups"
+	s.mux.HandleFunc("GET "+cd, s.requirePerm(perm.RuleRead, s.handleGetCooldownGroups))
+	s.mux.HandleFunc("PUT "+cd, s.requirePerm(perm.RuleWrite, s.handlePutCooldownGroups))
+
+	// 禁言名单：全部走 user:block。
+	bl := "/api/bindings/{binding}/blocklist"
+	s.mux.HandleFunc("GET "+bl, s.requirePerm(perm.UserBlock, s.handleListBlockList))
+	s.mux.HandleFunc("POST "+bl, s.requirePerm(perm.UserBlock, s.handleAddToBlockList))
+	s.mux.HandleFunc("DELETE "+bl+"/{uid}", s.requirePerm(perm.UserBlock, s.handleRemoveFromBlockList))
 }
 
 // testRoutes 注册仅供测试用的路由（/api/test/*）。

@@ -4,6 +4,9 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"sort"
+	"strings"
+	"time"
 
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/rules/spec"
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/store"
@@ -237,4 +240,88 @@ func (s *Server) handleDeleteRule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	respondJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// maxCooldownMS 是单个冷却组间隔的上限，24 小时。
+//
+// 存在的理由不是「谁会设这么长」，而是 time.Duration 是 int64 纳秒：
+// 毫秒数超过约 9.2e12 时 `time.Duration(ms) * time.Millisecond` 会溢出
+// 成负数，绕过「不能为负」那道检查。有了上界，那条路就走不通了。
+const maxCooldownMS int64 = 24 * 60 * 60 * 1000
+
+// handleGetCooldownGroups 返回冷却组，值是毫秒。
+//
+// 对外用毫秒整数而不是 "5s" 字符串：前端表单里是数字输入框，
+// 而规则体里的时长用字符串（那是给人读 YAML 用的）。两处格式不同
+// 是有意的，各自贴合自己的使用场景。
+func (s *Server) handleGetCooldownGroups(w http.ResponseWriter, r *http.Request) {
+	b := bindingFrom(r.Context())
+
+	groups, err := s.store.CooldownGroups(r.Context(), b.ID)
+	if err != nil {
+		respondStoreError(w, err, "")
+		return
+	}
+	out := make(map[string]int64, len(groups))
+	for k, v := range groups {
+		out[k] = v.Milliseconds()
+	}
+	respondJSON(w, http.StatusOK, out)
+}
+
+// handlePutCooldownGroups 整组替换冷却组。
+func (s *Server) handlePutCooldownGroups(w http.ResponseWriter, r *http.Request) {
+	b := bindingFrom(r.Context())
+
+	var req map[string]int64
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+
+	// 遍历 map 的顺序是随机的，先排序再校验——否则同时有两条非法时
+	// 报的是哪一条每次都不一样，用户按报错改完一条又冒出另一条
+	names := make([]string, 0, len(req))
+	for name := range req {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	groups := make(map[string]time.Duration, len(req))
+	for _, name := range names {
+		ms := req[name]
+
+		// 存 trim 过的名字，不是原样存。规则体里写的是 cooldownGroup: 甲，
+		// 这边存成 "  甲  " 就永远匹配不上，而且不报任何错——
+		// 用户只会看到「冷却怎么不生效」
+		key := strings.TrimSpace(name)
+		if key == "" {
+			respondError(w, http.StatusUnprocessableEntity, "冷却组名不能为空")
+			return
+		}
+		if ms < 0 {
+			respondError(w, http.StatusUnprocessableEntity, "冷却组 %s 的间隔不能为负", key)
+			return
+		}
+		// 上界不是洁癖。time.Duration 是 int64 纳秒，ms 超过约 9.2e12
+		// 时 `time.Duration(ms) * time.Millisecond` 会溢出成负数，
+		// **绕过上面那行 ms < 0**，把负冷却写进库
+		if ms > maxCooldownMS {
+			respondError(w, http.StatusUnprocessableEntity,
+				"冷却组 %s 的间隔 %d 毫秒超过上限（%d 毫秒，即 24 小时）",
+				key, ms, int64(maxCooldownMS))
+			return
+		}
+		if _, dup := groups[key]; dup {
+			respondError(w, http.StatusUnprocessableEntity,
+				"冷却组名 %s 重复（首尾空白不算区别）", key)
+			return
+		}
+		groups[key] = time.Duration(ms) * time.Millisecond
+	}
+
+	if err := s.store.SetCooldownGroups(r.Context(), b.ID, groups); err != nil {
+		respondStoreError(w, err, "")
+		return
+	}
+	respondJSON(w, http.StatusOK, map[string]int{"count": len(groups)})
 }
