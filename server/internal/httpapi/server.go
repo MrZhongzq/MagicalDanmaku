@@ -133,6 +133,16 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/bindings", s.requireAuth(s.handleCreateBinding))
 	s.mux.HandleFunc("PATCH /api/bindings/{binding}", s.requirePerm(perm.RuleWrite, s.handlePatchBinding))
 	s.mux.HandleFunc("DELETE /api/bindings/{binding}", s.requireAuth(s.handleDeleteBinding))
+
+	// 规则。读走 rule:read，一切写操作走 rule:write。
+	rules := "/api/bindings/{binding}/rules"
+	s.mux.HandleFunc("GET "+rules, s.requirePerm(perm.RuleRead, s.handleListRules))
+	s.mux.HandleFunc("POST "+rules, s.requirePerm(perm.RuleWrite, s.handleCreateRule))
+	s.mux.HandleFunc("PUT "+rules, s.requirePerm(perm.RuleWrite, s.handleReplaceRules))
+	s.mux.HandleFunc("POST "+rules+"/validate", s.requirePerm(perm.RuleRead, s.handleValidateRule))
+	s.mux.HandleFunc("PUT "+rules+"/{name}", s.requirePerm(perm.RuleWrite, s.handlePutRule))
+	s.mux.HandleFunc("PATCH "+rules+"/{name}", s.requirePerm(perm.RuleWrite, s.handlePatchRule))
+	s.mux.HandleFunc("DELETE "+rules+"/{name}", s.requirePerm(perm.RuleWrite, s.handleDeleteRule))
 }
 
 // testRoutes 注册仅供测试用的路由（/api/test/*）。
