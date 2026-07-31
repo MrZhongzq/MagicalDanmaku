@@ -9,12 +9,31 @@ on:
       - "v*"
 
 permissions:
-  contents: write
+  contents: write   # 发布 Release
+  packages: write   # 推 GHCR
 
 jobs:
   release:
     name: 构建并发布
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: magicd
+          POSTGRES_PASSWORD: magicd
+          POSTGRES_DB: magicd
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U magicd"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 15
+    env:
+      # 没有这个变量，存储层测试会整包 skip 且退出码 0——
+      # 发版流程会静默跳过全部存储测试并放行，比没有测试更糟。
+      MAGICD_TEST_DATABASE_URL: postgres://magicd:magicd@localhost:5432/magicd?sslmode=disable
     steps:
       - uses: actions/checkout@v4
         with:
@@ -30,6 +49,27 @@ jobs:
       - name: 测试
         working-directory: server
         run: go test ./... -count=1
+
+      - name: 确认存储层测试真的跑了
+        working-directory: server
+        run: |
+          go test ./internal/store/ -v -count=1 -run '^TestMigrateCreatesAllTables$' 2>&1 | tee /tmp/store.log
+          if ! grep -q -- "--- PASS: TestMigrateCreatesAllTables" /tmp/store.log; then
+            echo "存储层测试没有真正执行——发版必须建立在真跑过的测试上" >&2
+            exit 1
+          fi
+
+      # arm64 镜像在 amd64 runner 上构建需要 QEMU 模拟
+      - uses: docker/setup-qemu-action@v3
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: 登录 GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: goreleaser/goreleaser-action@v6
         with:
