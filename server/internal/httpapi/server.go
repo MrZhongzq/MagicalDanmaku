@@ -122,6 +122,13 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/meta/action-types", s.requireAuth(s.handleMetaActionTypes))
 	s.mux.HandleFunc("GET /api/meta/operators", s.requireAuth(s.handleMetaOperators))
 	s.mux.HandleFunc("GET /api/meta/aggregate-by", s.requireAuth(s.handleMetaAggregateBy))
+
+	// 用户管理。改密码不走 requireAdmin，因为普通用户要能改自己的，
+	// 具体的授权判断在处理器里（这是唯一的例外，因为它不是绑定级权限）。
+	s.mux.HandleFunc("GET /api/users", s.requireAdmin(s.handleListUsers))
+	s.mux.HandleFunc("POST /api/users", s.requireAdmin(s.handleCreateUser))
+	s.mux.HandleFunc("POST /api/users/{name}/password", s.requireAuth(s.handleChangePassword))
+	s.mux.HandleFunc("DELETE /api/users/{name}", s.requireAdmin(s.handleDeleteUser))
 }
 
 // Handler 返回套好中间件的处理器。

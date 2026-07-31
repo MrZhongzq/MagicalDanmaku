@@ -162,3 +162,16 @@ func userFrom(ctx context.Context) *store.User {
 	u, _ := ctx.Value(ctxKeyUser).(*store.User)
 	return u
 }
+
+// requireAdmin 要求当前用户是管理员。
+//
+// 用于不挂在绑定上的操作：用户管理。绑定级的权限走 requirePerm。
+func (s *Server) requireAdmin(h http.HandlerFunc) http.HandlerFunc {
+	return s.requireAuth(func(w http.ResponseWriter, r *http.Request) {
+		if u := userFrom(r.Context()); u == nil || !u.IsAdmin {
+			respondError(w, http.StatusForbidden, "该操作需要管理员权限")
+			return
+		}
+		h(w, r)
+	})
+}

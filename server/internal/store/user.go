@@ -207,3 +207,24 @@ func isUniqueViolation(err error) bool {
 	var pgErr *pgconn.PgError
 	return errors.As(err, &pgErr) && pgErr.Code == "23505"
 }
+
+// DeleteUser 删除用户。
+//
+// accounts.owner_id 是 ON DELETE RESTRICT，因此还拥有 B 站账号的用户
+// 删不掉，会返回外键冲突——这是刻意的，避免留下无主的 Cookie。
+func (s *Store) DeleteUser(ctx context.Context, id int64) (int64, error) {
+	tag, err := s.pool.Exec(ctx, `DELETE FROM users WHERE id = $1`, id)
+	if err != nil {
+		return 0, fmt.Errorf("store: 删除用户失败: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return 0, fmt.Errorf("store: 用户不存在: %w", ErrNotFound)
+	}
+	return tag.RowsAffected(), nil
+}
+
+// IsForeignKeyViolation 判断错误是否为外键约束冲突。
+func IsForeignKeyViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23503"
+}
