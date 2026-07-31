@@ -101,7 +101,14 @@ func (s *Server) requirePerm(p perm.Permission, h http.HandlerFunc) http.Handler
 | `member:manage` | 授权他人、撤销授权 |
 | `event:read` | 实时事件流、历史业务日志 |
 
-管理员（`users.is_admin`）绕过全部检查，这在 `store.Can` 里已经实现。
+两类人绕过权限点检查，都在 `store.Can` 里实现：
+
+- **管理员**（`users.is_admin`）——绕过全部检查
+- **账号所有者**——对自己账号下的全部绑定拥有全部权限点
+
+所有者这条不是放权。他本来就能删掉整个账号、删掉绑定（连带全部规则、冷却组、KV 与授权）、替换账号的 Cookie，唯独不能把自己的绑定停用——那是不一致而不是安全。不补上的话，非管理员用户扫码建了自己的账号就动不了它，而给自己授权又需要他同样没有的 `member:manage`。
+
+**判定顺序在三处必须一致**：`store.Can`、`guard.go` 的 `canSeeBinding`、以及绑定列表用来填 `permissions` 字段的 `permissionSet`。三者都是「管理员 → 账号所有者 → 授权行」。漂掉一处就会出现「列表说你没权限、请求却成了」，比直接报错更难查。
 
 ### 4.3 不属于绑定的资源
 
