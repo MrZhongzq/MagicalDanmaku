@@ -437,8 +437,9 @@ Go 代码放在仓库新建的 `server/` 顶层目录，C++ 代码原样保留�
 | **P0** | 协议内核 | 打印实时事件流的 CLI | — |
 | **P1** | 分发流水线 | GoReleaser + Docker buildx，8 目标一键出包 | P0 |
 | **P2** | 规则引擎 | 配置驱动的无头机器人 | P0 |
-| **P3** | 多租户数据层 | User/Account/Binding/Membership/Rule + 权限点 + 业务日志 | P2 |
-| **P4** | API + WebUI | 完整 Web 管理界面 | P3 |
+| **P3** | 多租户数据层 | User/Account/Binding/Membership/Rule + 权限点 + 业务日志 | P2 | ✅ 完成，见 `2026-08-01-p3-completion-notes.md` |
+| **P4-1** | HTTP API | 可用 curl 完整驱动的 API，含会话认证与权限守卫 | P3 |
+| **P4-2** | WebUI | Vue3 管理界面 | P4-1 |
 | **P5** | 数据看板 | 统计聚合与图表 | P4 |
 | **P6** | PK 大乱斗 | 独立模块，订阅事件流 | P0, P2 |
 
