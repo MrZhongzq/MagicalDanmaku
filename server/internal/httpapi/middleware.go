@@ -4,7 +4,6 @@ import (
 	"context"
 	"net/http"
 	"runtime/debug"
-	"strings"
 	"time"
 
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/store"
@@ -45,6 +44,10 @@ func (rec *statusRecorder) Flush() {
 		f.Flush()
 	}
 }
+
+// Unwrap 让 http.ResponseController 能够下钻到真正的 ResponseWriter。
+// SSE 需要用它设置 per-connection 的读写 deadline。
+func (rec *statusRecorder) Unwrap() http.ResponseWriter { return rec.ResponseWriter }
 
 // withRequestLog 记录每个请求。
 func (s *Server) withRequestLog(next http.Handler) http.Handler {
@@ -88,12 +91,22 @@ func (s *Server) withNotFoundJSON(next http.Handler) http.Handler {
 
 // interceptor 拦下状态码与「是否已写过响应体」，让 withNotFoundJSON
 // 能判断该不该改写。
+//
+// ours 标记这个响应是不是本包用 respondJSON 自己写出来的（见
+// jsonMarker）。ServeMux 兜底的 404/405 只会写一行纯文本，需要被
+// withNotFoundJSON 替换掉；但处理器自己算出来的 404/405（比如
+// 「绑定不存在」）已经是合法 JSON，必须原样透传，否则处理器精心
+// 写的文案会被外层统一改写成「接口 GET /xxx 不存在」。
 type interceptor struct {
 	http.ResponseWriter
 	status      int
 	wroteHeader bool
 	wroteBody   bool
+	ours        bool
 }
+
+// markJSON 实现 jsonMarker：respondJSON 调用它，标记「这是我们自己写的」。
+func (i *interceptor) markJSON() { i.ours = true }
 
 func (i *interceptor) WriteHeader(code int) {
 	if i.wroteHeader {
@@ -101,8 +114,8 @@ func (i *interceptor) WriteHeader(code int) {
 	}
 	i.status = code
 	i.wroteHeader = true
-	// 404/405 先不透传，交给外层决定怎么写
-	if code == http.StatusNotFound || code == http.StatusMethodNotAllowed {
+	// 404/405 先不透传，交给外层决定怎么写——除非是处理器自己写的响应
+	if (code == http.StatusNotFound || code == http.StatusMethodNotAllowed) && !i.ours {
 		return
 	}
 	i.ResponseWriter.WriteHeader(code)
@@ -112,11 +125,8 @@ func (i *interceptor) Write(b []byte) (int, error) {
 	if !i.wroteHeader {
 		i.WriteHeader(http.StatusOK)
 	}
-	// ServeMux 的默认 404/405 会写一行纯文本，丢掉它
-	if i.status == http.StatusNotFound || i.status == http.StatusMethodNotAllowed {
-		if strings.TrimSpace(string(b)) != "" {
-			return len(b), nil
-		}
+	// ServeMux 的默认 404/405 会写一行纯文本，丢掉它——除非是处理器自己写的响应
+	if (i.status == http.StatusNotFound || i.status == http.StatusMethodNotAllowed) && !i.ours {
 		return len(b), nil
 	}
 	i.wroteBody = true
@@ -129,6 +139,10 @@ func (i *interceptor) Flush() {
 		f.Flush()
 	}
 }
+
+// Unwrap 让 http.ResponseController 能够下钻到真正的 ResponseWriter。
+// SSE 需要用它设置 per-connection 的读写 deadline。
+func (i *interceptor) Unwrap() http.ResponseWriter { return i.ResponseWriter }
 
 // ctxKey 是本包放进 context 的键类型，避免与其他包碰撞。
 type ctxKey int
