@@ -35,15 +35,15 @@ func (r RuleRecord) Domain() (rules.Rule, error) {
 // 主体里清掉 Name 与 Enabled，因为它们已经是列。
 func splitRule(r spec.Rule) (name string, enabled bool, body []byte, err error) {
 	name = r.Name
-	enabled = true
-	if r.Enabled != nil {
-		enabled = *r.Enabled
-	}
 
-	// 转换一次，非法规则不许进库——写进去了，run 每次启动都会炸
-	if _, err := r.ToRule(); err != nil {
+	// 转换一次，非法规则不许进库——写进去了，run 每次启动都会炸。
+	// 顺带拿它算出的 Enabled 默认值：spec.Rule.ToRule() 已经算过
+	// 「未写 enabled 则默认 true」，这里不需要再算一遍。
+	dom, err := r.ToRule()
+	if err != nil {
 		return "", false, nil, fmt.Errorf("store: 规则 %q 非法: %w", name, err)
 	}
+	enabled = dom.Enabled
 
 	r.Name = ""
 	r.Enabled = nil
