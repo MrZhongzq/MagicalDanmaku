@@ -71,6 +71,11 @@ func bindingFrom(ctx context.Context) *store.Binding {
 	return b
 }
 
+// parseBindingID 从 URL 里取绑定主键。
+func parseBindingID(r *http.Request) (int64, error) {
+	return strconv.ParseInt(r.PathValue("binding"), 10, 64)
+}
+
 // bindingByID 按主键查绑定。
 //
 // P3 的 store 只提供了按「账号名+房间号」查的 GetBinding，

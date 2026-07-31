@@ -126,6 +126,13 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/accounts/qrcode/{key}", s.requireAuth(s.handleQRCodePoll))
 	s.mux.HandleFunc("PATCH /api/accounts/{name}", s.requireAuth(s.handlePatchAccount))
 	s.mux.HandleFunc("DELETE /api/accounts/{name}", s.requireAuth(s.handleDeleteAccount))
+
+	// 绑定。启停走 rule:write 守卫；创建与删除是账号所有权级别的操作，
+	// 在处理器里判所有者。
+	s.mux.HandleFunc("GET /api/bindings", s.requireAuth(s.handleListBindings))
+	s.mux.HandleFunc("POST /api/bindings", s.requireAuth(s.handleCreateBinding))
+	s.mux.HandleFunc("PATCH /api/bindings/{binding}", s.requirePerm(perm.RuleWrite, s.handlePatchBinding))
+	s.mux.HandleFunc("DELETE /api/bindings/{binding}", s.requireAuth(s.handleDeleteBinding))
 }
 
 // testRoutes 注册仅供测试用的路由（/api/test/*）。
