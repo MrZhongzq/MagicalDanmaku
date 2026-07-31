@@ -258,7 +258,7 @@ const (
 func (s *Store) Can(ctx context.Context, userID, bindingID int64, p perm.Permission) (bool, error)
 ```
 
-`Can` 一次查询解决：管理员直接放行，否则查 `memberships`。P3 里由 CLI 消费，P4 里由 API 中间件消费。
+`Can` 一次查询解决：管理员直接放行，否则查 `memberships`。P4 的 API 中间件是它真正的消费者；P3 里由 `magicd can` 调用——一个核心函数搁到下个阶段才第一次被真正用上，中间很容易漂掉。
 
 ## 6. 两类日志
 
@@ -296,7 +296,7 @@ func (s *Store) Can(ctx context.Context, userID, bindingID int64, p perm.Permiss
 
 丢日志可以接受，漏欢迎不行。这个优先级要写死在代码注释里。
 
-**记录范围**：默认只记业务事件——弹幕、礼物、连击、上舰、醒目留言、进场、关注、分享、点赞、禁言；排行榜（`ONLINE_RANK_UPDATE`）与房间统计（`ROOM_STATS_UPDATE`）不记，它们每 8 秒一条且没有分析价值。可通过 `MAGICD_LOG_EVENTS` 覆盖。
+**记录范围**：只记业务事件——弹幕、礼物、连击、上舰、醒目留言、进场、关注、分享、点赞、禁言；排行榜（`ONLINE_RANK_UPDATE`）与房间统计（`ROOM_STATS_UPDATE`）不记，它们每 8 秒一条且没有分析价值。名单写死在代码里，不做成配置项——这十种就是全部有分析价值的事件，为一个没人会改的选项加环境变量不划算。代码里留了替换名单的入口，P4 真需要时再接出来。
 
 **保留期**：`MAGICD_LOG_RETENTION_DAYS`，默认 30。后台每小时清理一次超期行。0 表示不清理。
 
@@ -319,22 +319,24 @@ internal/perm/                权限点常量与校验（P4 也会 import，不�
   perm.go
 
 internal/store/               存储层
-  store.go                    Store 结构与构造
-  model.go                    User / Account / Binding / Membership / Rule 等记录类型
+  store.go                    Store 结构与连接池
+  migrate.go                  迁移器
+  migrations/001_init.sql     embed
   user.go                     用户 CRUD 与密码校验
   account.go                  账号 CRUD，Cookie 读写的唯一收口
-  binding.go                  绑定 CRUD，含载入完整运行配置
+  binding.go                  绑定与冷却组 CRUD
   rule.go                     规则 CRUD，spec JSONB 与 name/enabled 列的拆装
   membership.go               授权 CRUD 与 Can()
   kv.go                       脚本 storage
   blocklist.go                永久禁言名单
-  activity.go                 业务日志查询
-  migrate.go                  迁移器
-  migrations/001_init.sql     embed
+  activity.go                 业务日志的写入、查询与清理
+  runconfig.go                LoadRunConfig
+  import.go                   YAML 导入的落库逻辑
 
 internal/logging/
   system.go                   slog 装配 + lumberjack 轮转
   activity.go                 业务日志异步批量写入器
+  sink.go                     rules.ActivitySink 的实现，按绑定附上归属 ID
 
 internal/rules/spec/          规则的单一序列化表示
   spec.go                     类型定义（yaml + json 标签）
@@ -356,11 +358,18 @@ magicd user list
 magicd account list
 magicd login --save <账号名> --owner <用户名>  扫码登录并直接入库
 magicd login -o cookie.txt                   保持不变，用于 YAML 路径
+magicd binding add <账号名> <房间号>          让账号连接一个直播间
+magicd binding list
+magicd binding rm|enable|disable <账号名>@<房间号>
 magicd grant <用户名> <账号名>@<房间号> <权限点,...>
 magicd revoke <用户名> <账号名>@<房间号>
+magicd perms <用户名>                         查看某人的授权
+magicd can <用户名> <账号名>@<房间号> <权限点>  检查某人有没有某个权限
 magicd import -c config.yaml --owner <用户名>  导入 YAML
 magicd run                                   从数据库读配置运行
 ```
+
+`binding` 与 `can` 是写计划时补的。没有 `binding`，扫码登录一个新账号后想加直播间就得先写一份 YAML；没有 `can`，`Can()` 在 P3 里就只有测试没有生产调用者，要搁到 P4 才第一次被真正用上。
 
 数据库连接：`MAGICD_DATABASE_URL` 环境变量，`--db` 标志可覆盖。
 
