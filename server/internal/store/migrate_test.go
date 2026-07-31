@@ -43,8 +43,12 @@ func TestMigrateIsIdempotent(t *testing.T) {
 	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM schema_migrations`).Scan(&n); err != nil {
 		t.Fatalf("查询迁移记录报错: %v", err)
 	}
-	if n != 1 {
-		t.Errorf("迁移记录数 = %d, 期望 1", n)
+	want, err := LatestSchemaVersion()
+	if err != nil {
+		t.Fatalf("LatestSchemaVersion 报错: %v", err)
+	}
+	if n != want {
+		t.Errorf("迁移记录数 = %d, 期望 %d（应等于最新版本号）", n, want)
 	}
 }
 
@@ -54,8 +58,12 @@ func TestSchemaVersionReportsLatest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SchemaVersion 报错: %v", err)
 	}
-	if v != 1 {
-		t.Errorf("版本 = %d, 期望 1", v)
+	want, err := LatestSchemaVersion()
+	if err != nil {
+		t.Fatalf("LatestSchemaVersion 报错: %v", err)
+	}
+	if v != want {
+		t.Errorf("版本 = %d, 期望 %d", v, want)
 	}
 }
 
