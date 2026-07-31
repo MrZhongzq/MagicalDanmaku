@@ -84,10 +84,14 @@ var operatorLabels = []metaItem{
 }
 
 // aggregateByLabels 是合并窗口分组方式的中文说明。
+//
+// 用 rules.AggregateByType/User/Gift 常量而不是字符串字面量：
+// 紧邻的 actionTypeLabels 已经这么做了，字面量在这里只是把
+// 「写死会悄悄漂移」的问题从前端搬到了后端。
 var aggregateByLabels = []metaItem{
-	{"type", "按事件类型：窗口内全部合成一条"},
-	{"user", "按类型 + 用户：仅去重不聚合"},
-	{"gift", "按类型 + 用户 + 礼物：数量累加"},
+	{string(rules.AggregateByType), "按事件类型：窗口内全部合成一条"},
+	{string(rules.AggregateByUser), "按类型 + 用户：仅去重不聚合"},
+	{string(rules.AggregateByGift), "按类型 + 用户 + 礼物：数量累加"},
 }
 
 func (s *Server) handleMetaPermissions(w http.ResponseWriter, _ *http.Request) {

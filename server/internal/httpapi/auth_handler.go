@@ -54,7 +54,14 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 			respondError(w, http.StatusUnauthorized, "用户名或密码错误")
 			return
 		}
-		respondStoreError(w, err, "用户不存在")
+		// 故意不用 respondStoreError(w, err, "用户不存在")：这是一条未
+		// 认证路径，不能有任何会渲染成「用户不存在」的出口。今天
+		// VerifyPassword 只会返回裸的 ErrBadCredentials 或包装过的查询
+		// 失败，走不到 store.ErrNotFound 这个分支，但那只是巧合——哪天
+		// VerifyPassword 加了一层 ErrNotFound 包装，这里就会立刻变成
+		// 一个用户名枚举器。查询失败一律当内部错误处理，不泄漏细节。
+		s.log.Error("登录时查用户失败", "username", req.Username, "err", err)
+		respondError(w, http.StatusInternalServerError, "服务器内部错误")
 		return
 	}
 
