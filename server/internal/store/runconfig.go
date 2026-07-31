@@ -25,6 +25,7 @@ type RunConfig struct {
 }
 
 // Label 返回用于日志的标识，形如 "小号@1706666491"。
+// 注意：此格式必须与 Binding.Label() 保持一致，两处同时更新。
 func (c RunConfig) Label() string {
 	return c.AccountName + "@" + c.RoomID
 }

@@ -185,3 +185,91 @@ func TestLoadRunConfigTwoAccountsSameRoom(t *testing.T) {
 		t.Error("两条运行单元的标签不该相同")
 	}
 }
+
+// 同一账号被多个启用的绑定共用时，缓存确保只查一次账号、但每条绑定都得到正确的账号数据。
+// 这个测试覆盖的是共用场景的正确性；缓存是实现细节，通过验证输出数据的正确性来间接验证。
+func TestLoadRunConfigOneAccountMultipleBindings(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// 创建一个账号，使用非默认值以便检测数据来源
+	owner := mustUser(t, s, "李四")
+	acc, err := s.CreateAccount(ctx, AccountInput{
+		Name: "多播主", UID: "999", Cookie: "SESSDATA=xyz789",
+		RateLimit: 3 * time.Second, MaxLength: 50, OwnerID: owner,
+	})
+	if err != nil {
+		t.Fatalf("创建账号报错: %v", err)
+	}
+
+	// 同一账号绑定到两个不同直播间
+	b1, err := s.UpsertBinding(ctx, acc.ID, "甲房间")
+	if err != nil {
+		t.Fatalf("创建绑定1报错: %v", err)
+	}
+	b2, err := s.UpsertBinding(ctx, acc.ID, "乙房间")
+	if err != nil {
+		t.Fatalf("创建绑定2报错: %v", err)
+	}
+
+	cfgs, err := s.LoadRunConfig(ctx)
+	if err != nil {
+		t.Fatalf("载入运行配置报错: %v", err)
+	}
+
+	// 应该返回两条运行单元
+	if len(cfgs) != 2 {
+		t.Fatalf("运行单元数 = %d, 期望 2", len(cfgs))
+	}
+
+	// 两条都来自同一个账号
+	if cfgs[0].AccountID != cfgs[1].AccountID {
+		t.Errorf("AccountID 不同: %d vs %d", cfgs[0].AccountID, cfgs[1].AccountID)
+	}
+	if cfgs[0].AccountName != cfgs[1].AccountName {
+		t.Errorf("AccountName 不同: %q vs %q", cfgs[0].AccountName, cfgs[1].AccountName)
+	}
+
+	// 两条的账号参数必须正确（这验证了缓存命中分支拿到了正确数据）
+	for i, cfg := range cfgs {
+		if cfg.Cookie != "SESSDATA=xyz789" {
+			t.Errorf("cfgs[%d].Cookie = %q, 期望 SESSDATA=xyz789", i, cfg.Cookie)
+		}
+		if cfg.RateLimit != 3*time.Second {
+			t.Errorf("cfgs[%d].RateLimit = %v, 期望 3s", i, cfg.RateLimit)
+		}
+		if cfg.MaxLength != 50 {
+			t.Errorf("cfgs[%d].MaxLength = %d, 期望 50", i, cfg.MaxLength)
+		}
+	}
+
+	// 两条的绑定参数必须不同
+	if cfgs[0].BindingID == cfgs[1].BindingID {
+		t.Error("BindingID 应该不同")
+	}
+	if cfgs[0].RoomID == cfgs[1].RoomID {
+		t.Error("RoomID 应该不同")
+	}
+
+	// 验证具体的绑定对应关系
+	roomIDs := []string{cfgs[0].RoomID, cfgs[1].RoomID}
+	if !contains(roomIDs, "甲房间") || !contains(roomIDs, "乙房间") {
+		t.Errorf("RoomID 应该是甲房间和乙房间，实际 %v", roomIDs)
+	}
+
+	// 验证 BindingID 对应
+	bindingIDs := map[int64]string{cfgs[0].BindingID: cfgs[0].RoomID, cfgs[1].BindingID: cfgs[1].RoomID}
+	if bindingIDs[b1.ID] != "甲房间" || bindingIDs[b2.ID] != "乙房间" {
+		t.Error("BindingID 和 RoomID 对应关系错误")
+	}
+}
+
+// 辅助函数
+func contains(s []string, v string) bool {
+	for _, x := range s {
+		if x == v {
+			return true
+		}
+	}
+	return false
+}
