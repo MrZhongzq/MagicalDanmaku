@@ -315,11 +315,22 @@ type AccountInput struct {
 	OwnerID   int64
 }
 
-// accountColumns 是唯一列出 cookie 列的地方。
+// accountColumns 是唯一列出 cookie 列的读取路径。
 //
-// Cookie 明文存储，读取路径必须收在一处：将来要加密时，
-// 改这一处的 SELECT 与 scanAccount 就够了。
+// Cookie 明文存储，读写各收在一处：读是这里加 scanAccount，
+// 写是 encodeCookie。将来要加密只改这两处。
 const accountColumns = `id, name, uid, cookie, rate_limit_ms, max_length, owner_id, created_at, updated_at`
+
+// encodeCookie 是 Cookie 写入数据库前的唯一通道。
+//
+// 今天它什么都不做——按既定的威胁模型，Cookie 明文存储（见设计文档 §3.4）。
+// 它存在的意义是给将来的加密留一个收口：碰 cookie 列的 SQL 有三条
+// （CreateAccount 的 INSERT、UpsertAccount 的 INSERT 与 ON CONFLICT、
+// UpdateAccountCookie 的 UPDATE），但它们都只从这里取值，所以加密时
+// 改这一个函数即可，不必去记「还有哪条 SQL 碰了 cookie」。
+func encodeCookie(raw string) string {
+	return raw
+}
 
 // scanAccount 是 accountColumns 对应的唯一扫描逻辑。
 func scanAccount(row pgx.Row) (*Account, error) {
@@ -373,7 +384,7 @@ func (s *Store) CreateAccount(ctx context.Context, in AccountInput) (*Account, e
 		INSERT INTO accounts (name, uid, cookie, rate_limit_ms, max_length, owner_id)
 		VALUES ($1, $2, $3, $4, $5, $6)
 		RETURNING `+accountColumns,
-		in.Name, in.UID, in.Cookie, in.rateLimitMS(), in.maxLength(), in.OwnerID))
+		in.Name, in.UID, encodeCookie(in.Cookie), in.rateLimitMS(), in.maxLength(), in.OwnerID))
 	if err != nil {
 		if isUniqueViolation(err) {
 			return nil, fmt.Errorf("store: 账号名 %q 已存在: %w", in.Name, ErrDuplicate)
@@ -401,7 +412,7 @@ func (s *Store) UpsertAccount(ctx context.Context, in AccountInput) (*Account, e
 			owner_id      = EXCLUDED.owner_id,
 			updated_at    = now()
 		RETURNING `+accountColumns,
-		in.Name, in.UID, in.Cookie, in.rateLimitMS(), in.maxLength(), in.OwnerID))
+		in.Name, in.UID, encodeCookie(in.Cookie), in.rateLimitMS(), in.maxLength(), in.OwnerID))
 	if err != nil {
 		return nil, fmt.Errorf("store: 写入账号 %q 失败: %w", in.Name, err)
 	}
@@ -450,7 +461,7 @@ func (s *Store) UpdateAccountCookie(ctx context.Context, name, cookie, uid strin
 	}
 	tag, err := s.pool.Exec(ctx, `
 		UPDATE accounts SET cookie = $1, uid = $2, updated_at = now() WHERE name = $3`,
-		cookie, uid, name)
+		encodeCookie(cookie), uid, name)
 	if err != nil {
 		return fmt.Errorf("store: 更新账号 %q 的 Cookie 失败: %w", name, err)
 	}
