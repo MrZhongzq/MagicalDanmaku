@@ -41,6 +41,15 @@ type Options struct {
 	// 反向代理加了 TLS 的部署要显式打开。
 	SecureCookie bool
 
+	// EnableTestRoutes 挂上一套仅供测试用的路由（/api/test/*），
+	// 用来在真实中间件链上验证 panic 恢复、权限守卫、可见范围过滤。
+	//
+	// 生产环境必须为 false：其中 /api/test/panic 不需要认证、每次
+	// 访问都主动 panic 并以 Error 级别打一整份 debug.Stack()，暴露在
+	// 公网上等于给任何能连上端口的人一个刷爆日志、撑爆磁盘的开关。
+	// 只有 testhelp_test.go 的 newTestServer 应该把它设为 true。
+	EnableTestRoutes bool
+
 	Logger *slog.Logger
 }
 
@@ -84,14 +93,40 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/auth/logout", s.handleLogout)
 	s.mux.HandleFunc("GET /api/auth/me", s.requireAuth(s.handleMe))
 
-	// 仅测试用：验证 panic 恢复中间件。生产路由表里不该有它，
-	// 但把它放在这里比在测试里另起一个 mux 更能保证测的是真实中间件链。
+	if s.opts.EnableTestRoutes {
+		s.testRoutes()
+	}
+
+	// 元数据：前端渲染规则编辑器需要。只需登录，不需绑定级权限。
+	s.mux.HandleFunc("GET /api/meta/permissions", s.requireAuth(s.handleMetaPermissions))
+	s.mux.HandleFunc("GET /api/meta/event-types", s.requireAuth(s.handleMetaEventTypes))
+	s.mux.HandleFunc("GET /api/meta/action-types", s.requireAuth(s.handleMetaActionTypes))
+	s.mux.HandleFunc("GET /api/meta/operators", s.requireAuth(s.handleMetaOperators))
+	s.mux.HandleFunc("GET /api/meta/aggregate-by", s.requireAuth(s.handleMetaAggregateBy))
+
+	// 用户管理。改密码不走 requireAdmin，因为普通用户要能改自己的，
+	// 具体的授权判断在处理器里（这是唯一的例外，因为它不是绑定级权限）。
+	s.mux.HandleFunc("GET /api/users", s.requireAdmin(s.handleListUsers))
+	s.mux.HandleFunc("POST /api/users", s.requireAdmin(s.handleCreateUser))
+	s.mux.HandleFunc("POST /api/users/{name}/password", s.requireAuth(s.handleChangePassword))
+	s.mux.HandleFunc("DELETE /api/users/{name}", s.requireAdmin(s.handleDeleteUser))
+}
+
+// testRoutes 注册仅供测试用的路由（/api/test/*）。
+//
+// 只有在 Options.EnableTestRoutes 为 true 时才会被 routes() 调用，
+// 生产环境必须保持 false——尤其是 /api/test/panic：它不需要认证，
+// 每次访问都主动 panic 并以 Error 级别打一整份 debug.Stack()，暴露
+// 在公网上就是一个免认证的日志/磁盘炸弹。
+//
+// 之所以挂在真实的 s.mux 上而不是测试里另起一个 mux，是为了让
+// panic 恢复、权限守卫、可见范围过滤都在真实中间件链上被验证到，
+// 跳过中间件链就等于没测。
+func (s *Server) testRoutes() {
 	s.mux.HandleFunc("GET /api/test/panic", func(http.ResponseWriter, *http.Request) {
 		panic("测试用的故意 panic")
 	})
 
-	// 仅测试用：验证权限守卫与可见范围过滤。放在真实中间件链上，
-	// 才能证明守卫在真实路由里也是这样工作的。
 	s.mux.HandleFunc("GET /api/test/guarded/{binding}",
 		s.requirePerm(perm.RuleRead, func(w http.ResponseWriter, r *http.Request) {
 			respondJSON(w, http.StatusOK, map[string]any{"binding": bindingFrom(r.Context()).Label()})
@@ -115,20 +150,6 @@ func (s *Server) routes() {
 			}
 			respondJSON(w, http.StatusOK, out)
 		}))
-
-	// 元数据：前端渲染规则编辑器需要。只需登录，不需绑定级权限。
-	s.mux.HandleFunc("GET /api/meta/permissions", s.requireAuth(s.handleMetaPermissions))
-	s.mux.HandleFunc("GET /api/meta/event-types", s.requireAuth(s.handleMetaEventTypes))
-	s.mux.HandleFunc("GET /api/meta/action-types", s.requireAuth(s.handleMetaActionTypes))
-	s.mux.HandleFunc("GET /api/meta/operators", s.requireAuth(s.handleMetaOperators))
-	s.mux.HandleFunc("GET /api/meta/aggregate-by", s.requireAuth(s.handleMetaAggregateBy))
-
-	// 用户管理。改密码不走 requireAdmin，因为普通用户要能改自己的，
-	// 具体的授权判断在处理器里（这是唯一的例外，因为它不是绑定级权限）。
-	s.mux.HandleFunc("GET /api/users", s.requireAdmin(s.handleListUsers))
-	s.mux.HandleFunc("POST /api/users", s.requireAdmin(s.handleCreateUser))
-	s.mux.HandleFunc("POST /api/users/{name}/password", s.requireAuth(s.handleChangePassword))
-	s.mux.HandleFunc("DELETE /api/users/{name}", s.requireAdmin(s.handleDeleteUser))
 }
 
 // Handler 返回套好中间件的处理器。

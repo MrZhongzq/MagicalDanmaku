@@ -67,6 +67,9 @@ func newTestServer(t *testing.T) (*httptest.Server, *store.Store) {
 
 	api := httpapi.New(st, httpapi.Options{
 		SessionTTL: time.Hour,
+		// 仅测试用：挂上 /api/test/* 以在真实中间件链上验证 panic 恢复、
+		// 权限守卫、可见范围过滤。生产环境绝不能打开这个开关。
+		EnableTestRoutes: true,
 	})
 	srv := httptest.NewServer(api.Handler())
 	t.Cleanup(srv.Close)
