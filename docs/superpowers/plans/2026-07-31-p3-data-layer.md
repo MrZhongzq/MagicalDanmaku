@@ -1327,6 +1327,10 @@ CREATE TABLE memberships (
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (user_id, binding_id)
 );
+-- 注意：查询这个数组必须写成 permissions @> ARRAY['rule:write']。
+-- 写成 'rule:write' = ANY(permissions) 语义相同，但那是逐行的数组展开，
+-- PostgreSQL 不会改写成可索引形式，本索引对它完全不起作用（实测 20 万行
+-- 时前者走 Bitmap Index Scan，后者 Parallel Seq Scan 扫完全表）。
 CREATE INDEX memberships_permissions_idx ON memberships USING GIN (permissions);
 
 CREATE TABLE rules (

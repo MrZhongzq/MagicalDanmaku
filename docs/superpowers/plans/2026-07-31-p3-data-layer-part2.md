@@ -2045,13 +2045,19 @@ func (s *Store) Revoke(ctx context.Context, username, accountName, roomID string
 //
 // 管理员绕过全部检查。没有授权记录时一律拒绝——默认拒绝，
 // 不给「忘了配就等于放行」留口子。
+//
+// 数组条件必须写成 `permissions @> ARRAY[...]`，不能写
+// `$3 = ANY(permissions)`：后者是逐行的数组展开，PostgreSQL 不会把它
+// 改写成可索引的形式，memberships_permissions_idx 那个 GIN 索引对它
+// 完全不起作用。两种写法语义相同，写错了不报错，只是退化成全表扫描。
 func (s *Store) Can(ctx context.Context, userID, bindingID int64, p perm.Permission) (bool, error) {
 	var ok bool
 	err := s.pool.QueryRow(ctx, `
 		SELECT EXISTS (SELECT 1 FROM users WHERE id = $1 AND is_admin)
 		    OR EXISTS (
 				SELECT 1 FROM memberships
-				WHERE user_id = $1 AND binding_id = $2 AND $3 = ANY(permissions)
+				WHERE user_id = $1 AND binding_id = $2
+				  AND permissions @> ARRAY[$3::text]
 			)`, userID, bindingID, string(p)).Scan(&ok)
 	if err != nil {
 		return false, fmt.Errorf("store: 权限检查失败: %w", err)

@@ -157,7 +157,7 @@ CREATE INDEX activity_logs_type_time_idx    ON activity_logs (event_type, occurr
 
 **`name` 与 `enabled` 是列，不进 JSONB。** 两处存同一个值必然漂移。列是权威：WebUI 切换启停不该重写整个 JSONB，且 `WHERE enabled` 要能走索引。存储层负责在读写时拆装，是唯一的拆装点。
 
-**`memberships.permissions` 用 PG 原生 `TEXT[]` 而非 JSONB。** `'rule:write' = ANY(permissions)` 可以走 GIN 索引，JSONB 数组做同样的事要绕。
+**`memberships.permissions` 用 PG 原生 `TEXT[]` 而非 JSONB，配 GIN 索引。** 权限检查必须写成 `permissions @> ARRAY['rule:write']`，**不能写 `'rule:write' = ANY(permissions)`**——后者是逐行的数组展开，PostgreSQL 不会把它改写成可索引的形式，GIN 索引对它完全不起作用。20 万行的实测：`= ANY` 走 Parallel Seq Scan 扫完全表，`@>` 走 Bitmap Index Scan。两种写法语义完全相同，所以这是纯粹的写法纪律问题，容易写错且错了不报错，只是慢。
 
 **`accounts.owner_id` 是 `ON DELETE RESTRICT`。** 删掉一个还拥有账号的用户，应该报错而不是留下无主的 Cookie。其余外键用 CASCADE：删绑定就该带走它的规则、冷却组、KV 与禁言名单。
 
