@@ -54,6 +54,62 @@ archives:
       - LICENSE
       - README.md
 
+# 镜像只做 linux 两个架构：其余四个目标是桌面二进制，不进镜像。
+#
+# 每个架构先各推一个带架构后缀的 tag，再由下面的 docker_manifests
+# 合成一个多架构 manifest——这样 `docker pull ghcr.io/mrzhongzq/magicd`
+# 在 amd64 与 arm64 机器上都能自动拿到对的那个。
+dockers:
+  - id: magicd-amd64
+    ids:
+      - magicd
+    goos: linux
+    goarch: amd64
+    dockerfile: Dockerfile
+    use: buildx
+    image_templates:
+      - "ghcr.io/mrzhongzq/magicd:{{ .Version }}-amd64"
+      - "ghcr.io/mrzhongzq/magicd:latest-amd64"
+    build_flag_templates:
+      - "--platform=linux/amd64"
+      - "--label=org.opencontainers.image.title={{ .ProjectName }}"
+      - "--label=org.opencontainers.image.version={{ .Version }}"
+      - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
+      - "--label=org.opencontainers.image.created={{ .Date }}"
+      - "--label=org.opencontainers.image.source={{ .GitURL }}"
+      - "--label=org.opencontainers.image.description=神奇弹幕服务端：B 站直播弹幕机器人"
+      - "--label=org.opencontainers.image.licenses=MIT"
+
+  - id: magicd-arm64
+    ids:
+      - magicd
+    goos: linux
+    goarch: arm64
+    dockerfile: Dockerfile
+    use: buildx
+    image_templates:
+      - "ghcr.io/mrzhongzq/magicd:{{ .Version }}-arm64"
+      - "ghcr.io/mrzhongzq/magicd:latest-arm64"
+    build_flag_templates:
+      - "--platform=linux/arm64"
+      - "--label=org.opencontainers.image.title={{ .ProjectName }}"
+      - "--label=org.opencontainers.image.version={{ .Version }}"
+      - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
+      - "--label=org.opencontainers.image.created={{ .Date }}"
+      - "--label=org.opencontainers.image.source={{ .GitURL }}"
+      - "--label=org.opencontainers.image.description=神奇弹幕服务端：B 站直播弹幕机器人"
+      - "--label=org.opencontainers.image.licenses=MIT"
+
+docker_manifests:
+  - name_template: "ghcr.io/mrzhongzq/magicd:{{ .Version }}"
+    image_templates:
+      - "ghcr.io/mrzhongzq/magicd:{{ .Version }}-amd64"
+      - "ghcr.io/mrzhongzq/magicd:{{ .Version }}-arm64"
+  - name_template: "ghcr.io/mrzhongzq/magicd:latest"
+    image_templates:
+      - "ghcr.io/mrzhongzq/magicd:latest-amd64"
+      - "ghcr.io/mrzhongzq/magicd:latest-arm64"
+
 checksum:
   name_template: checksums.txt
 
@@ -98,3 +154,12 @@ release:
     ```
     sha256sum -c checksums.txt
     ```
+
+    ## Docker
+
+    ```
+    docker pull ghcr.io/mrzhongzq/magicd:{{ .Version }}
+    ```
+
+    镜像支持 linux/amd64 与 linux/arm64。需要一个 PostgreSQL，
+    完整部署见仓库里的 `docker-compose.yml` 与 `docs/deployment.md`。
