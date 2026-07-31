@@ -23,14 +23,15 @@ type Store struct {
 // 注意 Cookie 以明文存储：若数据库不在本机且未启用 TLS，
 // Cookie 每次读取都会明文过网络。
 func Open(ctx context.Context, dsn string) (*Store, error) {
-	return openWithSchema(ctx, dsn, "")
+	return OpenWithSchema(ctx, dsn, "")
 }
 
-// openWithSchema 连接数据库并可指定 schema。schema 为空则用连接默认值。
+// OpenWithSchema 连接数据库并指定 schema。schema 为空则用连接默认值。
 //
-// 指定 schema 的能力只服务于测试隔离：每个测试用例在自己的 schema 里
-// 建表，测完整个 drop 掉，因此可以并行且互不干扰。
-func openWithSchema(ctx context.Context, dsn, schema string) (*Store, error) {
+// 指定 schema 的能力服务于测试隔离：每个测试用例在自己的 schema 里建表，
+// 测完整个 drop 掉，因此可以并行且互不干扰。httpapi 包的测试也需要它，
+// 所以它是导出的。
+func OpenWithSchema(ctx context.Context, dsn, schema string) (*Store, error) {
 	cfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
 		return nil, fmt.Errorf("store: 数据库连接串非法: %w", err)

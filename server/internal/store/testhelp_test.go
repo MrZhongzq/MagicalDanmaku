@@ -48,7 +48,7 @@ func testStore(t *testing.T) *Store {
 		t.Fatalf("创建 schema 失败: %v", err)
 	}
 
-	// schema 建成功后立即注册清理，而不是等 openWithSchema/Migrate 都
+	// schema 建成功后立即注册清理，而不是等 OpenWithSchema/Migrate 都
 	// 成功之后才注册：后两者若失败会走 t.Fatalf 直接退出当前 goroutine，
 	// 若 Cleanup 还没注册，schema 就没人清理、留在库里越积越多。
 	// s 在 Cleanup 注册时还是 nil，等下面赋值后 Cleanup 才会看到非 nil
@@ -65,7 +65,7 @@ func testStore(t *testing.T) *Store {
 		admin.Close()
 	})
 
-	s, err = openWithSchema(ctx, dsn, schema)
+	s, err = OpenWithSchema(ctx, dsn, schema)
 	if err != nil {
 		t.Fatalf("打开存储失败: %v", err)
 	}
