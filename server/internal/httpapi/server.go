@@ -115,6 +115,13 @@ func (s *Server) routes() {
 			}
 			respondJSON(w, http.StatusOK, out)
 		}))
+
+	// 元数据：前端渲染规则编辑器需要。只需登录，不需绑定级权限。
+	s.mux.HandleFunc("GET /api/meta/permissions", s.requireAuth(s.handleMetaPermissions))
+	s.mux.HandleFunc("GET /api/meta/event-types", s.requireAuth(s.handleMetaEventTypes))
+	s.mux.HandleFunc("GET /api/meta/action-types", s.requireAuth(s.handleMetaActionTypes))
+	s.mux.HandleFunc("GET /api/meta/operators", s.requireAuth(s.handleMetaOperators))
+	s.mux.HandleFunc("GET /api/meta/aggregate-by", s.requireAuth(s.handleMetaAggregateBy))
 }
 
 // Handler 返回套好中间件的处理器。
