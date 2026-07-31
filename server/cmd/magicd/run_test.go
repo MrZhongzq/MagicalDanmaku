@@ -5,6 +5,12 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
+
+	"github.com/MrZhongzq/MagicalDanmaku/server/internal/event"
+	"github.com/MrZhongzq/MagicalDanmaku/server/internal/logging"
+	"github.com/MrZhongzq/MagicalDanmaku/server/internal/rules"
+	"github.com/MrZhongzq/MagicalDanmaku/server/internal/store"
 )
 
 // bindingStub 记录 roomBot 转发给绑定的调用。
@@ -129,4 +135,60 @@ func TestRetentionDaysIgnoresGarbage(t *testing.T) {
 	if got := retentionDays(); got != 30 {
 		t.Errorf("非法值应退回默认 30，实际 %d", got)
 	}
+}
+
+// TestCloseAllSettlesEngineWindowsBeforeFlushingWriter 验证 closeAll 的
+// 关闭顺序：引擎必须先结算未决的合并窗口，写入器才能把结算产生的动作
+// 日志冲刷出去。
+//
+// 用一个窗口设为 1 小时（必然不会自然到期）的聚合规则模拟「攒着的欢迎语」：
+// 只有 engine.Close() 被调用，这条动作日志才会产生；只有此后
+// activity.Close() 被调用，它才会被冲刷进 Flush。若 closeAll 的顺序反了
+// （或者压根没关引擎），这条日志就不会出现在 flushed 里——这正是
+// review 指出的、早返回路径曾经会触发的那个问题。
+func TestCloseAllSettlesEngineWindowsBeforeFlushingWriter(t *testing.T) {
+	var mu sync.Mutex
+	var flushed []store.ActivityRow
+
+	activity := logging.NewActivityWriter(logging.ActivityWriterOptions{
+		Flush: func(_ context.Context, rows []store.ActivityRow) error {
+			mu.Lock()
+			defer mu.Unlock()
+			flushed = append(flushed, rows...)
+			return nil
+		},
+	})
+
+	eng, err := rules.NewEngine(rules.EngineOptions{
+		RoomID:   "123",
+		Bot:      &roomBot{binding: &bindingStub{}, ctx: context.Background()},
+		Activity: activity.Sink(1, 1, "123"),
+		Rules: []rules.Rule{{
+			Name:      "进场欢迎",
+			Enabled:   true,
+			On:        []event.Type{event.TypeUserEnter},
+			Aggregate: &rules.AggregateSpec{Window: time.Hour, By: rules.AggregateByType},
+			Do:        []rules.Action{{Type: rules.ActionDanmaku, Template: []string{"欢迎"}}},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("创建引擎失败: %v", err)
+	}
+
+	eng.Handle(event.Event{
+		Type:    event.TypeUserEnter,
+		Payload: event.UserEnter{User: event.User{UID: "1", Username: "观众"}},
+	})
+
+	closeAll([]*rules.Engine{eng}, activity)
+
+	mu.Lock()
+	defer mu.Unlock()
+	for _, r := range flushed {
+		if r.Kind == store.ActivityAction {
+			return // 找到了结算产生的动作日志，顺序正确
+		}
+	}
+	t.Error("closeAll 应先让引擎结算未决窗口，再让写入器冲刷——" +
+		"未在 flushed 里找到窗口结算产生的动作日志")
 }

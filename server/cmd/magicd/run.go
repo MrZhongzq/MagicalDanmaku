@@ -97,16 +97,32 @@ func runRun(args []string) error {
 		Flush:  st.InsertActivity,
 		Logger: log,
 	})
-	defer activity.Close()
 
 	runtimes, err := buildAccounts(ctx, cfgs, log)
 	if err != nil {
+		activity.Close()
 		return err
 	}
 
 	sched := scheduler.New(log)
 	var wg sync.WaitGroup
 	var engines []*rules.Engine
+
+	// 清理放在 defer 里，而不是只写在正常关停路径的末尾。
+	//
+	// 装配循环里有多个早返回点（房间信息获取失败、规则非法、定时任务注册失败），
+	// 而此时前面的绑定可能已经建好引擎并跑起来了。只在末尾清理的话，
+	// 那些引擎的 Close() 永远不会被调用——后果不是日志被丢弃，而是
+	// 那批日志行根本不会产生：Close() 才是结算未决合并窗口的地方，
+	// 不调用它，攒着的欢迎语既不会发出去，也不会有对应的动作日志。
+	//
+	// 这里用闭包而不是直接 defer closeAll(engines, activity)：defer 的
+	// 参数在语句执行时就求值，若直接传值会捕获此刻仍是 nil 的 engines，
+	// 后续循环里的 append 不会反映到已经求过值的参数上。闭包捕获的是
+	// 变量本身，调用时才读取，因此能看到循环结束时的最终切片。
+	defer func() {
+		closeAll(engines, activity)
+	}()
 
 	for _, c := range cfgs {
 		rt := runtimes[c.AccountName]
@@ -208,11 +224,6 @@ func runRun(args []string) error {
 
 	sched.Stop()
 	wg.Wait()
-	for _, e := range engines {
-		e.Close()
-	}
-	// 引擎全部关闭后再冲刷业务日志，才能捞到 Close 时结算的合并窗口
-	activity.Close()
 	log.Info("已退出")
 	return nil
 }
@@ -252,6 +263,18 @@ func buildAccounts(ctx context.Context, cfgs []store.RunConfig, log *slog.Logger
 		log.Info("已载入账号", "name", c.AccountName, "uid", sess.UID, "发送间隔", interval)
 	}
 	return out, nil
+}
+
+// closeAll 按「引擎优先」的顺序关闭资源。
+//
+// engine.Close() 会结算未决的合并窗口（比如攒着的欢迎语），这一步会
+// 通过 Activity sink 产生业务日志；activity.Close() 才是把这些日志真正
+// 冲刷出去的地方。顺序反了不会报错，只会让那批日志静默消失。
+func closeAll(engines []*rules.Engine, activity *logging.ActivityWriter) {
+	for _, e := range engines {
+		e.Close()
+	}
+	activity.Close()
 }
 
 // retentionDays 读业务日志的保留天数。
