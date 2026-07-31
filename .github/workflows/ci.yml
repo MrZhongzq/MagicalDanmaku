@@ -10,11 +10,13 @@ on:
       - "server/**"
       - ".github/workflows/ci.yml"
       - ".goreleaser.yaml"
+      - "docker-compose.dev.yml"
   pull_request:
     paths:
       - "server/**"
       - ".github/workflows/ci.yml"
       - ".goreleaser.yaml"
+      - "docker-compose.dev.yml"
 
 # 同一分支的新推送会取消仍在跑的旧任务，避免排队浪费。
 concurrency:
@@ -25,6 +27,24 @@ jobs:
   test:
     name: 测试与静态检查
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: magicd
+          POSTGRES_PASSWORD: magicd
+          POSTGRES_DB: magicd
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U magicd"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 15
+    env:
+      # 存储层测试必须真跑：写一份内存替身来避开数据库，等于把
+      # 整个 SQL 层排除在测试之外，而 SQL 层正是 P3 唯一的新增风险面。
+      MAGICD_TEST_DATABASE_URL: postgres://magicd:magicd@localhost:5432/magicd?sslmode=disable
     steps:
       - uses: actions/checkout@v4
 
@@ -50,6 +70,15 @@ jobs:
       - name: 测试
         working-directory: server
         run: go test ./... -count=1
+
+      - name: 确认存储层测试没有被跳过
+        working-directory: server
+        run: |
+          go test ./internal/store/ -v -count=1 -run TestMigrateCreatesAllTables 2>&1 | tee /tmp/store.log
+          if grep -q -- "--- SKIP" /tmp/store.log; then
+            echo "存储层测试被跳过了——MAGICD_TEST_DATABASE_URL 没生效" >&2
+            exit 1
+          fi
 
       # Linux runner 自带 gcc，竞态检测可直接跑。
       - name: 竞态检测

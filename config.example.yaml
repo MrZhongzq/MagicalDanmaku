@@ -1,9 +1,24 @@
 # 神奇弹幕配置示例
 #
+# 这份 YAML 是**导入入口**，不是运行时配置。数据库才是配置的唯一真相，
+# magicd run 不读它。
+#
 # 用法：
-#   magicd login -o cookie-main.txt      # 每个账号各扫码登录一次
+#   export MAGICD_DATABASE_URL='postgres://magicd:magicd@localhost:5432/magicd?sslmode=disable'
+#   magicd migrate                              # 建表，并创建管理员
+#   magicd login -o cookie-main.txt             # 每个账号各扫码登录一次
+#   magicd login -o cookie-sub.txt
 #   cp config.example.yaml config.yaml
-#   magicd run -c config.yaml
+#   magicd import -c config.yaml --owner admin  # 导进数据库
+#   magicd run                                  # 启动
+#
+# 也可以完全不用 YAML：
+#   magicd login --save 小号 --owner admin
+#   magicd binding add 小号 1706666491
+#   # 规则等 P4 的 WebUI 做好后在网页上配
+#
+# 导入是幂等的：同一份 YAML 导两次结果一致。YAML 里删掉的规则，
+# 重新导入后库里也会消失。
 #
 # 结构是三层嵌套：账号 → 直播间 → 规则。
 # 每个「账号-直播间」组合是一个独立的运行单元，有自己的连接、规则与
