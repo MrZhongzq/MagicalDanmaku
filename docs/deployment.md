@@ -35,6 +35,71 @@ magicd run
 规则的配置目前有两条路：写 YAML 然后 `magicd import`，或者等 P4 的
 WebUI。示例见仓库根目录的 `config.example.yaml`。
 
+## 用 Docker 部署（推荐）
+
+镜像支持 linux/amd64 与 linux/arm64，`docker pull` 会自动拿到对的那个。
+
+```bash
+git clone https://github.com/MrZhongzq/MagicalDanmaku.git
+cd MagicalDanmaku
+cp .env.example .env
+# 编辑 .env，改掉 POSTGRES_PASSWORD
+docker compose up -d
+```
+
+首次启动后取管理员密码——**它只打印这一次**：
+
+```bash
+docker compose logs migrate
+```
+
+然后扫码登录一个 B 站账号并加直播间：
+
+```bash
+docker compose run --rm magicd login --save 小号 --owner admin
+docker compose run --rm magicd binding add 小号 1706666491
+docker compose restart magicd
+```
+
+注意用的是 `docker compose run --rm`，不是 `exec`——扫码需要一个能显示
+二维码的交互式终端，而 `magicd` 服务是后台跑的。
+
+### 常用操作
+
+```bash
+docker compose logs -f magicd          # 看实时日志
+docker compose ps                      # 看服务状态
+docker compose restart magicd          # 改完配置后重启生效
+docker compose down                    # 停止（保留数据）
+docker compose pull; docker compose up -d   # 升级到新版镜像
+```
+
+### 升级
+
+镜像更新后，schema 可能也需要升级：
+
+```bash
+docker compose pull
+docker compose up -d          # migrate service 会自动跑一次
+```
+
+`magicd` 依赖 `migrate` 成功完成才启动，所以顺序是自动保证的。
+升级前建议备份：
+
+```bash
+docker compose exec -T postgres pg_dump -U magicd magicd > backup.sql
+```
+
+### ⚠️ 关于 `docker compose down -v`
+
+`-v` 会**连数据卷一起删掉**——账号、规则、日志全没。测试环境用它清干净
+没问题，生产环境不要加这个参数。
+
+### 时区
+
+`TZ` 默认 `Asia/Shanghai`。**定时规则按本地时区计算**，时区设错了规则会
+整体偏移几个小时。在 `.env` 里按你所在时区设置。
+
 ## 环境变量
 
 | 变量 | 默认 | 说明 |
@@ -77,6 +142,13 @@ ORDER BY occurred_at DESC;
    远程数据库请在连接串里加 `sslmode=require`
 
 这是按「WebUI 与本机只被受信任的人操作」的威胁模型做的选择。
+
+Docker 部署下补充两点：
+
+- **`.env` 里有数据库密码**，它已在 `.gitignore` 里，但别手动提交、别放进
+  任何共享目录
+- **默认不暴露数据库端口**。`docker-compose.yml` 里那行 `ports` 是注释掉的，
+  只有需要从宿主直连调试时才取消注释，且已经限定在 `127.0.0.1`
 
 ## 升级
 

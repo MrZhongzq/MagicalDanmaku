@@ -24,6 +24,16 @@
 
 需要 PostgreSQL 14+。完整部署说明见 [docs/deployment.md](docs/deployment.md)。
 
+最省事的是 Docker（自带 PostgreSQL）：
+
+```bash
+cp .env.example .env    # 改掉 POSTGRES_PASSWORD
+docker compose up -d
+docker compose logs migrate    # 取管理员的一次性密码
+```
+
+不用 Docker 的话，需要自己准备 PostgreSQL 14+：
+
 ```bash
 export MAGICD_DATABASE_URL='postgres://magicd:magicd@localhost:5432/magicd?sslmode=disable'
 magicd migrate                         # 建表，记下打印出的管理员密码
@@ -38,7 +48,8 @@ magicd run                             # 启动
 
 ## 与原项目的差异
 
-- **平台**：只做 B 站；win / macOS / Linux × amd64 / arm64 六个目标的静态二进制
+- **平台**：只做 B 站；win / macOS / Linux × amd64 / arm64 六个目标的静态
+  二进制，外加 linux/amd64 与 linux/arm64 的 Docker 镜像
 - **形态**：无头服务端，不依赖窗口；管理界面走 Web
 - **收费限制**：全部移除
 - **已删除**：`www/` OBS 浏览器源托管、五子棋等 extension、点歌姬与音乐

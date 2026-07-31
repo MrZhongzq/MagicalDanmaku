@@ -435,7 +435,7 @@ Go 代码放在仓库新建的 `server/` 顶层目录，C++ 代码原样保留�
 | # | 子项目 | 交付物 | 依赖 |
 |---|---|---|---|
 | **P0** | 协议内核 | 打印实时事件流的 CLI | — |
-| **P1** | 分发流水线 | GoReleaser + Docker buildx，8 目标一键出包 | P0 |
+| **P1** | 分发流水线 | GoReleaser + Docker buildx，8 目标一键出包 | P0 | ✅ 完成；Docker 部分由 2026-08-01 的补丁补齐 |
 | **P2** | 规则引擎 | 配置驱动的无头机器人 | P0 |
 | **P3** | 多租户数据层 | User/Account/Binding/Membership/Rule + 权限点 + 业务日志 | P2 | ✅ 完成，见 `2026-08-01-p3-completion-notes.md` |
 | **P4-1** | HTTP API | 可用 curl 完整驱动的 API，含会话认证与权限守卫 | P3 |
