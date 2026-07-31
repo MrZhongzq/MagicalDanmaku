@@ -4,6 +4,11 @@
 #   2. docker compose up -d
 #   3. docker compose logs migrate    # 取管理员的一次性密码
 #
+# ⚠️ POSTGRES_PASSWORD 只能用 URL 安全字符（字母、数字、- _ . ~）——
+# 它会被原样拼进下面的 MAGICD_DATABASE_URL，含 @ : / # ? % 或中文
+# 会让连接串解析失败，报错（invalid userinfo）与真实原因毫无关系。
+# 详见 .env.example 里的说明。
+#
 # 与 docker-compose.dev.yml 的区别：那份是给本地跑测试用的，
 # 端口 5433、密码写死 magicd/magicd、不含 magicd 本身。
 # **不要把那份用于生产。**
