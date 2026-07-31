@@ -4,13 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/connector/bilibili/auth"
-	"github.com/MrZhongzq/MagicalDanmaku/server/internal/httpapi"
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/perm"
-	"github.com/MrZhongzq/MagicalDanmaku/server/internal/store"
 )
 
 // fakeQR 是可控的扫码实现，避免测试打真实 B 站接口。
@@ -133,6 +132,41 @@ func TestQRCodeStartRequiresName(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusUnprocessableEntity {
 		t.Errorf("空账号名状态码 = %d, 期望 422", resp.StatusCode)
+	}
+}
+
+// 对别人已占用的账号名发起扫码，必须返回 404 而不是 403。
+//
+// 403 加上「不属于你」的文案等于确认了这个名字存在，任何登录用户
+// 拿任意名字试一次就能探测出部署里有哪些账号。
+func TestQRCodeStartOnOthersAccountLooksLikeNotFound(t *testing.T) {
+	srv, st, api := newTestServerWithAPI(t)
+	api.SetQRLogin(&fakeQR{key: "K", url: "u"})
+
+	loginAs(t, srv, st, "王五", false)
+	mustBindingFor(t, st, "王五", "王五的号", "111")
+
+	li := loginAs(t, srv, st, "李四", false)
+	resp := jsonRequest(t, li, "POST", srv.URL+"/api/accounts/qrcode", `{"name":"王五的号"}`)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("状态码 = %d, 期望 404（403 会泄漏该账号名已被占用）", resp.StatusCode)
+	}
+
+	var body map[string]string
+	_ = json.NewDecoder(resp.Body).Decode(&body)
+	if strings.Contains(body["error"], "不属于") {
+		t.Errorf("错误文案泄漏了归属信息: %q", body["error"])
+	}
+
+	// 拦截逻辑本身必须仍然生效：别人的账号没被动过
+	acc, err := st.GetAccountByName(context.Background(), "王五的号")
+	if err != nil {
+		t.Fatalf("账号应仍存在: %v", err)
+	}
+	if acc.OwnerID == 0 {
+		t.Error("账号归属不该被改动")
 	}
 }
 
@@ -324,6 +358,3 @@ func TestDeleteAccountByStranger(t *testing.T) {
 		t.Error("账号不该被删掉")
 	}
 }
-
-var _ = httpapi.Options{} // 保证 import 被使用
-var _ = store.AccountInput{}
