@@ -135,6 +135,33 @@ func TestCooldownGroupNamesAreTrimmed(t *testing.T) {
 	}
 }
 
+// 首尾空白不算区别：{"甲":1, " 甲 ":2} 是重名，要拒。
+//
+// 名字按 trim 后存储，所以这两个 key 会落到同一格。不拒的话
+// 后写的静默覆盖先写的，用户看到的是「我明明设了两组，怎么只剩一组」
+func TestCooldownGroupsRejectDuplicateAfterTrim(t *testing.T) {
+	srv, st := newTestServer(t)
+	c := loginAs(t, srv, st, "张三", false)
+	bid := mustBindingFor(t, st, "张三", "小号", "123")
+	grantWrite(t, st, "张三", "小号", "123")
+
+	resp := jsonRequest(t, c, "PUT", srv.URL+"/api/bindings/"+itoa(bid)+"/cooldown-groups",
+		`{"甲":1000,"  甲  ":2000}`)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnprocessableEntity {
+		t.Fatalf("trim 后重名状态码 = %d, 期望 422", resp.StatusCode)
+	}
+
+	// 整批要一起拒，不能留下半截
+	groups, err := st.CooldownGroups(context.Background(), bid)
+	if err != nil {
+		t.Fatalf("读冷却组报错: %v", err)
+	}
+	if len(groups) != 0 {
+		t.Errorf("被拒的整批不该落库，实际 %v", groups)
+	}
+}
+
 func TestCooldownGroupsRequirePermissions(t *testing.T) {
 	srv, st := newTestServer(t)
 	loginAs(t, srv, st, "张三", false)

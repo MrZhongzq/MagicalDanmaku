@@ -308,7 +308,7 @@ func (s *Server) handlePutCooldownGroups(w http.ResponseWriter, r *http.Request)
 		if ms > maxCooldownMS {
 			respondError(w, http.StatusUnprocessableEntity,
 				"冷却组 %s 的间隔 %d 毫秒超过上限（%d 毫秒，即 24 小时）",
-				key, ms, int64(maxCooldownMS))
+				key, ms, maxCooldownMS)
 			return
 		}
 		if _, dup := groups[key]; dup {
