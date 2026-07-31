@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/account"
@@ -37,19 +38,39 @@ type danmakuSender interface {
 // BotAPI 的方法不带 ctx —— 它要被 goja 从 JS 里同步调用，签名必须简单。
 // 因此把 ctx 存进结构体。这在 Go 里通常是反模式，但 roomBot 的生命周期
 // 严格等于一次 run，不会泄漏。
+//
+// ctx 用 atomic.Pointer 而不是普通字段：关停时 runRun 会把它换成一个
+// 有超时预算、脱离取消链的 ctx（见 closeAll），好让 engine.Close() 结算
+// 未决合并窗口时真的能发出去，而不是立刻拿到 context.Canceled。这次
+// 替换发生时，早返回路径上可能还有其他绑定的事件处理 goroutine在
+// 并发调用 SendDanmaku/Block（它们还没被 wg.Wait() 等到），所以这里
+// 需要的是原子替换，不是一次性赋值——但也不是互斥锁：正常运行期
+// 只是多一次原子读，行为不变。
 type roomBot struct {
 	binding danmakuSender
-	ctx     context.Context
+	ctx     atomic.Pointer[context.Context]
 }
 
 var _ rules.BotAPI = (*roomBot)(nil)
 
+// newRoomBot 创建一个绑定到给定 ctx 的 roomBot。
+func newRoomBot(binding danmakuSender, ctx context.Context) *roomBot {
+	b := &roomBot{binding: binding}
+	b.ctx.Store(&ctx)
+	return b
+}
+
+// setCtx 原子地替换发送用的 ctx。供关停时切到有预算的 ctx。
+func (b *roomBot) setCtx(ctx context.Context) {
+	b.ctx.Store(&ctx)
+}
+
 func (b *roomBot) SendDanmaku(text string) error {
-	return b.binding.SendDanmaku(b.ctx, text)
+	return b.binding.SendDanmaku(*b.ctx.Load(), text)
 }
 
 func (b *roomBot) Block(uid string, hours int) error {
-	return b.binding.Block(b.ctx, uid, hours)
+	return b.binding.Block(*b.ctx.Load(), uid, hours)
 }
 
 // accountRuntime 是一个账号的运行时资源。
@@ -107,6 +128,15 @@ func runRun(args []string) error {
 	sched := scheduler.New(log)
 	var wg sync.WaitGroup
 	var engines []*rules.Engine
+	var bots []*roomBot
+
+	// 关停时给未决的合并窗口一个有限的发送预算。
+	//
+	// engine.Close() 会结算未决窗口并真的去发弹幕，但此时主 ctx 已被
+	// Ctrl+C 取消，限流器会立刻返回 context.Canceled，那批攒着的欢迎语
+	// 一条也发不出去（只会留下一堆 error 日志行）。用一个脱离取消链、
+	// 但有超时上限的 ctx，让它们有机会发出去而又不会拖死退出。
+	const shutdownSendBudget = 5 * time.Second
 
 	// 清理放在 defer 里，而不是只写在正常关停路径的末尾。
 	//
@@ -116,12 +146,15 @@ func runRun(args []string) error {
 	// 那批日志行根本不会产生：Close() 才是结算未决合并窗口的地方，
 	// 不调用它，攒着的欢迎语既不会发出去，也不会有对应的动作日志。
 	//
-	// 这里用闭包而不是直接 defer closeAll(engines, activity)：defer 的
-	// 参数在语句执行时就求值，若直接传值会捕获此刻仍是 nil 的 engines，
-	// 后续循环里的 append 不会反映到已经求过值的参数上。闭包捕获的是
-	// 变量本身，调用时才读取，因此能看到循环结束时的最终切片。
+	// 这里用闭包而不是直接 defer closeAll(engines, bots, ..., activity)：
+	// defer 的参数在语句执行时就求值，若直接传值会捕获此刻仍是 nil 的
+	// engines/bots，后续循环里的 append 不会反映到已经求过值的参数上。
+	// 闭包捕获的是变量本身，调用时才读取，因此能看到循环结束时的
+	// 最终切片。
 	defer func() {
-		closeAll(engines, activity)
+		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownSendBudget)
+		defer cancel()
+		closeAll(engines, bots, shutdownCtx, activity)
 	}()
 
 	for _, c := range cfgs {
@@ -145,11 +178,12 @@ func runRun(args []string) error {
 			Actions: actions,
 		}
 
+		bot := newRoomBot(binding, ctx)
 		engine, err := rules.NewEngine(rules.EngineOptions{
 			Label:          binding.Label(),
 			RoomID:         info.RoomID,
 			Rules:          c.Rules,
-			Bot:            &roomBot{binding: binding, ctx: ctx},
+			Bot:            bot,
 			Storage:        st.BindingStorage(c.BindingID),
 			Activity:       activity.Sink(c.AccountID, c.BindingID, info.RoomID),
 			CooldownGroups: c.CooldownGroups,
@@ -159,6 +193,7 @@ func runRun(args []string) error {
 			return fmt.Errorf("%s 的规则非法: %w", binding.Label(), err)
 		}
 		engines = append(engines, engine)
+		bots = append(bots, bot)
 
 		// 注册该绑定的定时规则
 		for _, r := range engine.ScheduledRules() {
@@ -265,12 +300,19 @@ func buildAccounts(ctx context.Context, cfgs []store.RunConfig, log *slog.Logger
 	return out, nil
 }
 
-// closeAll 按「引擎优先」的顺序关闭资源。
+// closeAll 按「切换发送 ctx → 引擎 → 业务日志」的顺序关闭资源。
+//
+// 先把每个 roomBot 的发送 ctx 换成 shutdownCtx：engine.Close() 结算未决
+// 合并窗口时会调用 roomBot.SendDanmaku，若还在用已取消的主 ctx，攒着的
+// 欢迎语会立刻拿到 context.Canceled，一条都发不出去。
 //
 // engine.Close() 会结算未决的合并窗口（比如攒着的欢迎语），这一步会
 // 通过 Activity sink 产生业务日志；activity.Close() 才是把这些日志真正
 // 冲刷出去的地方。顺序反了不会报错，只会让那批日志静默消失。
-func closeAll(engines []*rules.Engine, activity *logging.ActivityWriter) {
+func closeAll(engines []*rules.Engine, bots []*roomBot, shutdownCtx context.Context, activity *logging.ActivityWriter) {
+	for _, b := range bots {
+		b.setCtx(shutdownCtx)
+	}
 	for _, e := range engines {
 		e.Close()
 	}

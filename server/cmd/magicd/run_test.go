@@ -30,6 +30,12 @@ type blockRecord struct {
 func (b *bindingStub) SendDanmaku(ctx context.Context, text string) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	// 模拟真实的 Limiter.Wait(ctx)：ctx 已取消时立刻返回 context.Canceled，
+	// 不管有没有配置 err。这正是 review 里描述的失败模式，也是
+	// TestCloseAllUsesShutdownBudgetForPendingSends 要验证的关键行为。
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if b.err != nil {
 		return b.err
 	}
@@ -49,7 +55,7 @@ func (b *bindingStub) Block(ctx context.Context, uid string, hours int) error {
 
 func TestRoomBotForwardsToBinding(t *testing.T) {
 	bs := &bindingStub{}
-	b := &roomBot{binding: bs, ctx: context.Background()}
+	b := newRoomBot(bs, context.Background())
 
 	if err := b.SendDanmaku("你好"); err != nil {
 		t.Fatalf("SendDanmaku 失败: %v", err)
@@ -68,7 +74,7 @@ func TestRoomBotForwardsToBinding(t *testing.T) {
 
 func TestRoomBotPropagatesError(t *testing.T) {
 	bs := &bindingStub{err: errors.New("发送失败")}
-	b := &roomBot{binding: bs, ctx: context.Background()}
+	b := newRoomBot(bs, context.Background())
 
 	if err := b.SendDanmaku("x"); err == nil {
 		t.Error("底层错误应当上报")
@@ -159,9 +165,10 @@ func TestCloseAllSettlesEngineWindowsBeforeFlushingWriter(t *testing.T) {
 		},
 	})
 
+	bot := newRoomBot(&bindingStub{}, context.Background())
 	eng, err := rules.NewEngine(rules.EngineOptions{
 		RoomID:   "123",
-		Bot:      &roomBot{binding: &bindingStub{}, ctx: context.Background()},
+		Bot:      bot,
 		Activity: activity.Sink(1, 1, "123"),
 		Rules: []rules.Rule{{
 			Name:      "进场欢迎",
@@ -180,7 +187,7 @@ func TestCloseAllSettlesEngineWindowsBeforeFlushingWriter(t *testing.T) {
 		Payload: event.UserEnter{User: event.User{UID: "1", Username: "观众"}},
 	})
 
-	closeAll([]*rules.Engine{eng}, activity)
+	closeAll([]*rules.Engine{eng}, []*roomBot{bot}, context.Background(), activity)
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -191,4 +198,72 @@ func TestCloseAllSettlesEngineWindowsBeforeFlushingWriter(t *testing.T) {
 	}
 	t.Error("closeAll 应先让引擎结算未决窗口，再让写入器冲刷——" +
 		"未在 flushed 里找到窗口结算产生的动作日志")
+}
+
+// TestCloseAllUsesShutdownBudgetForPendingSends 验证 review 项 C 的修复：
+// 关停时未决合并窗口结算产生的弹幕，必须真的发得出去，而不是因为
+// roomBot 还在用已取消的主 ctx 而立刻拿到 context.Canceled。
+//
+// bindingStub.SendDanmaku 会在 ctx 已取消时立刻返回 context.Canceled
+// （模拟真实的 Limiter.Wait(ctx) 行为）。这里给 roomBot 一个已取消的 ctx，
+// 但 closeAll 收到的 shutdownCtx 是有效的——只有 closeAll 真的把 roomBot
+// 的发送 ctx 换成 shutdownCtx，窗口结算时的弹幕才能发出去。
+func TestCloseAllUsesShutdownBudgetForPendingSends(t *testing.T) {
+	var mu sync.Mutex
+	var flushed []store.ActivityRow
+
+	activity := logging.NewActivityWriter(logging.ActivityWriterOptions{
+		Flush: func(_ context.Context, rows []store.ActivityRow) error {
+			mu.Lock()
+			defer mu.Unlock()
+			flushed = append(flushed, rows...)
+			return nil
+		},
+	})
+
+	stub := &bindingStub{}
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel() // 模拟 Ctrl+C 已经发生：roomBot 目前持有的就是这个 ctx
+
+	bot := newRoomBot(stub, canceledCtx)
+	eng, err := rules.NewEngine(rules.EngineOptions{
+		RoomID:   "123",
+		Bot:      bot,
+		Activity: activity.Sink(1, 1, "123"),
+		Rules: []rules.Rule{{
+			Name:      "进场欢迎",
+			Enabled:   true,
+			On:        []event.Type{event.TypeUserEnter},
+			Aggregate: &rules.AggregateSpec{Window: time.Hour, By: rules.AggregateByType},
+			Do:        []rules.Action{{Type: rules.ActionDanmaku, Template: []string{"欢迎"}}},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("创建引擎失败: %v", err)
+	}
+
+	eng.Handle(event.Event{
+		Type:    event.TypeUserEnter,
+		Payload: event.UserEnter{User: event.User{UID: "1", Username: "观众"}},
+	})
+
+	// shutdownCtx 未取消：closeAll 必须把它换给 bot，结算才能发出去
+	closeAll([]*rules.Engine{eng}, []*roomBot{bot}, context.Background(), activity)
+
+	stub.mu.Lock()
+	sent := len(stub.sent)
+	stub.mu.Unlock()
+	if sent != 1 {
+		t.Fatalf("关停时未决窗口的弹幕应发得出去，实际发送 %d 条", sent)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	for _, r := range flushed {
+		if r.Kind == store.ActivityAction && r.Detail != nil &&
+			!contains(string(r.Detail), "error") {
+			return // 找到了不带 error 的动作日志：发送真的成功了
+		}
+	}
+	t.Error("动作日志应不带 error（发送应当成功），实际 flushed 里没有找到")
 }
