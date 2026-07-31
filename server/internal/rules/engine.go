@@ -16,7 +16,8 @@ type EngineOptions struct {
 	RoomID         string // 用于定时触发的 Vars
 	Rules          []Rule
 	Bot            BotAPI
-	Storage        Storage // 可为 nil，此时使用内存存储
+	Storage        Storage      // 可为 nil，此时使用内存存储
+	Activity       ActivitySink // 可为 nil，此时不产生业务日志
 	CooldownGroups map[string]time.Duration
 	ScriptTimeout  time.Duration
 	Logger         *slog.Logger
@@ -40,6 +41,7 @@ type Engine struct {
 	executor *Executor
 	cooldown *Cooldown
 	log      *slog.Logger
+	activity ActivitySink
 
 	// 每条配置了合并的规则各有一个 Aggregator
 	aggregators map[string]*Aggregator
@@ -57,6 +59,9 @@ func NewEngine(opts EngineOptions) (*Engine, error) {
 	}
 	if opts.Storage == nil {
 		opts.Storage = NewMemStorage()
+	}
+	if opts.Activity == nil {
+		opts.Activity = nopSink{}
 	}
 	if opts.Label == "" {
 		opts.Label = opts.RoomID
@@ -85,6 +90,7 @@ func NewEngine(opts EngineOptions) (*Engine, error) {
 		roomID:      opts.RoomID,
 		cooldown:    cd,
 		log:         opts.Logger,
+		activity:    opts.Activity,
 		aggregators: make(map[string]*Aggregator),
 		byName:      make(map[string]Rule, len(opts.Rules)),
 	}
@@ -94,6 +100,7 @@ func NewEngine(opts EngineOptions) (*Engine, error) {
 		Bot:      opts.Bot,
 		Renderer: NewRenderer(rand.New(rand.NewSource(time.Now().UnixNano()))),
 		Script:   sandbox,
+		Activity: opts.Activity,
 		Logger:   opts.Logger,
 	})
 
@@ -123,6 +130,9 @@ func (e *Engine) Handle(ev event.Event) {
 	if e.closed {
 		return
 	}
+
+	// 无论是否命中规则都记录：业务日志是完整的房间流水
+	e.activity.RecordEvent(ev)
 
 	// 条件按单个事件求值
 	tr := PassthroughTrigger(ev)

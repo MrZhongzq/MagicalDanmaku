@@ -17,6 +17,7 @@ type ExecutorOptions struct {
 	Renderer          *Renderer
 	Script            *Sandbox
 	DefaultBlockHours int
+	Activity          ActivitySink
 	Logger            *slog.Logger
 }
 
@@ -26,6 +27,7 @@ type Executor struct {
 	renderer   *Renderer
 	script     *Sandbox
 	blockHours int
+	activity   ActivitySink
 	log        *slog.Logger
 }
 
@@ -37,11 +39,15 @@ func NewExecutor(opts ExecutorOptions) *Executor {
 	if opts.Logger == nil {
 		opts.Logger = slog.Default()
 	}
+	if opts.Activity == nil {
+		opts.Activity = nopSink{}
+	}
 	return &Executor{
 		bot:        opts.Bot,
 		renderer:   opts.Renderer,
 		script:     opts.Script,
 		blockHours: opts.DefaultBlockHours,
+		activity:   opts.Activity,
 		log:        opts.Logger,
 	}
 }
@@ -54,7 +60,10 @@ func (e *Executor) Execute(ctx context.Context, r Rule, tr Trigger) error {
 	var errs []error
 
 	for i, a := range r.Do {
-		if err := e.runAction(ctx, r.Name, a, tr); err != nil {
+		err := e.runAction(ctx, r.Name, a, tr)
+		// 成功与失败都上报：「为什么没发出去」正是要查的
+		e.activity.RecordAction(r.Name, a, tr, err)
+		if err != nil {
 			e.log.Warn("动作执行失败",
 				"rule", r.Name, "action", i+1, "type", a.Type, "err", err)
 			errs = append(errs, fmt.Errorf("第 %d 个动作(%s): %w", i+1, a.Type, err))
