@@ -1,0 +1,21 @@
+# 本地开发与测试用的 PostgreSQL。
+#
+#   docker compose -f docker-compose.dev.yml up -d
+#   export MAGICD_TEST_DATABASE_URL='postgres://magicd:magicd@localhost:5433/magicd?sslmode=disable'
+#   cd server && go test ./internal/store/
+#
+# 端口用 5433 而非 5432，避开本机可能已在跑的 PostgreSQL。
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: magicd
+      POSTGRES_PASSWORD: magicd
+      POSTGRES_DB: magicd
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U magicd"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
