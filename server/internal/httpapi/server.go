@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/MrZhongzq/MagicalDanmaku/server/internal/perm"
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/store"
 )
 
@@ -88,6 +89,32 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/test/panic", func(http.ResponseWriter, *http.Request) {
 		panic("测试用的故意 panic")
 	})
+
+	// 仅测试用：验证权限守卫与可见范围过滤。放在真实中间件链上，
+	// 才能证明守卫在真实路由里也是这样工作的。
+	s.mux.HandleFunc("GET /api/test/guarded/{binding}",
+		s.requirePerm(perm.RuleRead, func(w http.ResponseWriter, r *http.Request) {
+			respondJSON(w, http.StatusOK, map[string]any{"binding": bindingFrom(r.Context()).Label()})
+		}))
+	s.mux.HandleFunc("POST /api/test/guarded-write/{binding}",
+		s.requirePerm(perm.RuleWrite, func(w http.ResponseWriter, r *http.Request) {
+			respondJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+		}))
+	s.mux.HandleFunc("GET /api/test/visible-bindings",
+		s.requireAuth(func(w http.ResponseWriter, r *http.Request) {
+			bs, err := s.visibleBindings(r.Context(), userFrom(r.Context()))
+			if err != nil {
+				respondStoreError(w, err, "")
+				return
+			}
+			out := make([]map[string]any, 0, len(bs))
+			for _, b := range bs {
+				out = append(out, map[string]any{
+					"id": b.ID, "accountName": b.AccountName, "roomId": b.RoomID,
+				})
+			}
+			respondJSON(w, http.StatusOK, out)
+		}))
 }
 
 // Handler 返回套好中间件的处理器。
