@@ -3,8 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"os"
-	"path/filepath"
 	"sync"
 	"testing"
 )
@@ -74,75 +72,6 @@ func TestRoomBotPropagatesError(t *testing.T) {
 	}
 }
 
-func TestRunRejectsMissingConfig(t *testing.T) {
-	err := runRun([]string{"-c", "/不存在的路径/config.yaml"})
-	if err == nil {
-		t.Error("配置文件不存在应当报错")
-	}
-}
-
-func TestRunRejectsEmptyConfigFlag(t *testing.T) {
-	if err := runRun([]string{}); err == nil {
-		t.Error("未指定 -c 应当报错")
-	}
-}
-
-func TestRunRejectsMissingCookieFile(t *testing.T) {
-	dir := t.TempDir()
-	cfg := filepath.Join(dir, "config.yaml")
-	content := `
-accounts:
-  - name: 测试号
-    cookieFile: /不存在的/cookie.txt
-    rooms:
-      - id: "1"
-        rules:
-          - name: 规则
-            on: [danmaku]
-            do: [{type: log}]
-`
-	if err := os.WriteFile(cfg, []byte(content), 0o600); err != nil {
-		t.Fatalf("写入配置失败: %v", err)
-	}
-
-	err := runRun([]string{"-c", cfg})
-	if err == nil {
-		t.Fatal("Cookie 文件不存在应当报错")
-	}
-	// 错误信息要指出是哪个账号
-	if !contains(err.Error(), "测试号") {
-		t.Errorf("错误信息应含账号名，实际: %v", err)
-	}
-}
-
-func TestRunRejectsInvalidCookie(t *testing.T) {
-	dir := t.TempDir()
-	cookie := filepath.Join(dir, "cookie.txt")
-	if err := os.WriteFile(cookie, []byte("这不是合法的 Cookie"), 0o600); err != nil {
-		t.Fatalf("写入 Cookie 失败: %v", err)
-	}
-
-	cfg := filepath.Join(dir, "config.yaml")
-	content := `
-accounts:
-  - name: 测试号
-    cookieFile: ` + cookie + `
-    rooms:
-      - id: "1"
-        rules:
-          - name: 规则
-            on: [danmaku]
-            do: [{type: log}]
-`
-	if err := os.WriteFile(cfg, []byte(content), 0o600); err != nil {
-		t.Fatalf("写入配置失败: %v", err)
-	}
-
-	if err := runRun([]string{"-c", cfg}); err == nil {
-		t.Error("非法 Cookie 应当报错")
-	}
-}
-
 func contains(s, sub string) bool {
 	return len(s) >= len(sub) && (func() bool {
 		for i := 0; i+len(sub) <= len(s); i++ {
@@ -152,4 +81,52 @@ func contains(s, sub string) bool {
 		}
 		return false
 	})()
+}
+
+func TestRunRequiresDatabase(t *testing.T) {
+	t.Setenv("MAGICD_DATABASE_URL", "")
+	err := runRun([]string{})
+	if err == nil {
+		t.Fatal("没有数据库连接串应报错")
+	}
+	if !contains(err.Error(), "MAGICD_DATABASE_URL") {
+		t.Errorf("错误信息应提示怎么配置，实际: %v", err)
+	}
+}
+
+func TestRunRejectsUnreachableDatabase(t *testing.T) {
+	// 端口 1 上不会有 PostgreSQL
+	err := runRun([]string{"-db", "postgres://x:y@127.0.0.1:1/z?sslmode=disable&connect_timeout=1"})
+	if err == nil {
+		t.Fatal("连不上数据库应报错")
+	}
+}
+
+func TestRetentionDaysFromEnv(t *testing.T) {
+	t.Setenv("MAGICD_LOG_RETENTION_DAYS", "7")
+	if got := retentionDays(); got != 7 {
+		t.Errorf("= %d, 期望 7", got)
+	}
+}
+
+func TestRetentionDaysDefault(t *testing.T) {
+	t.Setenv("MAGICD_LOG_RETENTION_DAYS", "")
+	if got := retentionDays(); got != 30 {
+		t.Errorf("默认应为 30，实际 %d", got)
+	}
+}
+
+func TestRetentionDaysZeroMeansNoPurge(t *testing.T) {
+	t.Setenv("MAGICD_LOG_RETENTION_DAYS", "0")
+	if got := retentionDays(); got != 0 {
+		t.Errorf("0 表示不清理，实际 %d", got)
+	}
+}
+
+func TestRetentionDaysIgnoresGarbage(t *testing.T) {
+	// 环境变量写错就退回默认值，不该让机器人起不来
+	t.Setenv("MAGICD_LOG_RETENTION_DAYS", "三十天")
+	if got := retentionDays(); got != 30 {
+		t.Errorf("非法值应退回默认 30，实际 %d", got)
+	}
 }

@@ -8,7 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
-	"strings"
+	"strconv"
 	"sync"
 	"time"
 
@@ -16,10 +16,11 @@ import (
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/connector/bilibili"
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/connector/bilibili/api"
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/connector/bilibili/auth"
+	"github.com/MrZhongzq/MagicalDanmaku/server/internal/logging"
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/ratelimit"
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/rules"
-	"github.com/MrZhongzq/MagicalDanmaku/server/internal/rules/config"
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/scheduler"
+	"github.com/MrZhongzq/MagicalDanmaku/server/internal/store"
 )
 
 // defaultRateLimit 是未配置时的账号发送间隔。
@@ -60,19 +61,14 @@ type accountRuntime struct {
 	api *api.Client
 }
 
-// runRun 加载配置并启动机器人。
+// defaultRetentionDays 是业务日志的默认保留天数。
+const defaultRetentionDays = 30
+
+// runRun 从数据库加载配置并启动机器人。
 func runRun(args []string) error {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
-	cfgPath := fs.String("c", "", "配置文件路径（必填）")
+	dsn := addDBFlag(fs)
 	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	if *cfgPath == "" {
-		return errors.New("必须通过 -c 指定配置文件")
-	}
-
-	cfg, err := config.Load(*cfgPath)
-	if err != nil {
 		return err
 	}
 
@@ -80,7 +76,30 @@ func runRun(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-	runtimes, err := buildAccounts(cfg, log)
+	st, err := openStoreChecked(ctx, *dsn)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+
+	cfgs, err := st.LoadRunConfig(ctx)
+	if err != nil {
+		return err
+	}
+	if len(cfgs) == 0 {
+		return fmt.Errorf("数据库里没有任何启用的绑定。\n" +
+			"先 magicd login --save <账号名> --owner <用户名>，再 magicd binding add <账号名> <房间号>；\n" +
+			"或者用 magicd import -c config.yaml --owner <用户名> 导入现成的配置")
+	}
+
+	// 业务日志：一个写入器，每个绑定分一个带归属 ID 的 Sink
+	activity := logging.NewActivityWriter(logging.ActivityWriterOptions{
+		Flush:  st.InsertActivity,
+		Logger: log,
+	})
+	defer activity.Close()
+
+	runtimes, err := buildAccounts(ctx, cfgs, log)
 	if err != nil {
 		return err
 	}
@@ -89,20 +108,20 @@ func runRun(args []string) error {
 	var wg sync.WaitGroup
 	var engines []*rules.Engine
 
-	for _, b := range cfg.Bindings() {
-		rt := runtimes[b.AccountName]
+	for _, c := range cfgs {
+		rt := runtimes[c.AccountName]
 
 		// 解析真实房间号：配置里可能填的是短号
-		info, err := rt.api.RoomInfo(ctx, b.RoomID)
+		info, err := rt.api.RoomInfo(ctx, c.RoomID)
 		if err != nil {
-			return fmt.Errorf("账号 %q 获取直播间 %s 信息失败: %w", b.AccountName, b.RoomID, err)
+			return fmt.Errorf("账号 %q 获取直播间 %s 信息失败: %w", c.AccountName, c.RoomID, err)
 		}
 
 		// 限流统一由 account.Binding 负责，这里传空限流器，
 		// 否则与 Binding 的等待叠加会让实际间隔翻倍。
 		actions := bilibili.NewActions(rt.api, ratelimit.NewInterval(0))
-		if b.MaxLength > 0 {
-			actions.SetMaxLength(b.MaxLength)
+		if c.MaxLength > 0 {
+			actions.SetMaxLength(c.MaxLength)
 		}
 		binding := &account.Binding{
 			Account: rt.acc,
@@ -113,9 +132,11 @@ func runRun(args []string) error {
 		engine, err := rules.NewEngine(rules.EngineOptions{
 			Label:          binding.Label(),
 			RoomID:         info.RoomID,
-			Rules:          b.Rules,
+			Rules:          c.Rules,
 			Bot:            &roomBot{binding: binding, ctx: ctx},
-			CooldownGroups: b.CooldownGroups,
+			Storage:        st.BindingStorage(c.BindingID),
+			Activity:       activity.Sink(c.AccountID, c.BindingID, info.RoomID),
+			CooldownGroups: c.CooldownGroups,
 			Logger:         log,
 		})
 		if err != nil {
@@ -137,11 +158,18 @@ func runRun(args []string) error {
 		if info.IsLiving() {
 			status = "直播中"
 		}
+		enabled := 0
+		for _, r := range c.Rules {
+			if r.Enabled {
+				enabled++
+			}
+		}
 		log.Info("已配置绑定",
 			"binding", binding.Label(),
 			"title", info.Title,
 			"status", status,
-			"rules", len(b.Rules))
+			"rules", len(c.Rules),
+			"enabled", enabled)
 
 		client := bilibili.NewClient(info.RoomID, rt.api, bilibili.WithLogger(log))
 
@@ -162,8 +190,17 @@ func runRun(args []string) error {
 		}(binding.Label(), client)
 	}
 
+	// 业务日志的定期清理
+	if days := retentionDays(); days > 0 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			purgeLoop(ctx, st, days, log)
+		}()
+	}
+
 	sched.Start()
-	log.Info("机器人已启动", "绑定数", len(cfg.Bindings()), "账号数", len(runtimes))
+	log.Info("机器人已启动", "绑定数", len(cfgs), "账号数", len(runtimes))
 	fmt.Println("按 Ctrl+C 退出")
 
 	<-ctx.Done()
@@ -174,45 +211,88 @@ func runRun(args []string) error {
 	for _, e := range engines {
 		e.Close()
 	}
+	// 引擎全部关闭后再冲刷业务日志，才能捞到 Close 时结算的合并窗口
+	activity.Close()
 	log.Info("已退出")
 	return nil
 }
 
 // buildAccounts 载入全部账号并初始化各自的运行时资源。
 //
-// 同一账号在配置中出现多次（连接多个直播间）时只建一份，
-// 保证限流器被真正共享。
-func buildAccounts(cfg *config.Config, log *slog.Logger) (map[string]*accountRuntime, error) {
-	out := make(map[string]*accountRuntime, len(cfg.Accounts))
+// 同一账号连接多个直播间时只建一份，保证限流器被真正共享。
+func buildAccounts(ctx context.Context, cfgs []store.RunConfig, log *slog.Logger) (map[string]*accountRuntime, error) {
+	out := make(map[string]*accountRuntime)
 
-	for _, a := range cfg.Accounts {
-		data, err := os.ReadFile(a.CookieFile)
-		if err != nil {
-			return nil, fmt.Errorf("读取账号 %q 的 Cookie 文件失败: %w", a.Name, err)
-		}
-		sess, err := auth.ParseSession(strings.TrimSpace(string(data)))
-		if err != nil {
-			return nil, fmt.Errorf("账号 %q 的 Cookie 无效: %w", a.Name, err)
+	for _, c := range cfgs {
+		if _, ok := out[c.AccountName]; ok {
+			continue
 		}
 
-		interval := time.Duration(a.RateLimit)
+		sess, err := auth.ParseSession(c.Cookie)
+		if err != nil {
+			return nil, fmt.Errorf("账号 %q 的 Cookie 无效，请重新扫码登录（magicd login --save %s）: %w",
+				c.AccountName, c.AccountName, err)
+		}
+
+		interval := c.RateLimit
 		if interval <= 0 {
 			interval = defaultRateLimit
 		}
 
 		apiClient := api.New(sess)
 		// wbi 签名每个账号刷新一次即可，其全部直播间共用
-		if err := apiClient.RefreshNav(context.Background()); err != nil {
-			return nil, fmt.Errorf("账号 %q 初始化签名失败: %w", a.Name, err)
+		if err := apiClient.RefreshNav(ctx); err != nil {
+			return nil, fmt.Errorf("账号 %q 初始化签名失败: %w", c.AccountName, err)
 		}
 
-		out[a.Name] = &accountRuntime{
-			acc: account.New(a.Name, sess, interval),
+		out[c.AccountName] = &accountRuntime{
+			acc: account.New(c.AccountName, sess, interval),
 			api: apiClient,
 		}
-		log.Info("已载入账号",
-			"name", a.Name, "uid", sess.UID,
-			"直播间数", len(a.Rooms), "发送间隔", interval)
+		log.Info("已载入账号", "name", c.AccountName, "uid", sess.UID, "发送间隔", interval)
 	}
 	return out, nil
+}
+
+// retentionDays 读业务日志的保留天数。
+//
+// 环境变量写错就退回默认值：一个日志保留期的笔误，不该让机器人起不来。
+func retentionDays() int {
+	s := os.Getenv("MAGICD_LOG_RETENTION_DAYS")
+	if s == "" {
+		return defaultRetentionDays
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil || n < 0 {
+		return defaultRetentionDays
+	}
+	return n
+}
+
+// purgeLoop 每小时清理一次超期的业务日志。
+func purgeLoop(ctx context.Context, st *store.Store, days int, log *slog.Logger) {
+	ticker := time.NewTicker(time.Hour)
+	defer ticker.Stop()
+
+	purge := func() {
+		cutoff := time.Now().AddDate(0, 0, -days)
+		n, err := st.PurgeActivityBefore(ctx, cutoff)
+		if err != nil {
+			log.Error("清理业务日志失败", "err", err)
+			return
+		}
+		if n > 0 {
+			log.Info("已清理超期业务日志", "条数", n, "保留天数", days)
+		}
+	}
+
+	purge() // 启动时先清一次，不必等满一小时
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			purge()
+		}
+	}
 }
