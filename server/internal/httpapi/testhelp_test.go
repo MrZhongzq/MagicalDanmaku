@@ -15,11 +15,12 @@ import (
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/store"
 )
 
-// newTestServer 起一个真实的 HTTP 服务与独立 schema 的数据库。
+// newTestServerWithAPI 与 newTestServer 相同，但额外返回 *httpapi.Server，
+// 供需要注入假实现（如扫码登录）的测试使用。
 //
 // 用 httptest.NewServer 打真实 HTTP 而不是直接调 handler 函数：
 // 路由匹配、方法限制、中间件顺序都是要测的行为，绕过它们就等于没测。
-func newTestServer(t *testing.T) (*httptest.Server, *store.Store) {
+func newTestServerWithAPI(t *testing.T) (*httptest.Server, *store.Store, *httpapi.Server) {
 	t.Helper()
 
 	dsn := os.Getenv("MAGICD_TEST_DATABASE_URL")
@@ -73,6 +74,13 @@ func newTestServer(t *testing.T) (*httptest.Server, *store.Store) {
 	})
 	srv := httptest.NewServer(api.Handler())
 	t.Cleanup(srv.Close)
+	return srv, st, api
+}
+
+// newTestServer 与 newTestServerWithAPI 相同，只是不需要 *httpapi.Server 的
+// 调用方可以少写一个返回值。
+func newTestServer(t *testing.T) (*httptest.Server, *store.Store) {
+	srv, st, _ := newTestServerWithAPI(t)
 	return srv, st
 }
 

@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/MrZhongzq/MagicalDanmaku/server/internal/connector/bilibili/auth"
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/perm"
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/store"
 )
@@ -55,11 +56,17 @@ type Options struct {
 
 // Server 持有 HTTP 服务的全部依赖。
 type Server struct {
-	store *store.Store
-	opts  Options
-	log   *slog.Logger
-	mux   *http.ServeMux
+	store   *store.Store
+	opts    Options
+	log     *slog.Logger
+	mux     *http.ServeMux
+	qrs     *qrSessions
+	qrLogin qrStarter
 }
+
+// qrTTL 是扫码会话在内存表里的存活时间，与 B 站二维码本身的
+// 有效期（3 分钟）一致——二维码过期了，会话留着也没用。
+const qrTTL = 3 * time.Minute
 
 // New 创建服务并注册全部路由。
 func New(st *store.Store, opts Options) *Server {
@@ -74,10 +81,12 @@ func New(st *store.Store, opts Options) *Server {
 	}
 
 	s := &Server{
-		store: st,
-		opts:  opts,
-		log:   opts.Logger,
-		mux:   http.NewServeMux(),
+		store:   st,
+		opts:    opts,
+		log:     opts.Logger,
+		mux:     http.NewServeMux(),
+		qrs:     newQRSessions(qrTTL),
+		qrLogin: auth.NewQRLogin(nil),
 	}
 	s.routes()
 	return s
@@ -110,6 +119,13 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/users", s.requireAdmin(s.handleCreateUser))
 	s.mux.HandleFunc("POST /api/users/{name}/password", s.requireAuth(s.handleChangePassword))
 	s.mux.HandleFunc("DELETE /api/users/{name}", s.requireAdmin(s.handleDeleteUser))
+
+	// B 站账号。扫码的两步都用 POST：轮询成功时会建账号，是状态改变。
+	s.mux.HandleFunc("GET /api/accounts", s.requireAuth(s.handleListAccounts))
+	s.mux.HandleFunc("POST /api/accounts/qrcode", s.requireAuth(s.handleQRCodeStart))
+	s.mux.HandleFunc("POST /api/accounts/qrcode/{key}", s.requireAuth(s.handleQRCodePoll))
+	s.mux.HandleFunc("PATCH /api/accounts/{name}", s.requireAuth(s.handlePatchAccount))
+	s.mux.HandleFunc("DELETE /api/accounts/{name}", s.requireAuth(s.handleDeleteAccount))
 }
 
 // testRoutes 注册仅供测试用的路由（/api/test/*）。
