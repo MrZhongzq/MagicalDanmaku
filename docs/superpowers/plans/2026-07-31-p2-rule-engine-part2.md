@@ -1690,31 +1690,40 @@ git commit -m "feat: 实现动作执行与错误隔离"
 ```
 
 ---
+### Task 10: 账号与绑定模型
 
-### Task 10: 多账号轮换
+> **本任务已于 2026-07-31 重写。** 初版实现为「轮询账号池 + 失效自动
+> 切换」，与实际需求相反，已由提交 `e5c81bf0` 撤销。账号不是可互换的
+> 资源，而是各有职责的参与者，详见设计文档第 9 节。
 
 **Files:**
-- Create: `server/internal/account/pool.go`
-- Test: `server/internal/account/pool_test.go`
+- Create: `server/internal/account/account.go`
+- Test: `server/internal/account/account_test.go`
 
 **Interfaces:**
-- Consumes: P0 的 `connector.Actions`、`connector.SendDanmakuRequest`、
-  `connector.BlockRequest`、`bilibili.IsFatal`
+- Consumes: P0 的 `connector.Actions`、`auth.Session`、`ratelimit.Limiter`
 - Produces:
-  - `account.Account{Name string, Actions connector.Actions}`
-  - `account.Pool` 结构，`account.New(accounts []Account, log *slog.Logger) *Pool`
-  - `(*Pool).SendDanmaku(ctx context.Context, roomID, text string) error`
-  - `(*Pool).Block(ctx context.Context, roomID, uid string, hours int) error`
-  - `(*Pool).Healthy() int` — 返回当前可用账号数
-  - `account.ErrNoHealthyAccount`
+  - `account.Account{Name string, Session *auth.Session, Limiter ratelimit.Limiter}`
+  - `account.New(name string, sess *auth.Session, interval time.Duration) *Account`
+  - `account.Binding{Account *Account, RoomID string, Actions connector.Actions}`
+  - `(*Binding).Label() string` — 形如 `主播号@1706666491`，用于日志
+  - `(*Binding).SendDanmaku(ctx context.Context, text string) error`
+  - `(*Binding).Block(ctx context.Context, uid string, hours int) error`
+  - `account.ErrNoAccount`
 
-**设计要点：** 账号被 P0 的 `IsFatal` 判定为致命错误（`-101` 未登录、
-`-111` csrf 失效、`1003` 已被禁言）后移出轮换并记日志。全部账号失效时
-返回错误而**不静默丢弃**。
+**设计要点：**
+
+1. **运行单元是 Binding**，即「账号-直播间」组合。同一直播间被两个账号
+   连接时是两个独立 Binding，各跑各的规则。
+2. **不做账号轮换与 fallback。** 指定账号失效就返回错误并记日志——主播号
+   被封不该让小号顶替房管操作，小号根本没有房管权限。
+3. **限流按账号共享。** B 站风控按账号计算，所以 `Limiter` 挂在 `Account`
+   上而非 `Binding` 上：账号 A 同时连甲乙两个房间时共用节奏，账号 B 完全
+   不受影响。
 
 - [ ] **Step 1: 写失败测试**
 
-创建 `server/internal/account/pool_test.go`：
+创建 `server/internal/account/account_test.go`：
 
 ```go
 package account
@@ -1722,177 +1731,205 @@ package account
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/connector"
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/connector/bilibili/api"
+	"github.com/MrZhongzq/MagicalDanmaku/server/internal/connector/bilibili/auth"
 )
 
 // stubActions 是 connector.Actions 的测试替身。
 type stubActions struct {
-	mu    sync.Mutex
-	name  string
-	sent  []string
-	err   error // 每次调用都返回该错误
-	calls int
+	mu     sync.Mutex
+	sent   []string
+	blocks []string
+	rooms  []string
+	err    error
 }
 
 func (s *stubActions) SendDanmaku(ctx context.Context, req connector.SendDanmakuRequest) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.calls++
 	if s.err != nil {
 		return s.err
 	}
 	s.sent = append(s.sent, req.Text)
+	s.rooms = append(s.rooms, req.RoomID)
 	return nil
 }
 
 func (s *stubActions) BlockUser(ctx context.Context, req connector.BlockRequest) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.calls++
-	return s.err
+	if s.err != nil {
+		return s.err
+	}
+	s.blocks = append(s.blocks, req.UID)
+	s.rooms = append(s.rooms, req.RoomID)
+	return nil
 }
 
 func (s *stubActions) UnblockUser(ctx context.Context, roomID, uid string) error {
 	return s.err
 }
 
-func (s *stubActions) count() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.calls
+func testSession(t *testing.T) *auth.Session {
+	t.Helper()
+	sess, err := auth.ParseSession("SESSDATA=x; bili_jct=tok; DedeUserID=42")
+	if err != nil {
+		t.Fatalf("ParseSession 失败: %v", err)
+	}
+	return sess
 }
 
-func TestPoolRoundRobin(t *testing.T) {
-	a := &stubActions{name: "A"}
-	b := &stubActions{name: "B"}
-	p := New([]Account{{Name: "A", Actions: a}, {Name: "B", Actions: b}}, nil)
+func TestAccountSharesLimiterAcrossRooms(t *testing.T) {
+	// 风控按账号算：同一账号的不同房间必须共用限流器
+	acc := New("主播号", testSession(t), 60*time.Millisecond)
+
+	a := &Binding{Account: acc, RoomID: "甲", Actions: &stubActions{}}
+	b := &Binding{Account: acc, RoomID: "乙", Actions: &stubActions{}}
 
 	ctx := context.Background()
-	for i := 0; i < 4; i++ {
-		if err := p.SendDanmaku(ctx, "1", "消息"); err != nil {
-			t.Fatalf("第 %d 次发送失败: %v", i+1, err)
-		}
+	if err := a.SendDanmaku(ctx, "第一条"); err != nil {
+		t.Fatalf("发送失败: %v", err)
 	}
-
-	if a.count() != 2 || b.count() != 2 {
-		t.Errorf("应均匀轮询，A=%d B=%d", a.count(), b.count())
+	start := time.Now()
+	if err := b.SendDanmaku(ctx, "第二条"); err != nil {
+		t.Fatalf("发送失败: %v", err)
 	}
-}
-
-func TestPoolSingleAccount(t *testing.T) {
-	a := &stubActions{}
-	p := New([]Account{{Name: "A", Actions: a}}, nil)
-
-	for i := 0; i < 3; i++ {
-		if err := p.SendDanmaku(context.Background(), "1", "消息"); err != nil {
-			t.Fatalf("发送失败: %v", err)
-		}
-	}
-	if a.count() != 3 {
-		t.Errorf("单账号应全部承担，实际 %d", a.count())
+	if d := time.Since(start); d < 40*time.Millisecond {
+		t.Errorf("同账号的另一个房间应受同一限流器约束，实际间隔 %v", d)
 	}
 }
 
-func TestPoolRemovesFatallyFailedAccount(t *testing.T) {
-	bad := &stubActions{err: &api.APIError{Code: -101, Message: "账号未登录"}}
-	good := &stubActions{}
-	p := New([]Account{{Name: "坏账号", Actions: bad}, {Name: "好账号", Actions: good}}, nil)
+func TestDifferentAccountsDoNotShareLimiter(t *testing.T) {
+	a := New("账号A", testSession(t), 5*time.Second)
+	b := New("账号B", testSession(t), 5*time.Second)
+
+	ba := &Binding{Account: a, RoomID: "甲", Actions: &stubActions{}}
+	bb := &Binding{Account: b, RoomID: "甲", Actions: &stubActions{}}
 
 	ctx := context.Background()
-	// 第一次会打到坏账号，失败后应自动切到好账号并完成发送
-	if err := p.SendDanmaku(ctx, "1", "消息"); err != nil {
-		t.Fatalf("应自动切换到可用账号，实际失败: %v", err)
+	if err := ba.SendDanmaku(ctx, "A 发的"); err != nil {
+		t.Fatalf("发送失败: %v", err)
 	}
-	if len(good.sent) != 1 {
-		t.Errorf("好账号应完成发送，实际 %v", good.sent)
+	start := time.Now()
+	if err := bb.SendDanmaku(ctx, "B 发的"); err != nil {
+		t.Fatalf("发送失败: %v", err)
 	}
-	if p.Healthy() != 1 {
-		t.Errorf("坏账号应被移出轮换，剩余健康账号 = %d", p.Healthy())
-	}
-
-	// 后续发送不应再尝试坏账号
-	before := bad.count()
-	for i := 0; i < 3; i++ {
-		p.SendDanmaku(ctx, "1", "消息")
-	}
-	if bad.count() != before {
-		t.Errorf("已失效账号不应再被调用，调用数从 %d 变为 %d", before, bad.count())
+	if d := time.Since(start); d > 500*time.Millisecond {
+		t.Errorf("不同账号不应互相拖慢，实际等待 %v", d)
 	}
 }
 
-func TestPoolKeepsAccountOnRetryableError(t *testing.T) {
-	// 10030 发送过快是可重试错误，不该移出轮换
-	a := &stubActions{err: &api.APIError{Code: 10030, Message: "发送过快"}}
-	p := New([]Account{{Name: "A", Actions: a}}, nil)
-
-	if err := p.SendDanmaku(context.Background(), "1", "消息"); err == nil {
-		t.Error("发送应当失败")
-	}
-	if p.Healthy() != 1 {
-		t.Errorf("可重试错误不应移出账号，健康账号 = %d", p.Healthy())
-	}
-}
-
-func TestPoolAllAccountsFailed(t *testing.T) {
-	a := &stubActions{err: &api.APIError{Code: -101}}
-	b := &stubActions{err: &api.APIError{Code: -111}}
-	p := New([]Account{{Name: "A", Actions: a}, {Name: "B", Actions: b}}, nil)
-
-	err := p.SendDanmaku(context.Background(), "1", "消息")
-	if err == nil {
-		t.Fatal("全部账号失效时应返回错误，不得静默丢弃")
-	}
-	if p.Healthy() != 0 {
-		t.Errorf("健康账号数 = %d, 期望 0", p.Healthy())
+func TestBindingPassesRoomID(t *testing.T) {
+	st := &stubActions{}
+	b := &Binding{
+		Account: New("账号", testSession(t), 0),
+		RoomID:  "1706666491",
+		Actions: st,
 	}
 
-	// 再次发送应立刻返回 ErrNoHealthyAccount
-	err = p.SendDanmaku(context.Background(), "1", "消息")
-	if !errors.Is(err, ErrNoHealthyAccount) {
-		t.Errorf("err = %v, 期望 ErrNoHealthyAccount", err)
+	ctx := context.Background()
+	if err := b.SendDanmaku(ctx, "你好"); err != nil {
+		t.Fatalf("SendDanmaku 失败: %v", err)
 	}
-}
-
-func TestPoolEmptyIsError(t *testing.T) {
-	p := New(nil, nil)
-	if err := p.SendDanmaku(context.Background(), "1", "消息"); !errors.Is(err, ErrNoHealthyAccount) {
-		t.Errorf("空账号池应返回 ErrNoHealthyAccount，实际 %v", err)
-	}
-}
-
-func TestPoolBlock(t *testing.T) {
-	a := &stubActions{}
-	p := New([]Account{{Name: "A", Actions: a}}, nil)
-
-	if err := p.Block(context.Background(), "1", "999", 12); err != nil {
+	if err := b.Block(ctx, "999", 12); err != nil {
 		t.Fatalf("Block 失败: %v", err)
 	}
-	if a.count() != 1 {
-		t.Errorf("调用数 = %d", a.count())
+
+	if len(st.rooms) != 2 {
+		t.Fatalf("调用数 = %d", len(st.rooms))
+	}
+	for i, r := range st.rooms {
+		if r != "1706666491" {
+			t.Errorf("第 %d 次调用的 roomID = %q", i+1, r)
+		}
+	}
+	if len(st.sent) != 1 || st.sent[0] != "你好" {
+		t.Errorf("sent = %v", st.sent)
+	}
+	if len(st.blocks) != 1 || st.blocks[0] != "999" {
+		t.Errorf("blocks = %v", st.blocks)
 	}
 }
 
-func TestPoolConcurrentSend(t *testing.T) {
-	a := &stubActions{}
-	b := &stubActions{}
-	p := New([]Account{{Name: "A", Actions: a}, {Name: "B", Actions: b}}, nil)
+func TestBindingReportsErrorWithoutFallback(t *testing.T) {
+	// 账号失效就报错，不切换到其他账号
+	st := &stubActions{err: &api.APIError{Code: -101, Message: "账号未登录"}}
+	b := &Binding{
+		Account: New("失效账号", testSession(t), 0),
+		RoomID:  "甲",
+		Actions: st,
+	}
+
+	err := b.SendDanmaku(context.Background(), "消息")
+	if err == nil {
+		t.Fatal("账号失效应当报错")
+	}
+	// 错误信息要能定位到是哪个账号在哪个房间出的问题
+	if !strings.Contains(err.Error(), "失效账号") {
+		t.Errorf("错误信息应含账号名，实际 %v", err)
+	}
+	if !strings.Contains(err.Error(), "甲") {
+		t.Errorf("错误信息应含房间号，实际 %v", err)
+	}
+}
+
+func TestBindingLabel(t *testing.T) {
+	b := &Binding{
+		Account: New("主播号", testSession(t), 0),
+		RoomID:  "1706666491",
+	}
+	if got := b.Label(); got != "主播号@1706666491" {
+		t.Errorf("Label = %q", got)
+	}
+}
+
+func TestBindingWithoutAccountFails(t *testing.T) {
+	b := &Binding{RoomID: "甲", Actions: &stubActions{}}
+	if err := b.SendDanmaku(context.Background(), "x"); !errors.Is(err, ErrNoAccount) {
+		t.Errorf("err = %v, 期望 ErrNoAccount", err)
+	}
+}
+
+func TestBindingRespectsContext(t *testing.T) {
+	acc := New("账号", testSession(t), 5*time.Second)
+	b := &Binding{Account: acc, RoomID: "甲", Actions: &stubActions{}}
+
+	ctx := context.Background()
+	if err := b.SendDanmaku(ctx, "第一条"); err != nil {
+		t.Fatalf("发送失败: %v", err)
+	}
+
+	ctx2, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
+	defer cancel()
+	if err := b.SendDanmaku(ctx2, "第二条"); err == nil {
+		t.Error("ctx 超时后应返回错误")
+	}
+}
+
+func TestBindingConcurrentSend(t *testing.T) {
+	st := &stubActions{}
+	b := &Binding{Account: New("账号", testSession(t), 0), RoomID: "甲", Actions: st}
 
 	var wg sync.WaitGroup
-	for i := 0; i < 50; i++ {
+	for i := 0; i < 30; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			p.SendDanmaku(context.Background(), "1", "并发消息")
+			b.SendDanmaku(context.Background(), "并发")
 		}()
 	}
 	wg.Wait()
 
-	if total := a.count() + b.count(); total != 50 {
-		t.Errorf("总调用数 = %d, 期望 50", total)
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if len(st.sent) != 30 {
+		t.Errorf("发送数 = %d, 期望 30", len(st.sent))
 	}
 }
 ```
@@ -1907,152 +1944,103 @@ Expected: 编译失败，`undefined: New`。
 
 - [ ] **Step 3: 实现**
 
-创建 `server/internal/account/pool.go`：
+创建 `server/internal/account/account.go`：
 
 ```go
-// Package account 管理多个 B 站账号的轮换发言。
+// Package account 定义账号与「账号-直播间」绑定。
+//
+// 账号不是可互换的资源，而是各有职责的参与者：主播号可能只做统计与
+// 房管而不发言，小号负责欢迎答谢。因此本包不提供轮换或 fallback——
+// 指定账号失效就报错，由使用者处理。
 package account
 
 import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
-	"sync"
+	"time"
 
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/connector"
-	"github.com/MrZhongzq/MagicalDanmaku/server/internal/connector/bilibili"
+	"github.com/MrZhongzq/MagicalDanmaku/server/internal/connector/bilibili/auth"
+	"github.com/MrZhongzq/MagicalDanmaku/server/internal/ratelimit"
 )
 
-// ErrNoHealthyAccount 表示没有可用账号。
-var ErrNoHealthyAccount = errors.New("account: 没有可用的账号")
+// ErrNoAccount 表示绑定缺少账号。
+var ErrNoAccount = errors.New("account: 绑定未指定账号")
 
-// Account 是一个可发言的账号。
+// Account 是一个已登录账号，可连接多个直播间。
+//
+// Limiter 挂在账号上而非绑定上：B 站的风控按账号计算，同一账号的全部
+// 直播间必须共享发送节奏，不同账号之间则完全独立。
 type Account struct {
 	Name    string
+	Session *auth.Session
+	Limiter ratelimit.Limiter
+}
+
+// New 创建账号。interval 为该账号全部直播间共享的最小发送间隔。
+func New(name string, sess *auth.Session, interval time.Duration) *Account {
+	return &Account{
+		Name:    name,
+		Session: sess,
+		Limiter: ratelimit.NewInterval(interval),
+	}
+}
+
+// Binding 是「账号-直播间」组合，P2 的运行单元。
+//
+// 同一直播间被两个账号连接时是两个独立 Binding，各自有独立的连接、
+// 规则集与冷却状态，互不知道对方存在。
+type Binding struct {
+	Account *Account
+	RoomID  string
 	Actions connector.Actions
 }
 
-// Pool 轮询多个账号发送动作，绕开单账号的频率限制。
-//
-// 账号被 P0 的 IsFatal 判定为致命错误（-101 未登录、-111 csrf 失效、
-// 1003 已被禁言）后移出轮换。全部账号失效时返回错误而非静默丢弃——
-// 静默失败会让使用者以为机器人在正常工作。
-type Pool struct {
-	log *slog.Logger
-
-	mu      sync.Mutex
-	entries []*entry
-	next    int
-}
-
-// entry 是池中的一个账号及其健康状态。
-type entry struct {
-	acc     Account
-	healthy bool
-}
-
-// New 创建账号池。
-func New(accounts []Account, log *slog.Logger) *Pool {
-	if log == nil {
-		log = slog.Default()
+// Label 返回用于日志的标识，形如 "主播号@1706666491"。
+func (b *Binding) Label() string {
+	name := "(未指定账号)"
+	if b.Account != nil {
+		name = b.Account.Name
 	}
-	p := &Pool{log: log}
-	for _, a := range accounts {
-		p.entries = append(p.entries, &entry{acc: a, healthy: true})
+	return name + "@" + b.RoomID
+}
+
+// SendDanmaku 以本绑定的账号身份，向本绑定的直播间发送弹幕。
+func (b *Binding) SendDanmaku(ctx context.Context, text string) error {
+	if b.Account == nil {
+		return ErrNoAccount
 	}
-	return p
-}
-
-// Healthy 返回当前可用账号数。
-func (p *Pool) Healthy() int {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	n := 0
-	for _, e := range p.entries {
-		if e.healthy {
-			n++
-		}
-	}
-	return n
-}
-
-// SendDanmaku 轮询选账号发送弹幕，遇致命错误自动切换下一个。
-func (p *Pool) SendDanmaku(ctx context.Context, roomID, text string) error {
-	return p.do(ctx, func(a connector.Actions) error {
-		return a.SendDanmaku(ctx, connector.SendDanmakuRequest{RoomID: roomID, Text: text})
-	})
-}
-
-// Block 轮询选账号执行禁言。
-func (p *Pool) Block(ctx context.Context, roomID, uid string, hours int) error {
-	return p.do(ctx, func(a connector.Actions) error {
-		return a.BlockUser(ctx, connector.BlockRequest{RoomID: roomID, UID: uid, Hours: hours})
-	})
-}
-
-// do 在健康账号上执行操作，遇致命错误剔除该账号并重试下一个。
-//
-// 最多尝试与账号数相同的次数，避免全部失效时无限循环。
-func (p *Pool) do(ctx context.Context, fn func(connector.Actions) error) error {
-	total := len(p.entries)
-	if total == 0 {
-		return ErrNoHealthyAccount
-	}
-
-	var lastErr error
-	for i := 0; i < total; i++ {
-		e := p.pick()
-		if e == nil {
-			if lastErr != nil {
-				return fmt.Errorf("account: 全部账号均已失效: %w", lastErr)
-			}
-			return ErrNoHealthyAccount
-		}
-
-		err := fn(e.acc.Actions)
-		if err == nil {
-			return nil
-		}
-		lastErr = err
-
-		if bilibili.IsFatal(err) {
-			p.markUnhealthy(e)
-			p.log.Error("账号已失效，移出轮换",
-				"account", e.acc.Name, "err", err, "healthy", p.Healthy())
-			continue // 换下一个账号重试
-		}
-		// 可重试错误（如 10030 发送过快）：保留账号，直接上报
+	if err := b.Account.Limiter.Wait(ctx); err != nil {
 		return err
 	}
-
-	if lastErr != nil {
-		return fmt.Errorf("account: 全部账号均已失效: %w", lastErr)
-	}
-	return ErrNoHealthyAccount
-}
-
-// pick 轮询取下一个健康账号，全部失效时返回 nil。
-func (p *Pool) pick() *entry {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	n := len(p.entries)
-	for i := 0; i < n; i++ {
-		e := p.entries[p.next%n]
-		p.next = (p.next + 1) % n
-		if e.healthy {
-			return e
-		}
+	err := b.Actions.SendDanmaku(ctx, connector.SendDanmakuRequest{
+		RoomID: b.RoomID,
+		Text:   text,
+	})
+	if err != nil {
+		return fmt.Errorf("%s 发送弹幕失败: %w", b.Label(), err)
 	}
 	return nil
 }
 
-// markUnhealthy 把账号标记为失效。
-func (p *Pool) markUnhealthy(e *entry) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	e.healthy = false
+// Block 以本绑定的账号身份，在本绑定的直播间禁言用户。
+func (b *Binding) Block(ctx context.Context, uid string, hours int) error {
+	if b.Account == nil {
+		return ErrNoAccount
+	}
+	if err := b.Account.Limiter.Wait(ctx); err != nil {
+		return err
+	}
+	err := b.Actions.BlockUser(ctx, connector.BlockRequest{
+		RoomID: b.RoomID,
+		UID:    uid,
+		Hours:  hours,
+	})
+	if err != nil {
+		return fmt.Errorf("%s 禁言 %s 失败: %w", b.Label(), uid, err)
+	}
+	return nil
 }
 ```
 
@@ -2077,7 +2065,7 @@ Expected: PASS，无 DATA RACE。
 ```bash
 cd server && go vet ./... && gofmt -l .
 git add server/internal/account/
-git commit -m "feat: 实现多账号轮换与失效剔除"
+git commit -m "feat: 实现账号与直播间绑定模型"
 ```
 
 ---

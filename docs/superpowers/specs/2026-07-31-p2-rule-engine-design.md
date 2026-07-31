@@ -29,7 +29,7 @@ magicd run -c config.yaml
 | 定时任务 | 6 字段 cron（含秒） |
 | 事件动作 | 任意事件类型触发任意动作 |
 | 自动禁言 | 条件命中则禁言，时长可配 |
-| 多账号轮换发言 | 轮询选账号，绕开单账号频率限制 |
+| 多账号职责分工 | 每个「账号-直播间」组合独立配置规则，见第 9 节 |
 
 ### 1.2 明确不做
 
@@ -50,7 +50,7 @@ event.Event（来自 P0 Connector）
       │
       ▼
 ┌──────────────────────────────────────────┐
-│ Pipeline（每房间一条）                      │
+│ Pipeline（每个「账号-直播间」绑定一条）        │
 │                                          │
 │  ① Aggregator  缓冲窗口：去重 + 合并        │
 │  ② Matcher     规则匹配（结构化条件）        │
@@ -64,8 +64,11 @@ event.Event（来自 P0 Connector）
  Scheduler（cron 定时任务，直接注入 ②）
 ```
 
-每个房间一条独立 Pipeline，房间之间互不影响。Pipeline 内部单 goroutine
-串行处理，避免规则之间产生竞态。
+**每个「账号-直播间」绑定一条独立 Pipeline**（见第 9 节），绑定之间
+互不影响。Pipeline 内部单 goroutine 串行处理，避免规则之间产生竞态。
+
+同一直播间被两个账号连接时会有两条 Pipeline 与两条 WebSocket 连接，
+这是刻意的：它们代表不同账号的视角与职责。
 
 ---
 
@@ -335,17 +338,59 @@ P4 的 WebUI 中可直接下拉选择。
 
 ---
 
-## 9. 多账号轮换
+## 9. 账号与绑定
+
+### 9.1 运行单元是「账号-直播间」
+
+账号不是可互换的资源，而是各有职责的参与者。配置结构为三层嵌套：
+
+```
+账号A ──┬── 直播间甲  →  A 在甲的规则
+        └── 直播间乙  →  A 在乙的规则
+账号B ──┬── 直播间乙  →  B 在乙的规则
+        └── 直播间丙  →  B 在丙的规则
+```
+
+**每个「账号-直播间」组合（下称 Binding）是一个独立的运行单元**：自己的
+WebSocket 连接、自己的规则集、自己的引擎实例。同一直播间被两个账号连接
+时会有两条连接，它们互不知道对方存在。
+
+这个模型同时覆盖两类场景：
+
+| 场景 | 配置 |
+|---|---|
+| 多账号单直播间（职责分工） | 主播号-甲 只做统计与房管不发言；小号-甲 负责欢迎答谢 |
+| 多账号多直播间 | 账号 C-张三房间、账号 D-李四房间，互不干扰 |
+
+### 9.2 不做账号轮换
+
+指定账号被封禁或 Cookie 失效时，**记录错误日志即可，不切换到其他账号**。
+
+理由：账号职责不同。主播号被封不该让小号顶替房管操作——小号根本没有
+房管权限；反过来让主播号去发欢迎语也违背「主播号不发言」的设定。
+自动 fallback 在这个模型下只会制造意料之外的行为。
+
+### 9.3 限流按账号而非按进程
+
+B 站的风控是按账号计算的，因此同一账号的全部直播间共享一个限流器，
+不同账号之间彼此独立。
 
 ```go
-type AccountPool struct {
-    accounts []*Account // 每个持有独立的 Actions 与限流器
+type Account struct {
+    Name    string
+    Session *auth.Session
+    Limiter ratelimit.Limiter // 该账号全部直播间共享
+}
+
+type Binding struct {
+    Account *Account
+    RoomID  string
+    Rules   []Rule
 }
 ```
 
-发弹幕时轮询选取下一个可用账号。账号被标记为失效（P0 的 `IsFatal` 判定，
-如 `-101` 未登录、`-111` csrf 失效）后移出轮换，并记录日志。全部账号失效
-时规则执行失败并上报，不静默丢弃。
+账号 A 同时连甲和乙时，它在两个房间的发送共用节奏；账号 B 完全不受
+账号 A 的发送频率影响。
 
 ---
 
@@ -368,60 +413,82 @@ type AccountPool struct {
 
 ## 11. 配置
 
+配置结构与 9.1 的三层模型同构：账号 → 直播间 → 规则。
+
 ```yaml
 accounts:
-  - name: main
-    cookieFile: cookie.txt
-  - name: sub1
-    cookieFile: cookie-sub1.txt
+  - name: 主播号
+    cookieFile: cookie-main.txt
+    # 该账号全部直播间共享的发送限流
+    rateLimit: 1.5s
 
-rooms:
-  - id: "1706666491"
-    accounts: [main, sub1]
+    rooms:
+      - id: "1706666491"
+        cooldownGroups:
+          moderation: 5s
+        rules:
+          # 主播号只做房管，不发言
+          - name: 广告禁言
+            on: [danmaku]
+            when:
+              any:
+                - {field: text, op: regex, value: "(广告|加群)"}
+                - {field: text, op: contains, value: "违禁词"}
+            cooldownGroup: moderation
+            do:
+              - type: block
+                hours: 1
 
-# 全局发送限流，防风控
-rateLimit:
-  interval: 1.5s
+  - name: 小号
+    cookieFile: cookie-sub.txt
+    rateLimit: 1.5s
 
-rules:
-  - name: 舰长进场欢迎
-    on: [user_enter]
-    when:
-      field: user.guardLevel
-      op: ">"
-      value: 0
-    aggregate:
-      window: 2s
-      by: type
-    cooldownGroup: greeting
-    cooldown: 3s
-    do:
-      - type: danmaku
-        template:
-          - "欢迎 {{join .users \"、\"}} 回家~"
-          - "{{join .users \"、\"}} 来啦！"
+    rooms:
+      - id: "1706666491"
+        cooldownGroups:
+          greeting: 5s
+          thanks: 2s
+        rules:
+          - name: 舰长进场欢迎
+            on: [user_enter]
+            when:
+              field: user.guardLevel
+              op: ">"
+              value: 0
+            aggregate:
+              window: 2s
+              by: type
+            cooldownGroup: greeting
+            cooldown: 3s
+            do:
+              - type: danmaku
+                template:
+                  - "欢迎 {{join .users \"、\"}} 回家~"
+                  - "{{join .users \"、\"}} 来啦！"
 
-  - name: 礼物答谢
-    on: [gift]
-    aggregate:
-      window: 3s
-      by: gift
-    cooldownGroup: thanks
-    do:
-      - type: danmaku
-        template:
-          - "感谢 {{simplifyName .user.username}} 的 {{.gift.name}} x{{.gift.count}}！"
-
-  - name: 关键词禁言
-    on: [danmaku]
-    when:
-      any:
-        - {field: text, op: regex, value: "(广告|加群)"}
-        - {field: text, op: contains, value: "违禁词"}
-    do:
-      - type: block
-        hours: 1
+          - name: 礼物答谢
+            on: [gift]
+            aggregate:
+              window: 3s
+              by: gift
+            cooldownGroup: thanks
+            do:
+              - type: danmaku
+                template:
+                  - "感谢 {{simplifyName .user.username}} 的 {{.gift.name}} x{{.gift.count}}！"
 ```
+
+### 11.1 规则内联，不做引用
+
+规则完整写在所属的「账号-直播间」下，不提供跨绑定的引用机制。
+
+多个绑定需要相同规则时确实要重复书写。这是有意的取舍：未来会引入
+**模板功能**来解决复用，现在引入一套引用机制会与之冲突。
+
+### 11.2 规则名的唯一性范围
+
+规则名在**单个绑定内**唯一即可，不要求全局唯一——同一条「进场欢迎」
+本来就会出现在多个绑定下。冷却状态也按绑定隔离，互不干扰。
 
 配置格式只是**一种序列化**。规则模型本身存储无关，P3 迁进数据库时核心
 逻辑不动，只换加载器。
@@ -479,7 +546,7 @@ server/internal/rules/
 └── config/
     └── yaml.go    YAML 加载与校验
 server/internal/account/
-└── pool.go        多账号轮换
+└── account.go     账号与「账号-直播间」绑定
 server/internal/scheduler/
 └── cron.go        定时任务
 ```

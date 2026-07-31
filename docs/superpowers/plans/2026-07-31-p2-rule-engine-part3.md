@@ -251,6 +251,40 @@ git commit -m "feat: 实现 cron 定时任务调度"
 
 ### Task 12: YAML 配置加载与校验
 
+> **本任务的配置结构已于 2026-07-31 修订。** 下文中扁平的
+> `accounts` / `rooms` / 顶层 `rules` 三段式**作废**，改为三层嵌套：
+> **账号 → 直播间 → 规则**，与设计文档第 9、11 节一致。
+>
+> 修订后的 YAML 形态：
+>
+> ```yaml
+> accounts:
+>   - name: 主播号
+>     cookieFile: cookie-main.txt
+>     rateLimit: 1.5s          # 该账号全部直播间共享
+>     rooms:
+>       - id: "1706666491"
+>         cooldownGroups:
+>           moderation: 5s
+>         rules:
+>           - name: 广告禁言
+>             on: [danmaku]
+>             do: [{type: block, hours: 1}]
+> ```
+>
+> 对应的类型改为：
+>
+> - `config.Config{Accounts []Account}`
+> - `config.Account{Name, CookieFile string, RateLimit Duration, Rooms []Room}`
+> - `config.Room{ID string, CooldownGroups map[string]Duration, Rules []rules.Rule}`
+>
+> 校验规则相应调整：账号名全局唯一；同一账号下直播间号唯一；
+> **规则名只需在单个「账号-直播间」内唯一**，不要求全局唯一——同一条
+> 「进场欢迎」本来就会出现在多个绑定下。
+>
+> 下文的操作符别名归一化、Duration 解析、事件类型校验、规则校验逻辑
+> **全部沿用**，只是挂载位置从顶层挪到了绑定内。
+
 **Files:**
 - Create: `server/internal/rules/config/config.go`
 - Test: `server/internal/rules/config/config_test.go`
@@ -1807,6 +1841,24 @@ git commit -m "feat: 组装规则引擎流水线"
 ---
 
 ### Task 14: magicd run 子命令
+
+> **本任务已于 2026-07-31 修订。** 下文按「每房间一个账号池」组装，
+> 现改为**按「账号-直播间」绑定组装**：
+>
+> - 遍历 `cfg.Accounts`，为每个账号建一个 `account.Account`
+>   （含该账号共享的限流器）
+> - 再遍历该账号的 `Rooms`，为每个组合建一个 `account.Binding`、
+>   一条 `bilibili.Client` 连接、一个 `rules.Engine`
+> - `roomBot` 适配器包装 `*account.Binding` 而非账号池，
+>   `danmakuSender` 接口相应改为
+>   `SendDanmaku(ctx, text) error` / `Block(ctx, uid, hours) error`
+>   （roomID 已固化在 Binding 内，不再作为参数）
+> - 事件流连接直接用该绑定自己账号的 Cookie，无需单独指定连接账号
+> - **不做账号轮换**：某个绑定的账号失效时记录错误日志，
+>   其他绑定继续运行
+>
+> 下文的启动流程、信号处理、优雅退出、示例配置结构**需相应改写**，
+> 定时任务注册改为按绑定注册（任务名用 `Binding.Label()`）。
 
 **Files:**
 - Create: `server/cmd/magicd/run.go`
