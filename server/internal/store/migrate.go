@@ -36,6 +36,10 @@ type migration struct {
 //
 // 只做前向迁移，不实现回滚：回滚脚本在实践中几乎从不被执行，
 // 却要一直维护；真出问题时恢复备份比跑回滚脚本可靠。
+//
+// Migrate 只负责 schema。首个管理员由命令行的 migrate 子命令在迁移后
+// 调用 EnsureAdmin 创建——把「改表」和「造数据」分开，前者可以反复跑，
+// 后者只在空库上发生一次。
 func (s *Store) Migrate(ctx context.Context) error {
 	ms, err := loadMigrations()
 	if err != nil {
