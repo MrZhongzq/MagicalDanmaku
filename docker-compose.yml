@@ -1,0 +1,63 @@
+# 生产部署：magicd + PostgreSQL。
+#
+#   1. cp .env.example .env   然后改掉 POSTGRES_PASSWORD
+#   2. docker compose up -d
+#   3. docker compose logs migrate    # 取管理员的一次性密码
+#
+# 与 docker-compose.dev.yml 的区别：那份是给本地跑测试用的，
+# 端口 5433、密码写死 magicd/magicd、不含 magicd 本身。
+# **不要把那份用于生产。**
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-magicd}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?请在 .env 里设置 POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-magicd}
+    volumes:
+      # 具名卷而非绑定挂载：绑定挂载在 Windows/macOS 上有 UID 与权限的老问题
+      - magicd-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-magicd}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    # 默认不对外暴露数据库端口。需要从宿主直连调试时再取消注释。
+    # ports:
+    #   - "127.0.0.1:5432:5432"
+
+  # 一次性建表。设计上 magicd run 发现 schema 落后会拒绝启动而不自动迁移
+  # （多实例部署下让每个实例各自决定何时改表很危险），所以用一个专职的
+  # 一次性 service —— 它恰好是「只有一个决定者」。
+  #
+  # 空库上它还会创建管理员并打印一次性密码：
+  #   docker compose logs migrate
+  migrate:
+    image: ghcr.io/mrzhongzq/magicd:${MAGICD_TAG:-latest}
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      MAGICD_DATABASE_URL: postgres://${POSTGRES_USER:-magicd}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-magicd}?sslmode=disable
+    command: ["migrate"]
+
+  magicd:
+    image: ghcr.io/mrzhongzq/magicd:${MAGICD_TAG:-latest}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      MAGICD_DATABASE_URL: postgres://${POSTGRES_USER:-magicd}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-magicd}?sslmode=disable
+      MAGICD_LOG_LEVEL: ${MAGICD_LOG_LEVEL:-info}
+      # 定时规则按本地时区算，时区错了规则会整体偏移
+      TZ: ${TZ:-Asia/Shanghai}
+    command: ["run"]
+
+volumes:
+  magicd-pgdata:
