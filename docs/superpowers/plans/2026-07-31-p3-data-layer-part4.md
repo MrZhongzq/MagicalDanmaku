@@ -1966,16 +1966,33 @@ func runRun(args []string) error {
 		Flush:  st.InsertActivity,
 		Logger: log,
 	})
-	defer activity.Close()
 
 	runtimes, err := buildAccounts(ctx, cfgs, log)
 	if err != nil {
+		activity.Close()
 		return err
 	}
 
 	sched := scheduler.New(log)
 	var wg sync.WaitGroup
 	var engines []*rules.Engine
+
+	// 清理放在 defer 里，而不是只写在正常关停路径的末尾。
+	//
+	// 装配循环里有多个早返回点（房间信息获取失败、规则非法、定时任务注册
+	// 失败），而此时前面的绑定可能已经建好引擎并跑起来了。只在末尾清理的话，
+	// 那些引擎的 Close() 永远不会被调用——后果不是日志被丢弃，而是那批日志行
+	// 根本不会产生：Close() 才是结算未决合并窗口的地方，不调用它，攒着的
+	// 欢迎语既不会发出去，也不会有对应的动作日志。
+	//
+	// 顺序仍是「引擎全部关闭之后才关业务日志写入器」：引擎 Close 时结算窗口
+	// 会产生日志，先关写入器就捞不到了。
+	defer func() {
+		for _, e := range engines {
+			e.Close()
+		}
+		activity.Close()
+	}()
 
 	for _, c := range cfgs {
 		rt := runtimes[c.AccountName]
@@ -2077,11 +2094,7 @@ func runRun(args []string) error {
 
 	sched.Stop()
 	wg.Wait()
-	for _, e := range engines {
-		e.Close()
-	}
-	// 引擎全部关闭后再冲刷业务日志，才能捞到 Close 时结算的合并窗口
-	activity.Close()
+	// 引擎与写入器的关闭在函数顶部的 defer 里，那里同时覆盖了早返回路径
 	log.Info("已退出")
 	return nil
 }
