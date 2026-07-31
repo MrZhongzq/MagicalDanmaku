@@ -155,6 +155,37 @@ func TestAdminChangesOthersPasswordWithoutOld(t *testing.T) {
 	}
 }
 
+// 管理员改自己的密码同样要带旧密码。
+//
+// 会话 Cookie 被劫持时（XSS、无人值守的浏览器），这条校验是攻击者
+// 把账号永久据为己有的最后一道门槛。管理员身份不该成为豁免理由。
+func TestAdminChangingOwnPasswordStillNeedsOldPassword(t *testing.T) {
+	srv, st := newTestServer(t)
+	admin := loginAs(t, srv, st, "管理员", true)
+
+	bad := jsonRequest(t, admin, "POST", srv.URL+"/api/users/管理员/password",
+		`{"newPassword":"不带旧密码就想改"}`)
+	bad.Body.Close()
+	if bad.StatusCode != http.StatusUnauthorized {
+		t.Errorf("管理员改自己密码不带旧密码，状态码 = %d, 期望 401", bad.StatusCode)
+	}
+
+	// 确认密码确实没被改掉
+	if _, err := st.VerifyPassword(context.Background(), "管理员", "pw-管理员"); err != nil {
+		t.Errorf("原密码应仍然有效: %v", err)
+	}
+
+	ok := jsonRequest(t, admin, "POST", srv.URL+"/api/users/管理员/password",
+		`{"oldPassword":"pw-管理员","newPassword":"带了旧密码的新密码"}`)
+	ok.Body.Close()
+	if ok.StatusCode != http.StatusOK {
+		t.Errorf("带了旧密码应通过，状态码 = %d", ok.StatusCode)
+	}
+	if _, err := st.VerifyPassword(context.Background(), "管理员", "带了旧密码的新密码"); err != nil {
+		t.Errorf("新密码应生效: %v", err)
+	}
+}
+
 // 普通用户不能改别人的密码
 func TestUserCannotChangeOthersPassword(t *testing.T) {
 	srv, st := newTestServer(t)

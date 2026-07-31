@@ -68,9 +68,13 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 	}
 
 	switch {
-	case caller.IsAdmin:
-		// 管理员改任何人的密码都不需要旧密码
 	case caller.Username == target:
+		// 自己改自己一律要带旧密码，管理员也不例外。
+		//
+		// 顺序不能与下面那个分支对调：Go 的无标签 switch 取第一个为真的
+		// 分支，若 IsAdmin 在前，管理员改自己时就会跳过旧密码校验。
+		// 那正好废掉了这条规则的意义——它存在就是为了让「会话已被劫持」
+		// 的攻击者无法把账号永久据为己有。
 		if _, err := s.store.VerifyPassword(r.Context(), target, req.OldPassword); err != nil {
 			if errors.Is(err, store.ErrBadCredentials) {
 				respondError(w, http.StatusUnauthorized, "旧密码不正确")
@@ -79,6 +83,8 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 			respondStoreError(w, err, "用户不存在")
 			return
 		}
+	case caller.IsAdmin:
+		// 管理员改他人的密码不需要旧密码
 	default:
 		respondError(w, http.StatusForbidden, "只能修改自己的密码")
 		return
