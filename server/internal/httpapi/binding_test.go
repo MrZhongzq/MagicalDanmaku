@@ -74,11 +74,15 @@ func TestListBindingsAdminGetsAllPermissions(t *testing.T) {
 	}
 }
 
-// 所有者在自己的绑定上应看到全部权限点。
+// 所有者在自己的绑定上应看到除 member:manage 外的全部权限点。
 //
 // 若这里返回 []，前端会把按钮全灰掉，而 PATCH 其实能成——
 // 「列表说没权限、请求却成了」比直接报错更难查。
-func TestListBindingsGivesOwnerAllPermissions(t *testing.T) {
+//
+// member:manage 必须显式断言不在里面：只对个数比对，会被将来
+// 加权限点时的巧合蒙混过去。把第三方拉进授权体系是管理员级别的
+// 决定，不是账号所有权的附带品。
+func TestListBindingsGivesOwnerAllPermissionsExceptMemberManage(t *testing.T) {
 	srv, st := newTestServer(t)
 	c := loginAs(t, srv, st, "张三", false)
 	mustBindingFor(t, st, "张三", "小号", "123")
@@ -93,9 +97,14 @@ func TestListBindingsGivesOwnerAllPermissions(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("绑定数 = %d, 期望 1", len(got))
 	}
-	if len(got[0].Permissions) != len(perm.All()) {
-		t.Errorf("所有者的权限点 = %v, 期望全部 %d 个",
-			got[0].Permissions, len(perm.All()))
+	if len(got[0].Permissions) != len(perm.All())-1 {
+		t.Errorf("所有者的权限点 = %v, 期望 %d 个（全部减去 member:manage）",
+			got[0].Permissions, len(perm.All())-1)
+	}
+	for _, p := range got[0].Permissions {
+		if p == string(perm.MemberManage) {
+			t.Errorf("所有者不该凭所有权获得 member:manage: %v", got[0].Permissions)
+		}
 	}
 }
 

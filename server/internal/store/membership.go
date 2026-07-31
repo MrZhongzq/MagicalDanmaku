@@ -75,9 +75,11 @@ func (s *Store) Revoke(ctx context.Context, username, accountName, roomID string
 // 三条通路，任一成立即放行：
 //
 //  1. 管理员——绕过全部检查
-//  2. 该绑定所属账号的所有者——所有者已经能删账号、删绑定、换 Cookie，
-//     却不能停用自己的绑定，那是不一致而不是安全。补上它严格弱于
-//     所有者已经握着的那些权力
+//  2. 该绑定所属账号的所有者，且 p 不是 perm.MemberManage——所有者
+//     已经能删账号、删绑定、换 Cookie，却不能停用自己的绑定，那是
+//     不一致而不是安全。但那些既有权力全是收缩性的（能清空别人的
+//     访问），推不出凭空赋予一个新人访问的委派权，所以这条通路对
+//     MemberManage 不生效，规则定义在 perm.OwnerBypass，此处只引用
 //  3. memberships 表里有行且包含这个权限点
 //
 // 没有命中以上任何一条时一律拒绝——默认拒绝，不给「忘了配就等于
@@ -88,19 +90,23 @@ func (s *Store) Revoke(ctx context.Context, username, accountName, roomID string
 // memberships_permissions_idx 那个索引对它完全不起作用，写错了不
 // 报错，只是退化成全表扫描。
 func (s *Store) Can(ctx context.Context, userID, bindingID int64, p perm.Permission) (bool, error) {
+	// 所有者通路不覆盖 member:manage，规则定义在 perm.OwnerBypass，
+	// 这里不重复判断逻辑，只把结果当参数传给 SQL。
+	ownerBypass := perm.OwnerBypass(p)
+
 	var ok bool
 	err := s.pool.QueryRow(ctx, `
 		SELECT EXISTS (SELECT 1 FROM users WHERE id = $1 AND is_admin)
-		    OR EXISTS (
+		    OR ($4 AND EXISTS (
 				SELECT 1 FROM bindings b
 				JOIN accounts a ON a.id = b.account_id
 				WHERE b.id = $2 AND a.owner_id = $1
-			)
+			))
 		    OR EXISTS (
 				SELECT 1 FROM memberships
 				WHERE user_id = $1 AND binding_id = $2
 				  AND permissions @> ARRAY[$3::text]
-			)`, userID, bindingID, string(p)).Scan(&ok)
+			)`, userID, bindingID, string(p), ownerBypass).Scan(&ok)
 	if err != nil {
 		return false, fmt.Errorf("store: 权限检查失败: %w", err)
 	}

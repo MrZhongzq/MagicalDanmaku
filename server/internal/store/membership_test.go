@@ -279,11 +279,14 @@ func TestListBindingMembers(t *testing.T) {
 	}
 }
 
-// 账号所有者对自己账号下的绑定拥有全部权限点。
+// 账号所有者对自己账号下的绑定拥有除 member:manage 外的全部权限点。
 //
 // 所有者已经能删账号、删绑定、换 Cookie。不给他 rule:write 的话，
 // 他能把绑定整个删掉却不能把它停用——那是不一致，不是安全。
-func TestOwnerHasAllPermissionsOnOwnBindings(t *testing.T) {
+//
+// member:manage 是例外：那些既有权力全是收缩性的（能清空别人的
+// 访问），推不出凭空赋予一个新人访问的委派权，二者是两个方向。
+func TestOwnerHasAllPermissionsExceptMemberManage(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
 
@@ -305,13 +308,24 @@ func TestOwnerHasAllPermissionsOnOwnBindings(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Can(%s) 报错: %v", p, err)
 		}
+		if p == perm.MemberManage {
+			// 把第三方拉进授权体系是管理员级别的决定，不是所有权的附带品
+			if ok {
+				t.Error("所有者不该凭所有权获得 member:manage")
+			}
+			continue
+		}
 		if !ok {
 			t.Errorf("所有者应拥有 %s", p)
 		}
 	}
 }
 
-// 所有权不跨账号：拥有甲账号不等于能碰乙账号的绑定
+// 所有权不跨账号：拥有甲账号不等于能碰乙账号的绑定。
+//
+// 这条测的是「zhang 不拥有任何账号」的情形，范围比名字暗示的窄；
+// 真正跨账号的情形（zhang 拥有账号 A，去碰账号 B）见下面
+// TestOwnershipDoesNotLeakBetweenOwnedAccounts。
 func TestOwnershipDoesNotLeakAcrossAccounts(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -324,6 +338,41 @@ func TestOwnershipDoesNotLeakAcrossAccounts(t *testing.T) {
 	}
 
 	ok, err := s.Can(ctx, zhang, b.ID, perm.RuleWrite)
+	if err != nil {
+		t.Fatalf("Can 报错: %v", err)
+	}
+	if ok {
+		t.Error("拥有别的账号不该给你这个账号的绑定上的权限")
+	}
+}
+
+// 拥有甲账号不等于能碰乙账号的绑定。
+//
+// Can 的所有者子查询是 JOIN 到该绑定所属的账号再比 owner_id，
+// 天然锁定；这条测试把它钉住，防止将来有人"优化"成先查用户拥有
+// 哪些账号再放行。
+func TestOwnershipDoesNotLeakBetweenOwnedAccounts(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	zhang := mustUser(t, s, "张三")
+	mine, err := s.CreateAccount(ctx, AccountInput{
+		Name: "我的号", Cookie: "c", OwnerID: zhang,
+	})
+	if err != nil {
+		t.Fatalf("创建账号报错: %v", err)
+	}
+	if _, err := s.UpsertBinding(ctx, mine.ID, "111"); err != nil {
+		t.Fatalf("创建绑定报错: %v", err)
+	}
+
+	other := mustAccount(t, s, "别人的号") // 所有者是 owner_别人的号
+	ob, err := s.UpsertBinding(ctx, other, "999")
+	if err != nil {
+		t.Fatalf("创建绑定报错: %v", err)
+	}
+
+	ok, err := s.Can(ctx, zhang, ob.ID, perm.RuleWrite)
 	if err != nil {
 		t.Fatalf("Can 报错: %v", err)
 	}

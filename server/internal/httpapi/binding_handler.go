@@ -67,8 +67,20 @@ func (s *Server) callerPermissions(ctx context.Context, u *store.User) (*permiss
 // 永远返回非 nil 切片：JSON 里要出 [] 而不是 null，前端拿到 null
 // 做 .includes() 会直接抛异常。
 func (ps *permissionSet) of(b *store.Binding) []string {
-	if ps.admin || ps.owned[b.AccountName] {
+	if ps.admin {
 		return perm.Strings(perm.All())
+	}
+	if ps.owned[b.AccountName] {
+		// 与 store.Can 同一条规则（定义在 perm.OwnerBypass）：所有者
+		// 拿全部权限点减去 member:manage——把第三方拉进授权体系是
+		// 管理员级别的决定，不是账号所有权的附带品。
+		out := make([]string, 0, len(perm.All()))
+		for _, p := range perm.All() {
+			if perm.OwnerBypass(p) {
+				out = append(out, string(p))
+			}
+		}
+		return out
 	}
 	if out, ok := ps.byBinding[b.ID]; ok && out != nil {
 		return out

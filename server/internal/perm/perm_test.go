@@ -82,6 +82,21 @@ func TestParseListDeduplicates(t *testing.T) {
 	}
 }
 
+func TestOwnerBypassExcludesMemberManage(t *testing.T) {
+	if perm.OwnerBypass(perm.MemberManage) {
+		t.Error("所有者不该凭所有权获得 member:manage——那是新增的委派权，" +
+			"不是他已有的收缩性权力的弱化版本")
+	}
+	for _, p := range perm.All() {
+		if p == perm.MemberManage {
+			continue
+		}
+		if !perm.OwnerBypass(p) {
+			t.Errorf("所有者应凭所有权获得 %s", p)
+		}
+	}
+}
+
 func TestStringsRoundTrip(t *testing.T) {
 	ss := perm.Strings([]perm.Permission{perm.RuleRead, perm.UserBlock})
 	if len(ss) != 2 || ss[0] != "rule:read" || ss[1] != "user:block" {

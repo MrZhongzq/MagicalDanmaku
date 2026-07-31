@@ -85,6 +85,24 @@ func ParseList(s string) ([]Permission, error) {
 	return out, nil
 }
 
+// OwnerBypass 判断账号所有者是否凭所有权就拥有权限点 p。
+//
+// 除 MemberManage 外全部为真。
+//
+// 所有者凭所有权拿到这些权限点，理由是它们严格弱于他已经握着的
+// 权力：删掉整个账号、删掉绑定（连带全部规则、冷却组、KV 与授权）、
+// 替换账号的 Cookie。但那些权力**全是收缩性的**——能清空别人的
+// 访问，不能凭空赋予一个新人访问。「能删光所有协作者」推不出
+// 「能新增一个协作者」，二者是两个方向而不是强弱。
+//
+// 所以 MemberManage 不在内：把第三方拉进授权体系是管理员级别的
+// 决定，不是账号所有权的附带品。
+//
+// **这条规则只此一处定义。** store.Can 与 httpapi 的 permissionSet
+// 都引它——各写一遍必然漂，而漂掉的后果是「列表说你没权限、请求
+// 却成了」，比直接报错更难查。
+func OwnerBypass(p Permission) bool { return p != MemberManage }
+
 // Strings 把权限点列表转成字符串切片，用于写库与打印。
 func Strings(ps []Permission) []string {
 	out := make([]string, len(ps))
