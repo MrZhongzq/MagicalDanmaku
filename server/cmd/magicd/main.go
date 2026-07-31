@@ -1,9 +1,6 @@
 // Command magicd 是神奇弹幕的服务端可执行文件。
 //
-// P0 阶段提供两个子命令：
-//
-//	login  扫码登录，输出 Cookie
-//	probe  连接直播间并打印实时事件流
+// 配置的唯一真相是 PostgreSQL。YAML 只是导入入口，run 不读它。
 package main
 
 import (
@@ -11,32 +8,49 @@ import (
 	"os"
 
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/buildinfo"
+	"github.com/MrZhongzq/MagicalDanmaku/server/internal/logging"
 )
 
 const usage = `magicd —— 神奇弹幕服务端
 
-用法:
-  magicd login [-o cookie.txt]
-        扫码登录，把 Cookie 写入文件（默认输出到标准输出）
+配置存在 PostgreSQL 里。先设置连接串：
+  export MAGICD_DATABASE_URL='postgres://magicd:magicd@localhost:5432/magicd?sslmode=disable'
 
+初次使用:
+  magicd migrate                              建表，并在空库上创建管理员
+  magicd login --save 小号 --owner admin       扫码登录一个 B 站账号并入库
+  magicd binding add 小号 1706666491           让这个账号连接一个直播间
+  magicd import -c config.yaml --owner admin   或者：直接导入现成的 YAML
+  magicd run                                   启动机器人
+
+用户与授权:
+  magicd user add <用户名> [--admin]           创建用户
+  magicd user passwd <用户名>                  修改密码
+  magicd user list                             列出用户
+  magicd grant <用户名> <账号名@房间号> <权限点,...>
+  magicd revoke <用户名> <账号名@房间号>
+  magicd perms <用户名>                        查看某人的授权
+  magicd can <用户名> <账号名@房间号> <权限点>   检查某人有没有某个权限
+  magicd grant -list                           列出全部权限点
+
+账号与绑定:
+  magicd account list                          列出 B 站账号
+  magicd binding add <账号名> <房间号>
+  magicd binding list
+  magicd binding rm|enable|disable <账号名@房间号>
+
+排障:
+  magicd login [-o cookie.txt]                 扫码登录，Cookie 写文件（YAML 路径用）
   magicd probe -room <房间号> [-cookie-file cookie.txt] [-type <事件类型>]
-                             [-dump <CMD名>] [-dump-file dump.jsonl]
-        连接直播间并打印实时事件流；-dump 可把指定 CMD 的原始 JSON 落盘，
-        用于采集样本、补写映射
+                                [-dump <CMD名>] [-dump-file dump.jsonl]
+        连接直播间并打印实时事件流；-dump 可把指定 CMD 的原始 JSON 落盘
+  magicd version                               显示版本信息
 
-  magicd run -c config.yaml
-        按配置文件运行弹幕机器人。配置为三层结构：账号 → 直播间 → 规则，
-        每个「账号-直播间」组合独立运行，互不干扰
-
-  magicd version
-        显示版本信息
-
-示例:
-  magicd login -o cookie.txt
-  magicd probe -room 21452505 -cookie-file cookie.txt
-  magicd probe -room 21452505 -cookie-file cookie.txt -type danmaku,gift
-  magicd probe -room 21452505 -cookie-file cookie.txt -dump unknown
-  magicd run -c config.yaml
+环境变量:
+  MAGICD_DATABASE_URL        PostgreSQL 连接串
+  MAGICD_LOG_LEVEL           debug / info / warn / error，默认 info
+  MAGICD_LOG_FILE            系统日志文件路径，留空则只写 stderr
+  MAGICD_LOG_RETENTION_DAYS  业务日志保留天数，默认 30，0 表示不清理
 `
 
 func main() {
@@ -45,7 +59,14 @@ func main() {
 		os.Exit(2)
 	}
 
-	var err error
+	// 系统日志在分发子命令之前装配好，这样连接失败之类的错误也有去处
+	closer, err := logging.SetupSystem(logging.SystemOptionsFromEnv())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "错误: %v\n", err)
+		os.Exit(1)
+	}
+	defer func() { _ = closer.Close() }()
+
 	switch os.Args[1] {
 	case "login":
 		err = runLogin(os.Args[2:])
@@ -53,6 +74,24 @@ func main() {
 		err = runProbe(os.Args[2:])
 	case "run":
 		err = runRun(os.Args[2:])
+	case "migrate":
+		err = runMigrate(os.Args[2:])
+	case "import":
+		err = runImport(os.Args[2:])
+	case "user":
+		err = runUser(os.Args[2:])
+	case "account":
+		err = runAccount(os.Args[2:])
+	case "binding":
+		err = runBinding(os.Args[2:])
+	case "grant":
+		err = runGrant(os.Args[2:])
+	case "revoke":
+		err = runRevoke(os.Args[2:])
+	case "perms":
+		err = runPerms(os.Args[2:])
+	case "can":
+		err = runCan(os.Args[2:])
 	case "version", "-v", "--version":
 		fmt.Println(buildinfo.Get().Detail())
 		return
