@@ -262,3 +262,71 @@ func TestActivityWriterConcurrentEnqueue(t *testing.T) {
 		t.Errorf("写出 %d 条 + 丢弃 %d 条 ≠ 投递的 1600 条", len(rows), w.Dropped())
 	}
 }
+
+// 排空是确定性可测的：让首次 flush 阻塞住写入 goroutine，
+// 后续投递就只能堆在 channel 里。若删掉停止分支的排空逻辑，
+// 这些行会全部丢失，本测试必然失败。
+func TestActivityWriterDrainsChannelOnClose(t *testing.T) {
+	c := newCollector()
+	release := make(chan struct{})
+	blocked := make(chan struct{})
+	var once sync.Once
+
+	w := logging.NewActivityWriter(logging.ActivityWriterOptions{
+		Flush: func(ctx context.Context, rows []store.ActivityRow) error {
+			once.Do(func() { close(blocked) })
+			<-release
+			return c.flush(ctx, rows)
+		},
+		BufferSize: 64,
+		BatchSize:  1,         // 首条立即触发 flush，把写入 goroutine 卡住
+		Interval:   time.Hour, // 不让定时器插手
+	})
+
+	w.Enqueue(store.ActivityRow{EventType: "第一条"})
+	<-blocked // 确认写入 goroutine 已卡在 flush 里
+
+	// 这些只能堆在 channel 里，因为写入 goroutine 动不了
+	for i := 0; i < 20; i++ {
+		w.Enqueue(store.ActivityRow{EventType: "堆积"})
+	}
+
+	close(release)
+	w.Close()
+
+	rows, _ := c.snapshot()
+	if int64(len(rows))+w.Dropped() != 21 {
+		t.Errorf("写出 %d 条 + 丢弃 %d 条 ≠ 投递的 21 条", len(rows), w.Dropped())
+	}
+	if w.Dropped() != 0 {
+		t.Errorf("缓冲 64 装得下 21 条，不该有丢弃，实际丢了 %d 条", w.Dropped())
+	}
+}
+
+// Enqueue 与 Close 并发是真实关停场景，必须在 -race 下跑过。
+// 本测试不断言条数（关停时刻本就不确定），只断言不 panic、不卡死。
+func TestActivityWriterCloseDuringConcurrentEnqueue(t *testing.T) {
+	c := newCollector()
+	w := logging.NewActivityWriter(logging.ActivityWriterOptions{
+		Flush:      c.flush,
+		BufferSize: 256,
+		BatchSize:  16,
+		Interval:   time.Millisecond,
+	})
+
+	var wg sync.WaitGroup
+	for g := 0; g < 4; g++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 500; i++ {
+				w.Enqueue(store.ActivityRow{EventType: "danmaku"})
+			}
+		}()
+	}
+
+	// 生产者仍在跑的时候关闭
+	time.Sleep(5 * time.Millisecond)
+	w.Close()
+	wg.Wait() // 关闭后继续投递不得 panic
+}

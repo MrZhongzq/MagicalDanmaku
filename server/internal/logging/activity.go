@@ -29,6 +29,9 @@ const (
 type ActivityWriterOptions struct {
 	// Flush 把一批日志落库。注入而非直接持有 *store.Store，
 	// 是为了让写入器的批量与丢弃逻辑不需要数据库就能测。
+	//
+	// 传入的切片只在本次调用期间有效：底层数组会被下一批复用。
+	// 实现若需要在返回后继续持有这批数据，必须自己拷贝。
 	Flush func(context.Context, []store.ActivityRow) error
 
 	BufferSize         int           // 缓冲条数，0 用默认
@@ -94,7 +97,10 @@ func NewActivityWriter(opts ActivityWriterOptions) *ActivityWriter {
 func (w *ActivityWriter) Enqueue(row store.ActivityRow) {
 	select {
 	case <-w.stop:
-		// 已关闭，直接丢弃：往关掉的写入器里投递不该 panic
+		// 已关闭，计入丢弃：约束是「丢弃并计数」，这条路径也不例外。
+		// 不记日志——关停后可能有大量事件涌入，逐条打日志会淹没退出过程，
+		// 计数会在 Close 的汇总里体现。
+		w.dropped.Add(1)
 		return
 	default:
 	}
@@ -171,6 +177,19 @@ func (w *ActivityWriter) run() {
 			}
 			if len(buf) > 0 {
 				w.write(buf)
+			}
+			// 排空之后仍可能有 Enqueue 在竞争窗口里投进来
+			// （它先查 stop 再发送，两步之间可能被抢占），一并计入丢弃。
+			// 这个清扫本身有固有的残余竞争——清扫之后还能再投进来——
+			// 无法根除，也不值得为此再加一轮循环。
+			for {
+				select {
+				case <-w.ch:
+					w.dropped.Add(1)
+					continue
+				default:
+				}
+				break
 			}
 			return
 		}
