@@ -38,7 +38,7 @@ magicd run                             # 启动
 
 ## 与原项目的差异
 
-- **平台**：只做 B 站；win / macOS / Linux × amd64 / arm64，加 Docker
+- **平台**：只做 B 站；win / macOS / Linux × amd64 / arm64 六个目标的静态二进制
 - **形态**：无头服务端，不依赖窗口；管理界面走 Web
 - **收费限制**：全部移除
 - **已删除**：`www/` OBS 浏览器源托管、五子棋等 extension、点歌姬与音乐
