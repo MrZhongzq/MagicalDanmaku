@@ -1,0 +1,129 @@
+# 神奇弹幕配置示例
+#
+# 用法：
+#   magicd login -o cookie-main.txt      # 每个账号各扫码登录一次
+#   cp config.example.yaml config.yaml
+#   magicd run -c config.yaml
+#
+# 结构是三层嵌套：账号 → 直播间 → 规则。
+# 每个「账号-直播间」组合是一个独立的运行单元，有自己的连接、规则与
+# 冷却状态。同一直播间被两个账号连接时是两条独立连接，互不知道对方存在。
+#
+# 不做账号轮换：某个账号失效时只记录错误日志，不会让别的账号顶替。
+
+accounts:
+  # ── 账号一：主播自己的号 ────────────────────────────────
+  # 用于查看完整的礼物统计（主播号能拿到的字段比小号多），
+  # 以及执行房管操作。这个账号下没有配任何发弹幕的规则，
+  # 所以它不会说话——这是配置决定的，不是能力限制。
+  - name: 主播号
+    cookieFile: cookie-main.txt
+    rateLimit: 1.5s          # 该账号全部直播间共享，防风控
+
+    rooms:
+      - id: "1706666491"
+        cooldownGroups:
+          moderation: 5s
+
+        rules:
+          - name: 广告禁言
+            enabled: false     # 默认关闭！确认匹配无误后再改成 true
+            on: [danmaku]
+            when:
+              any:
+                - field: text
+                  op: regex
+                  value: '(加群|私聊|代打|带打)'
+                - field: text
+                  op: contains
+                  value: '违禁词'
+            cooldownGroup: moderation
+            do:
+              - type: block
+                hours: 1
+
+          # 把礼物记进日志，便于人工核对统计
+          - name: 礼物流水
+            on: [gift, guard_buy]
+            do:
+              - type: log
+
+  # ── 账号二：小号 ──────────────────────────────────────
+  # 负责欢迎、答谢与播报。
+  - name: 小号
+    cookieFile: cookie-sub.txt
+    rateLimit: 1.5s
+
+    rooms:
+      - id: "1706666491"
+        cooldownGroups:
+          greeting: 5s
+          thanks: 2s
+
+        rules:
+          - name: 舰长进场欢迎
+            on: [user_enter]
+            when:
+              field: user.guardLevel
+              op: '>'
+              value: 0
+            # 合并窗口：一波人同时进场只发一条。
+            # 顺带解决同一次进场的重复事件——B 站会同时下发
+            # ENTRY_EFFECT（无昵称）与 INTERACT_WORD_V2（完整），
+            # 窗口内按 UID 合并后取非空昵称。
+            aggregate:
+              window: 3s
+              by: type
+            cooldownGroup: greeting
+            do:
+              - type: danmaku
+                template:
+                  - '欢迎 {{join .users "、"}} 回家~'
+                  - '{{join .users "、"}} 来啦！'
+
+          - name: 礼物答谢
+            on: [gift]
+            # 按「用户+礼物」合并，连击会累加数量。
+            # 只监听 gift 不监听 gift_combo——两者重复计数。
+            aggregate:
+              window: 3s
+              by: gift
+            cooldownGroup: thanks
+            do:
+              - type: danmaku
+                template:
+                  - '感谢 {{simplifyName .user.username}} 的 {{.gift.name}} x{{.gift.count}}！'
+
+          - name: 上舰答谢
+            on: [guard_buy]
+            do:
+              - type: danmaku
+                template:
+                  - '感谢 {{simplifyName .user.username}} 开通{{.guard.name}}！'
+
+          - name: 关键词回复
+            on: [danmaku]
+            when:
+              field: text
+              op: contains
+              value: 求歌单
+            cooldown: 30s
+            do:
+              - type: danmaku
+                template: ['歌单在主播的动态里哦~']
+
+          - name: 定时提醒
+            schedule: '0 */10 * * * *'   # 6 字段含秒：每 10 分钟
+            do:
+              - type: danmaku
+                template: ['喜欢主播的话点个关注吧~']
+
+      # 小号还可以同时在另一个直播间干活，规则完全独立
+      # - id: "22222222"
+      #   rules:
+      #     - name: 打招呼
+      #       on: [user_enter]
+      #       aggregate: {window: 5s, by: type}
+      #       do:
+      #         - type: danmaku
+      #           template: ['{{join .users "、"}} 你好']

@@ -24,15 +24,19 @@ const usage = `magicd —— 神奇弹幕服务端
         连接直播间并打印实时事件流；-dump 可把指定 CMD 的原始 JSON 落盘，
         用于采集样本、补写映射
 
+  magicd run -c config.yaml
+        按配置文件运行弹幕机器人。配置为三层结构：账号 → 直播间 → 规则，
+        每个「账号-直播间」组合独立运行，互不干扰
+
+  magicd version
+        显示版本信息
+
 示例:
   magicd login -o cookie.txt
   magicd probe -room 21452505 -cookie-file cookie.txt
   magicd probe -room 21452505 -cookie-file cookie.txt -type danmaku,gift
   magicd probe -room 21452505 -cookie-file cookie.txt -dump unknown
-  magicd probe -room 21452505 -cookie-file cookie.txt -dump ONLINE_RANK_V3
-
-  magicd version
-        显示版本信息
+  magicd run -c config.yaml
 `
 
 func main() {
@@ -47,6 +51,8 @@ func main() {
 		err = runLogin(os.Args[2:])
 	case "probe":
 		err = runProbe(os.Args[2:])
+	case "run":
+		err = runRun(os.Args[2:])
 	case "version", "-v", "--version":
 		fmt.Println(buildinfo.Get().Detail())
 		return
