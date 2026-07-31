@@ -221,6 +221,29 @@ func TestActivityWriterSurvivesFlushError(t *testing.T) {
 	}
 }
 
+// 落库失败整批都没了，必须计入 Dropped()——否则这个计数器就不能代表
+// 实际丢失量。这条路径是可达的：CopyFrom 全批原子，一行坏数据
+// （比如已被删除的 binding_id）会让整批一起失败，每个 flush 周期复发。
+func TestActivityWriterCountsDroppedOnFlushError(t *testing.T) {
+	const n = 5
+	w := logging.NewActivityWriter(logging.ActivityWriterOptions{
+		Flush: func(context.Context, []store.ActivityRow) error {
+			return context.DeadlineExceeded // 恒失败
+		},
+		BatchSize: 1000,
+		Interval:  time.Hour,
+	})
+
+	for i := 0; i < n; i++ {
+		w.Enqueue(store.ActivityRow{EventType: "danmaku"})
+	}
+	w.Close()
+
+	if got := w.Dropped(); got < n {
+		t.Errorf("flush 恒失败时应把整批计入 Dropped()，投递 %d 条，Dropped()=%d", n, got)
+	}
+}
+
 func TestActivityWriterCloseIsIdempotent(t *testing.T) {
 	c := newCollector()
 	w := logging.NewActivityWriter(logging.ActivityWriterOptions{Flush: c.flush})

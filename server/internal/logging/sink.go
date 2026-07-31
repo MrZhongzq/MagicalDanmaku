@@ -83,9 +83,15 @@ func (s *Sink) RecordEvent(ev event.Event) {
 		detail = nil
 	}
 
+	// 取局部变量的地址而非 &s.bindingID：行会在写入器缓冲里滞留一段
+	// 时间才落库，共享同一个地址的话，将来若给 Sink 加了 mutator，
+	// 已入队未落库的行会追溯性地观察到新值。今天没有 mutator，
+	// 这个字段安全，但代价太小，不必等出问题才修。
+	bid := s.bindingID
+
 	s.w.Enqueue(store.ActivityRow{
 		AccountID:  s.accountID,
-		BindingID:  &s.bindingID,
+		BindingID:  &bid,
 		RoomID:     s.roomID,
 		Kind:       store.ActivityEvent,
 		EventType:  string(ev.Type),
@@ -126,9 +132,11 @@ func (s *Sink) RecordAction(ruleName string, a rules.Action, tr rules.Trigger, e
 		raw = nil
 	}
 
+	bid := s.bindingID // 见 RecordEvent 里的说明：取局部变量地址，不共享 &s.bindingID
+
 	s.w.Enqueue(store.ActivityRow{
 		AccountID:  s.accountID,
-		BindingID:  &s.bindingID,
+		BindingID:  &bid,
 		RoomID:     s.roomID,
 		Kind:       store.ActivityAction,
 		EventType:  string(tr.Type),

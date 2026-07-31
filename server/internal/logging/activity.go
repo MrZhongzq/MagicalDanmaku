@@ -204,6 +204,12 @@ func (w *ActivityWriter) write(buf []store.ActivityRow) []store.ActivityRow {
 	defer cancel()
 
 	if err := w.flush(ctx, buf); err != nil {
+		// 落库失败整批都没了，计入丢弃——设计承诺「丢弃要计数」，
+		// 只记日志的话 Dropped() 就代表不了实际丢失量。
+		// 这条路径是可达的：activity_logs.binding_id 有外键，run 期间
+		// 删掉一个绑定后它的引擎还在投递，CopyFrom 全批原子，
+		// 一行坏数据会让整批（含其他绑定的行）一起失败。
+		w.dropped.Add(int64(len(buf)))
 		w.log.Error("写入业务日志失败", "条数", len(buf), "err", err)
 	}
 	return buf[:0]
