@@ -62,6 +62,7 @@ type Server struct {
 	mux     *http.ServeMux
 	qrs     *qrSessions
 	qrLogin qrStarter
+	hub     *Hub
 }
 
 // qrTTL 是扫码会话在内存表里的存活时间，与 B 站二维码本身的
@@ -87,6 +88,7 @@ func New(st *store.Store, opts Options) *Server {
 		mux:     http.NewServeMux(),
 		qrs:     newQRSessions(qrTTL),
 		qrLogin: auth.NewQRLogin(nil),
+		hub:     NewHub(),
 	}
 	s.routes()
 	return s
@@ -158,6 +160,10 @@ func (s *Server) routes() {
 	// 业务日志：事件与动作在同一条时间线，走 event:read。
 	s.mux.HandleFunc("GET /api/bindings/{binding}/activity",
 		s.requirePerm(perm.EventRead, s.handleQueryActivity))
+
+	// 实时事件流：SSE 推送，权限与业务日志一致，同走 event:read。
+	s.mux.HandleFunc("GET /api/bindings/{binding}/stream",
+		s.requirePerm(perm.EventRead, s.handleStream))
 }
 
 // testRoutes 注册仅供测试用的路由（/api/test/*）。
@@ -248,3 +254,6 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	respondJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
+
+// Hub 返回事件中枢，供 run 把机器人收到的事件扇出进来。
+func (s *Server) Hub() *Hub { return s.hub }
