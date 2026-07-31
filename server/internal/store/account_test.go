@@ -139,6 +139,39 @@ func TestUpsertAccountUpdatesInsteadOfFailing(t *testing.T) {
 	}
 }
 
+// import 走的 YAML 里没有 uid 字段：UpsertAccount 传空 UID 时不该把
+// login --save 扫码写入的 UID 抹掉。「先扫码入库、再导 YAML 补规则」
+// 正是文档推荐的流程。
+func TestUpsertAccountPreservesUIDWhenNotProvided(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	owner := mustUser(t, s, "张三")
+
+	first, err := s.UpsertAccount(ctx, AccountInput{
+		Name: "主播号", Cookie: "old", UID: "20285041", OwnerID: owner,
+	})
+	if err != nil {
+		t.Fatalf("首次 upsert 报错: %v", err)
+	}
+	if first.UID != "20285041" {
+		t.Fatalf("首次 upsert 后 UID = %q", first.UID)
+	}
+
+	// 模拟 import：不带 UID
+	second, err := s.UpsertAccount(ctx, AccountInput{
+		Name: "主播号", Cookie: "new", OwnerID: owner,
+	})
+	if err != nil {
+		t.Fatalf("二次 upsert 报错: %v", err)
+	}
+	if second.UID != "20285041" {
+		t.Errorf("空 UID 的 upsert 不该抹掉已有 UID，实际变成了 %q", second.UID)
+	}
+	if second.Cookie != "new" {
+		t.Errorf("Cookie 仍应正常更新，实际 %q", second.Cookie)
+	}
+}
+
 func TestUpdateAccountCookie(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()

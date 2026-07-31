@@ -135,7 +135,10 @@ func (s *Store) UpsertAccount(ctx context.Context, in AccountInput) (*Account, e
 		INSERT INTO accounts (name, uid, cookie, rate_limit_ms, max_length, owner_id)
 		VALUES ($1, $2, $3, $4, $5, $6)
 		ON CONFLICT (name) DO UPDATE SET
-			uid           = EXCLUDED.uid,
+			-- uid 用 CASE 而非直接覆盖：import 走的 YAML 里没有 uid 字段，
+			-- 直接覆盖会把 login --save 扫码时写入的 UID 抹成空串，
+			-- 而「先扫码入库、再导 YAML 补规则」正是文档推荐的流程。
+			uid           = CASE WHEN EXCLUDED.uid = '' THEN accounts.uid ELSE EXCLUDED.uid END,
 			cookie        = EXCLUDED.cookie,
 			rate_limit_ms = EXCLUDED.rate_limit_ms,
 			max_length    = EXCLUDED.max_length,
