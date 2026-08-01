@@ -15,11 +15,12 @@ import (
 
 // stubActions 是 connector.Actions 的测试替身。
 type stubActions struct {
-	mu     sync.Mutex
-	sent   []string
-	blocks []string
-	rooms  []string
-	err    error
+	mu       sync.Mutex
+	sent     []string
+	blocks   []string
+	unblocks []string
+	rooms    []string
+	err      error
 }
 
 func (s *stubActions) SendDanmaku(ctx context.Context, req connector.SendDanmakuRequest) error {
@@ -45,7 +46,14 @@ func (s *stubActions) BlockUser(ctx context.Context, req connector.BlockRequest)
 }
 
 func (s *stubActions) UnblockUser(ctx context.Context, roomID, uid string) error {
-	return s.err
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.err != nil {
+		return s.err
+	}
+	s.unblocks = append(s.unblocks, uid)
+	s.rooms = append(s.rooms, roomID)
+	return nil
 }
 
 func testSession(t *testing.T) *auth.Session {
@@ -165,6 +173,61 @@ func TestBindingWithoutAccountFails(t *testing.T) {
 	b := &Binding{RoomID: "甲", Actions: &stubActions{}}
 	if err := b.SendDanmaku(context.Background(), "x"); !errors.Is(err, ErrNoAccount) {
 		t.Errorf("err = %v, 期望 ErrNoAccount", err)
+	}
+}
+
+// TestBindingUnblock 照着 Block 的用例写：断言 UnblockUser 被调用（含房间号、
+// UID），且共享的限流器确实被等待过——第二次调用不应立刻返回。
+func TestBindingUnblock(t *testing.T) {
+	acc := New("账号", testSession(t), 60*time.Millisecond)
+	st := &stubActions{}
+	b := &Binding{Account: acc, RoomID: "1706666491", Actions: st}
+
+	ctx := context.Background()
+	if err := b.Unblock(ctx, "999"); err != nil {
+		t.Fatalf("Unblock 失败: %v", err)
+	}
+	start := time.Now()
+	if err := b.Unblock(ctx, "999"); err != nil {
+		t.Fatalf("Unblock 失败: %v", err)
+	}
+	if d := time.Since(start); d < 40*time.Millisecond {
+		t.Errorf("第二次 Unblock 应等待限流器，实际间隔 %v", d)
+	}
+
+	if len(st.unblocks) != 2 || st.unblocks[0] != "999" || st.unblocks[1] != "999" {
+		t.Errorf("unblocks = %v", st.unblocks)
+	}
+	if len(st.rooms) != 2 || st.rooms[0] != "1706666491" || st.rooms[1] != "1706666491" {
+		t.Errorf("rooms = %v", st.rooms)
+	}
+}
+
+func TestBindingUnblockWithoutAccountFails(t *testing.T) {
+	b := &Binding{RoomID: "甲", Actions: &stubActions{}}
+	if err := b.Unblock(context.Background(), "999"); !errors.Is(err, ErrNoAccount) {
+		t.Errorf("err = %v, 期望 ErrNoAccount", err)
+	}
+}
+
+func TestBindingUnblockReportsErrorWithLabel(t *testing.T) {
+	// 错误信息要能定位到是哪个账号在哪个房间出的问题，与 Block/SendDanmaku 一致
+	st := &stubActions{err: &api.APIError{Code: -101, Message: "账号未登录"}}
+	b := &Binding{
+		Account: New("失效账号", testSession(t), 0),
+		RoomID:  "甲",
+		Actions: st,
+	}
+
+	err := b.Unblock(context.Background(), "999")
+	if err == nil {
+		t.Fatal("账号失效应当报错")
+	}
+	if !strings.Contains(err.Error(), "失效账号") {
+		t.Errorf("错误信息应含账号名，实际 %v", err)
+	}
+	if !strings.Contains(err.Error(), "甲") {
+		t.Errorf("错误信息应含房间号，实际 %v", err)
 	}
 }
 

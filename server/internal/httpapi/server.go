@@ -63,6 +63,7 @@ type Server struct {
 	qrs     *qrSessions
 	qrLogin qrStarter
 	hub     *Hub
+	runtime *runtimeRegistry
 }
 
 // qrTTL 是扫码会话在内存表里的存活时间，与 B 站二维码本身的
@@ -89,6 +90,7 @@ func New(st *store.Store, opts Options) *Server {
 		qrs:     newQRSessions(qrTTL),
 		qrLogin: auth.NewQRLogin(nil),
 		hub:     NewHub(),
+		runtime: newRuntimeRegistry(),
 	}
 	s.routes()
 	return s
@@ -156,6 +158,14 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET "+bl, s.requirePerm(perm.UserBlock, s.handleListBlockList))
 	s.mux.HandleFunc("POST "+bl, s.requirePerm(perm.UserBlock, s.handleAddToBlockList))
 	s.mux.HandleFunc("DELETE "+bl+"/{uid}", s.requirePerm(perm.UserBlock, s.handleRemoveFromBlockList))
+
+	// 即时动作。全部用 POST——它们都会改变外部状态。
+	s.mux.HandleFunc("POST /api/bindings/{binding}/danmaku",
+		s.requirePerm(perm.DanmakuSend, s.handleSendDanmaku))
+	s.mux.HandleFunc("POST /api/bindings/{binding}/block",
+		s.requirePerm(perm.UserBlock, s.handleBlockUser))
+	s.mux.HandleFunc("POST /api/bindings/{binding}/unblock",
+		s.requirePerm(perm.UserBlock, s.handleUnblockUser))
 
 	// 业务日志：事件与动作在同一条时间线，走 event:read。
 	s.mux.HandleFunc("GET /api/bindings/{binding}/activity",

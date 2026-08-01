@@ -93,3 +93,17 @@ func (b *Binding) Block(ctx context.Context, uid string, hours int) error {
 	}
 	return nil
 }
+
+// Unblock 以本绑定的账号身份，在本绑定的直播间解除禁言。
+func (b *Binding) Unblock(ctx context.Context, uid string) error {
+	if b.Account == nil {
+		return ErrNoAccount
+	}
+	if err := b.Account.Limiter.Wait(ctx); err != nil {
+		return err
+	}
+	if err := b.Actions.UnblockUser(ctx, b.RoomID, uid); err != nil {
+		return fmt.Errorf("%s 解除禁言 %s 失败: %w", b.Label(), uid, err)
+	}
+	return nil
+}
