@@ -358,6 +358,22 @@ func TestToRuleRejectsUnknownPick(t *testing.T) {
 	}
 }
 
+// Suppress 要原样带到领域模型，否则数据库路径下「排除通用规则」形同虚设。
+func TestToRuleCarriesSuppress(t *testing.T) {
+	r, err := spec.Rule{
+		Name:     "专属欢迎",
+		On:       []string{"user_enter"},
+		Suppress: []string{"通用欢迎"},
+		Do:       []spec.Action{{Type: "danmaku", Template: []string{"欢迎"}}},
+	}.ToRule()
+	if err != nil {
+		t.Fatalf("ToRule 报错: %v", err)
+	}
+	if len(r.Suppress) != 1 || r.Suppress[0] != "通用欢迎" {
+		t.Errorf("Suppress 未正确转换: %+v", r.Suppress)
+	}
+}
+
 func TestToRuleCarriesAggregateFields(t *testing.T) {
 	r, err := spec.Rule{
 		Name: "x",

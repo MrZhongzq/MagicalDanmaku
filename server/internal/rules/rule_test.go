@@ -61,6 +61,25 @@ func TestRuleValidateRejectsEmptyName(t *testing.T) {
 	}
 }
 
+// Suppress 含自己会导致规则命中后把自己标记为压制——虽然按当前实现的
+// 执行顺序不会真的自我拦截（先执行再标记），但这明显不是用户的意图，
+// 应当在校验阶段就拒绝，而不是留一个费解的死配置。
+func TestRuleValidateRejectsSelfSuppress(t *testing.T) {
+	r := Rule{
+		Name:     "自压制",
+		On:       []event.Type{event.TypeUserEnter},
+		Suppress: []string{"自压制"},
+		Do:       []Action{{Type: ActionDanmaku, Template: []string{"x"}}},
+	}
+	err := r.Validate()
+	if err == nil {
+		t.Fatal("Suppress 包含自身规则名应当报错")
+	}
+	if !strings.Contains(err.Error(), "自压制") {
+		t.Errorf("错误信息应提及规则名，实际: %v", err)
+	}
+}
+
 // 只配 TemplateMulti、规则又没有 Aggregate 的组合必然失败：没有
 // Aggregate 时走 PassthroughTrigger，count 恒为 1，永远选不中
 // TemplateMulti，而 Template 是空的——每次触发都会报「模板列表为空」。

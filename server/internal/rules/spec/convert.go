@@ -51,6 +51,7 @@ func (r Rule) ToRule() (rules.Rule, error) {
 		Schedule:      r.Schedule,
 		Cooldown:      time.Duration(r.Cooldown),
 		CooldownGroup: r.CooldownGroup,
+		Suppress:      r.Suppress,
 	}
 	if r.Enabled != nil {
 		out.Enabled = *r.Enabled

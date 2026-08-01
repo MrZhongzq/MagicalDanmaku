@@ -45,6 +45,14 @@ type Rule struct {
 	Cooldown      Duration   `yaml:"cooldown"      json:"cooldown,omitempty"`
 	CooldownGroup string     `yaml:"cooldownGroup" json:"cooldownGroup,omitempty"`
 	Do            []Action   `yaml:"do"            json:"do,omitempty"`
+
+	// Suppress 列出本规则命中后要跳过的规则名。
+	//
+	// 典型场景：给某位舰长配了专属进房欢迎，就不该再触发通用进房欢迎，
+	// 否则他进房会被欢迎两次。
+	//
+	// **只对同一次触发生效**，不是全局开关。
+	Suppress []string `yaml:"suppress" json:"suppress,omitempty"`
 }
 
 // Condition 是条件树的一个节点。

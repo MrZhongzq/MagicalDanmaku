@@ -59,6 +59,14 @@ type Rule struct {
 	Do            []Action       // 动作列表，按序执行
 	Cooldown      time.Duration  // 本规则最小触发间隔
 	CooldownGroup string         // 命名冷却组，可空
+
+	// Suppress 列出本规则命中后要跳过的规则名。
+	//
+	// 典型场景：给某位舰长配了专属进房欢迎，就不该再触发通用进房欢迎，
+	// 否则他进房会被欢迎两次。
+	//
+	// **只对同一次触发生效**，不是全局开关。
+	Suppress []string
 }
 
 // Validate 校验规则自身的完整性。
@@ -115,6 +123,15 @@ func (r Rule) Validate() error {
 			return fmt.Errorf("rules: 规则 %q 的合并规格非法: %w", r.Name, err)
 		}
 	}
+
+	// 自我压制是个无意义的死配置：压制只在「先执行的规则压制后执行的」
+	// 时才生效，规则不可能压制自己。
+	for _, s := range r.Suppress {
+		if s == r.Name {
+			return fmt.Errorf("rules: 规则 %q 不能在 suppress 中压制自己", r.Name)
+		}
+	}
+
 	return nil
 }
 

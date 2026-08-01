@@ -1,6 +1,7 @@
 package rules
 
 import (
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -412,6 +413,132 @@ func TestEngineRejectsInvalidRule(t *testing.T) {
 	})
 	if err == nil {
 		t.Error("非法规则应在构造时报错，不允许带病运行")
+	}
+}
+
+// 边界一：甲压制乙。命中同一次触发时，先执行的甲把乙标记为压制，
+// 乙在这次分发里被完全跳过。
+func TestEngineSuppressSkipsOtherRuleSameTrigger(t *testing.T) {
+	bot := &recordBot{}
+	e := newTestEngine(t, []Rule{
+		{Name: "甲", Enabled: true, On: []event.Type{event.TypeUserEnter},
+			Suppress: []string{"乙"},
+			Do:       []Action{{Type: ActionDanmaku, Template: []string{"甲欢迎"}}}},
+		{Name: "乙", Enabled: true, On: []event.Type{event.TypeUserEnter},
+			Do: []Action{{Type: ActionDanmaku, Template: []string{"乙欢迎"}}}},
+	}, bot)
+
+	e.Handle(mkEnter("1", "舰长", 3))
+
+	if got := bot.sent(); len(got) != 1 || got[0] != "甲欢迎" {
+		t.Errorf("甲压制乙后，本次触发只应执行甲，实际 %v", got)
+	}
+}
+
+// 边界二：压制只对同一次触发生效，不是全局开关。甲这次不命中（非舰长），
+// 乙就该正常执行——上一次触发里甲对乙的压制不能延续到这一次。
+func TestEngineSuppressOnlyAppliesToSameTrigger(t *testing.T) {
+	bot := &recordBot{}
+	e := newTestEngine(t, []Rule{
+		{Name: "甲", Enabled: true, On: []event.Type{event.TypeUserEnter},
+			When:     &Condition{Field: "user.guardLevel", Op: "gt", Value: 0},
+			Suppress: []string{"乙"},
+			Do:       []Action{{Type: ActionDanmaku, Template: []string{"甲欢迎"}}}},
+		{Name: "乙", Enabled: true, On: []event.Type{event.TypeUserEnter},
+			Do: []Action{{Type: ActionDanmaku, Template: []string{"乙欢迎"}}}},
+	}, bot)
+
+	e.Handle(mkEnter("1", "舰长", 3)) // 甲命中 -> 压制乙，乙这次不执行
+	e.Handle(mkEnter("2", "普通", 0)) // 甲这次不命中（非舰长）-> 乙应正常执行
+
+	got := bot.sent()
+	if len(got) != 2 || got[0] != "甲欢迎" || got[1] != "乙欢迎" {
+		t.Errorf("压制只应对同一次触发生效，实际 %v", got)
+	}
+}
+
+// 边界三：循环压制（甲压乙、乙压甲）不会死循环。按 position 顺序处理：
+// 甲先执行，把乙标记为压制；乙被跳过，乙对甲的压制永远不会生效。
+// 谁在前谁生效，这取决于规则在 Rules 切片中的顺序（position）。
+func TestEngineSuppressCyclicDoesNotDeadlock(t *testing.T) {
+	bot := &recordBot{}
+	e := newTestEngine(t, []Rule{
+		{Name: "甲", Enabled: true, On: []event.Type{event.TypeUserEnter},
+			Suppress: []string{"乙"},
+			Do:       []Action{{Type: ActionDanmaku, Template: []string{"甲欢迎"}}}},
+		{Name: "乙", Enabled: true, On: []event.Type{event.TypeUserEnter},
+			Suppress: []string{"甲"},
+			Do:       []Action{{Type: ActionDanmaku, Template: []string{"乙欢迎"}}}},
+	}, bot)
+
+	e.Handle(mkEnter("1", "舰长", 3))
+
+	if got := bot.sent(); len(got) != 1 || got[0] != "甲欢迎" {
+		t.Errorf("甲在前应生效并压制乙，乙不应执行，实际 %v", got)
+	}
+}
+
+// 反过来，乙在前时应是乙生效、压制甲——证明结果确由 position 决定，
+// 不是巧合地总选中某个名字。
+func TestEngineSuppressCyclicOrderDeterminesWinner(t *testing.T) {
+	bot := &recordBot{}
+	e := newTestEngine(t, []Rule{
+		{Name: "乙", Enabled: true, On: []event.Type{event.TypeUserEnter},
+			Suppress: []string{"甲"},
+			Do:       []Action{{Type: ActionDanmaku, Template: []string{"乙欢迎"}}}},
+		{Name: "甲", Enabled: true, On: []event.Type{event.TypeUserEnter},
+			Suppress: []string{"乙"},
+			Do:       []Action{{Type: ActionDanmaku, Template: []string{"甲欢迎"}}}},
+	}, bot)
+
+	e.Handle(mkEnter("1", "舰长", 3))
+
+	if got := bot.sent(); len(got) != 1 || got[0] != "乙欢迎" {
+		t.Errorf("乙在前应生效并压制甲，甲不应执行，实际 %v", got)
+	}
+}
+
+// 边界四：被压制的规则若配了 aggregate，事件不应进入它的合并窗口。
+// 喂入点（Aggregator.Add）与 fireLocked 在 Handle 里是同一处 if/else
+// 分支，压制检查若只挡 fireLocked、不挡 agg.Add，被压制规则的窗口
+// 仍会攒事件，窗口到期后还是会触发——这不是「不该再触发」的本意，
+// 所以要求完全跳过：事件既不触发、也不进入合并窗口。
+func TestEngineSuppressSkipsAggregateWindowEntirely(t *testing.T) {
+	bot := &recordBot{}
+	e := newTestEngine(t, []Rule{
+		{Name: "甲", Enabled: true, On: []event.Type{event.TypeUserEnter},
+			Suppress: []string{"乙"},
+			Do:       []Action{{Type: ActionDanmaku, Template: []string{"甲欢迎"}}}},
+		{Name: "乙", Enabled: true, On: []event.Type{event.TypeUserEnter},
+			Aggregate: &AggregateSpec{Window: 60 * time.Millisecond, By: AggregateByType},
+			Do:        []Action{{Type: ActionDanmaku, Template: []string{`乙欢迎 {{join .users "、"}}`}}}},
+	}, bot)
+
+	e.Handle(mkEnter("1", "舰长", 3)) // 甲命中并压制乙，事件不该进入乙的窗口
+
+	time.Sleep(150 * time.Millisecond) // 等乙的窗口本该到期的时间
+
+	if got := bot.sent(); len(got) != 1 || got[0] != "甲欢迎" {
+		t.Errorf("乙被压制应完全跳过（含不入合并窗口），实际 %v", got)
+	}
+}
+
+// 边界一（校验侧）：压制不存在的规则名要在构造时报错，而不是静默不生效——
+// 写错规则名而查不出原因，比直接拒绝启动更难排查。
+func TestNewEngineRejectsSuppressUnknownRuleName(t *testing.T) {
+	_, err := NewEngine(EngineOptions{
+		Label: "测试号@1", RoomID: "1", Bot: &recordBot{},
+		Rules: []Rule{{
+			Name: "甲", Enabled: true, On: []event.Type{event.TypeUserEnter},
+			Suppress: []string{"不存在的规则"},
+			Do:       []Action{{Type: ActionDanmaku, Template: []string{"欢迎"}}},
+		}},
+	})
+	if err == nil {
+		t.Fatal("压制不存在的规则名应在构造时报错")
+	}
+	if !strings.Contains(err.Error(), "甲") || !strings.Contains(err.Error(), "不存在的规则") {
+		t.Errorf("错误信息应同时说明是哪条规则压制了哪个不存在的名字，实际: %v", err)
 	}
 }
 

@@ -2,6 +2,7 @@ package rules
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"math/rand"
 	"sync"
@@ -73,6 +74,23 @@ func NewEngine(opts EngineOptions) (*Engine, error) {
 		}
 	}
 
+	// 交叉校验 Suppress 引用的规则名必须存在。单条规则的 Validate 看
+	// 不到别的规则名，这项检查只能放在这里——能看到全部规则的地方。
+	//
+	// 写错规则名而静默不生效非常难查：用户会以为「压制不管用」，
+	// 实际是名字打错了，所以在启动时就拒绝，而不是带病运行。
+	names := make(map[string]bool, len(opts.Rules))
+	for _, r := range opts.Rules {
+		names[r.Name] = true
+	}
+	for _, r := range opts.Rules {
+		for _, s := range r.Suppress {
+			if !names[s] {
+				return nil, fmt.Errorf("rules: 规则 %q 声明压制不存在的规则 %q", r.Name, s)
+			}
+		}
+	}
+
 	sandbox := NewSandbox(SandboxOptions{
 		Timeout: opts.ScriptTimeout,
 		Bot:     opts.Bot,
@@ -138,12 +156,32 @@ func (e *Engine) Handle(ev event.Event) {
 	tr := PassthroughTrigger(ev)
 	matched := e.matcher.Match(tr)
 
+	// matched 保持配置顺序（position）：store.ListRules 按 position, id
+	// 排序，LoadRunConfig 保序传给 NewEngine，NewMatcher 按输入顺序
+	// append 进 byType 的桶（map 只按事件类型分桶，桶内是切片），Match
+	// 按切片顺序遍历——全链路核实过，顺序确定。
+	//
+	// 压制只对本次触发生效：按顺序处理，先执行的规则才可能压制后面的。
+	// suppressed 是每次 Handle 调用新建的局部变量，下一次触发不会带着
+	// 上一次的压制状态。
+	//
+	// 被压制的规则必须完全跳过，包括合并窗口的入桶（agg.Add）：如果
+	// 只跳过 fireLocked 而仍然喂给 Aggregator，被压制规则的合并窗口会
+	// 继续攒事件，未来窗口到期时还是会触发——这不是「不该再触发」的
+	// 本意，所以两个分支都要在压制检查之后。
+	suppressed := map[string]bool{}
 	for _, r := range matched {
-		if agg, ok := e.aggregators[r.Name]; ok {
-			agg.Add(ev) // 进入窗口，到期后再触发
+		if suppressed[r.Name] {
 			continue
 		}
-		e.fireLocked(r, tr)
+		if agg, ok := e.aggregators[r.Name]; ok {
+			agg.Add(ev) // 进入窗口，到期后再触发
+		} else {
+			e.fireLocked(r, tr)
+		}
+		for _, name := range r.Suppress {
+			suppressed[name] = true
+		}
 	}
 }
 
