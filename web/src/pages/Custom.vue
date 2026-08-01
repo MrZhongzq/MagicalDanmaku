@@ -23,22 +23,45 @@
  * `ConditionTree.vue` 文件头注释："删到空"不是"合法但无意义"，是根本
  * 过不了后端 `Condition.Validate()`，必须在这一层收拢。
  *
- * ## 变量清单的坑，同样在这里体现
+ * ## 变量清单：从 GET /api/meta/variables 拉，不再手抄
  *
- * `fieldOptions` 传的是 `ConditionTree.vue` 导出的 `COMMON_FIELD_OPTIONS`
- * ——因为压根没有 `GET /api/meta/variables` 这个接口。已登记进悬空清单，
- * 见该文件顶部注释。
+ * P4-2 时 `fieldOptions` 传的是 `ConditionTree.vue` 里手抄的
+ * `COMMON_FIELD_OPTIONS`（20 条，抄自 `vars.go`）——P4-3 后端补上了
+ * `GET /api/meta/variables`（原样转发 `rules.VariableCatalog()`：一组
+ * 公共变量 `common` + 按事件类型分组的 `byEvent`），本页 `loadMeta()`
+ * 里跟其它三份元数据一起拉，`buildFieldOptions` 把 `common` 与全部
+ * `byEvent` 分组拍平、按路径去重后传给 `ConditionTree`。清单不全（新事件
+ * 类型的字段还没登记）或接口一时没拉到时，`ConditionTree` 的 `NSelect`
+ * 仍开着 `filterable tag`，用户始终能直接打字输入任意路径。
  *
- * ## 「排除通用规则」：界面做出来，标悬空
+ * `Variable.Optional` 标记的字段（如未佩戴粉丝牌时不存在的 `medal.*`）
+ * 仍然出现在候选项里、仍然可选——只是标签里加一句「可能不存在」提示，
+ * 不能因为字段是可选的就不让配。
+ *
+ * ## 「排除通用规则」：真功能（spec.Rule.Suppress）
  *
  * 设计文档 §7.2 明确要求："一条自定义规则命中后，可以声明屏蔽掉哪些
  * 通用功能"，典型场景是"给某位舰长配了专属进房欢迎，就不该再触发通用
- * 进房欢迎"。规则引擎（`server/internal/rules`）目前没有"一条规则命中后
- * 跳过另一条"这种互斥/优先级机制，`spec.Rule` 里也没有承载这份声明的
- * 字段。这里给出一个多选框，列出 Task 9/10 建立的七个内置规则名，
- * 但 `CustomRuleDraft.excludeBuiltinRules` **不参与** `buildCustomRule`
- * 的组装——写了也没有字段能装，装了引擎也不会读。界面上用"待后端支持"
- * 标签说明，已登记进悬空清单。
+ * 进房欢迎"。P4-3 后端加上了 `spec.Rule.Suppress`
+ * （`server/internal/rules/spec/spec.go` 第 49-56 行），多选框列出
+ * Task 9/10 建立的七个内置规则名，`CustomRuleDraft.excludeBuiltinRules`
+ * 现在原样进 `buildCustomRule` 组装出的 `rule.suppress`。
+ *
+ * **后端两条校验决定了前端要防两件事**：
+ *
+ * 1. 压制不存在的规则名——`NewEngine` 在重建引擎（也就是保存后热重载）
+ *    时才会报错，前端拦不住也不用拦：既然只能从 `BUILTIN_RULE_OPTIONS`
+ *    （固定的七个内置名）里选，选出来的名字天然存在，除非哪天这七条
+ *    内置规则被整体停用/改名——那种情况留给后端在保存时报错足够。
+ * 2. 定时触发（`schedule`）的规则配 `suppress` 会被 `Validate()` 直接
+ *    拒绝——压制只在"同一次事件触发命中多条规则"时才有意义，定时规则
+ *    一次调用只触发自己。**前端选择在 `triggerMode === 'schedule'` 时
+ *    直接禁用这个多选框**（而不是等保存时才报错）：不让用户配出一个
+ *    必然被拒的组合，比配完之后才告诉他"这个选择保存不了"更省心；
+ *    `buildCustomRule` 同时也在组装层面做了兜底——`triggerMode` 为
+ *    `schedule` 时，即便 `excludeBuiltinRules` 里还留着上次在事件触发
+ *    模式下选的值（切换触发方式不会清空这份草稿状态），组装出的规则
+ *    也绝不会带 `suppress` 字段。
  *
  * ## 保存：GET → 合并 → PUT → POST reload（Task 13 接上，现已实接）
  *
@@ -75,6 +98,63 @@ export const BUILTIN_RULE_NAMES: string[] = [
 export const BUILTIN_RULE_OPTIONS: { label: string; value: string }[] = BUILTIN_RULE_NAMES.map(
   (n) => ({ label: n, value: n }),
 )
+
+// ---- 变量清单：GET /api/meta/variables 的响应形状 ----
+//
+// **注意大小写**：这个接口背后的 rules.Variable（server/internal/rules/vars.go）
+// 没有 json tag，字段名走 Go 默认的 encoding/json 规则，序列化结果是
+// 首字母大写的 "Path"/"Label"/"Optional"，不是其它 /api/meta/* 接口那种
+// 小写 "value"/"label"（那些接口背后的 metaItem 显式写了 json tag）。
+// 两个接口的大小写约定不一致是后端现状，前端照抄字段名即可，不用猜。
+
+/** VariableItem 对应后端 rules.Variable 序列化后的一项。 */
+export interface VariableItem {
+  Path: string
+  Label: string
+  Optional: boolean
+}
+
+/** VariablesResponse 对应 GET /api/meta/variables 的响应体。 */
+export interface VariablesResponse {
+  common: VariableItem[]
+  byEvent: Record<string, VariableItem[]>
+}
+
+/**
+ * buildFieldOptions 把 VariablesResponse 拍平成 ConditionTree 要的
+ * `{label, value}[]` 候选项列表。
+ *
+ * 拍平顺序：先 common，再按事件类型名字母序遍历 byEvent 的各分组——顺序
+ * 本身不重要（`NSelect` 是 filterable 的，用户主要靠搜索），重要的是
+ * 确定性：同一份后端响应每次拍平出的顺序都一样，不依赖 Object.keys 的
+ * 遍历顺序在不同环境下是否稳定。
+ *
+ * **按 path 去重，先出现的赢**：同一个字段名在不同事件类型下可能有不同
+ * 说明（如 "text" 在弹幕分组是"弹幕正文"、在醒目留言分组是"醒目留言
+ * 正文"），但字段下拉是不区分事件类型的单一列表，不可能让同一个 value
+ * 出现两次（NSelect 的候选项要求 value 唯一）。这是有意的简化：label
+ * 只是给用户的提示文案，`field` 真正写进条件里的还是那个 path 本身，
+ * 说明文字选了哪个不影响条件的实际语义。
+ */
+export function buildFieldOptions(resp: VariablesResponse): { label: string; value: string }[] {
+  const seen = new Set<string>()
+  const out: { label: string; value: string }[] = []
+
+  function addAll(vars: VariableItem[]) {
+    for (const v of vars) {
+      if (seen.has(v.Path)) continue
+      seen.add(v.Path)
+      const suffix = v.Optional ? '，可能不存在' : ''
+      out.push({ label: `${v.Path}（${v.Label}${suffix}）`, value: v.Path })
+    }
+  }
+
+  addAll(resp.common ?? [])
+  for (const eventType of Object.keys(resp.byEvent ?? {}).sort()) {
+    addAll(resp.byEvent[eventType])
+  }
+  return out
+}
 
 /** isCustomRule 判断一条从后端拉回来的规则是不是"自定义规则"——不在七个内置名单里就是。 */
 export function isCustomRule(rule: RuleView): boolean {
@@ -216,7 +296,13 @@ export interface CustomRuleDraft {
   cooldownSeconds: number
   cooldownGroup: string
   actions: CustomActionDraft[]
-  /** 排除通用规则——悬空，见文件头注释，不参与 buildCustomRule 组装。 */
+  /**
+   * 排除通用规则——对应 spec.Rule.Suppress，只列出 Task 9/10 建立的七个
+   * 内置规则名供选。**只在 triggerMode === 'on' 时才会被
+   * `buildCustomRule` 写进 `rule.suppress`**，见文件头注释第 2 点：
+   * 定时触发的规则配 suppress 会被后端拒绝，切换触发方式不清空这份草稿，
+   * 靠组装时的判断兜底。
+   */
   excludeBuiltinRules: string[]
 }
 
@@ -286,6 +372,14 @@ export function buildCustomRule(draft: CustomRuleDraft): Rule {
     rule.cooldownGroup = draft.cooldownGroup.trim()
   }
 
+  // 只在事件触发模式下带 suppress——定时触发的规则配了会被后端 Validate()
+  // 拒绝（见文件头注释第 2 点）。triggerMode 切到 schedule 时草稿里的
+  // excludeBuiltinRules 不会被清空（用户随时可能切回来），这里在组装层面
+  // 兜底，保证永远不会拼出一个必然被拒的规则。
+  if (draft.triggerMode === 'on' && draft.excludeBuiltinRules.length > 0) {
+    rule.suppress = [...draft.excludeBuiltinRules]
+  }
+
   return rule
 }
 
@@ -335,6 +429,10 @@ export function parseCustomRuleDraft(rule: RuleView): CustomRuleDraft {
     draft.actions = rule.do.map(parseCustomAction)
   }
 
+  if (rule.suppress && rule.suppress.length > 0) {
+    draft.excludeBuiltinRules = [...rule.suppress]
+  }
+
   return draft
 }
 
@@ -368,7 +466,7 @@ import { useBindingsStore } from '@/stores/bindings'
 import { useDraft } from '@/composables/useDraft'
 import SaveBar from '@/components/SaveBar.vue'
 import TemplateList from '@/components/TemplateList.vue'
-import ConditionTree, { COMMON_FIELD_OPTIONS } from '@/components/ConditionTree.vue'
+import ConditionTree from '@/components/ConditionTree.vue'
 import type { MetaItem } from '@/components/ConditionTree.vue'
 import PermissionWarning from '@/components/PermissionWarning.vue'
 
@@ -398,19 +496,23 @@ const eventTypeOptions = ref<MetaItem[]>([])
 const actionTypeOptions = ref<MetaItem[]>([])
 const operatorOptions = ref<MetaItem[]>([])
 const aggregateByOptions = ref<MetaItem[]>([])
+/** 条件树的字段候选项——从 GET /api/meta/variables 拉，见文件头「变量清单」一节。 */
+const fieldOptions = ref<{ label: string; value: string }[]>([])
 
 async function loadMeta() {
   try {
-    const [events, actions, operators, aggregateBy] = await Promise.all([
+    const [events, actions, operators, aggregateBy, variables] = await Promise.all([
       request<MetaItem[]>('GET', '/api/meta/event-types'),
       request<MetaItem[]>('GET', '/api/meta/action-types'),
       request<MetaItem[]>('GET', '/api/meta/operators'),
       request<MetaItem[]>('GET', '/api/meta/aggregate-by'),
+      request<VariablesResponse>('GET', '/api/meta/variables'),
     ])
     eventTypeOptions.value = events
     actionTypeOptions.value = actions
     operatorOptions.value = operators
     aggregateByOptions.value = aggregateBy
+    fieldOptions.value = buildFieldOptions(variables)
   } catch (e) {
     message.error(e instanceof ApiError ? e.message : '加载元数据失败')
   }
@@ -685,7 +787,7 @@ function dismissPartialFailure() {
             v-if="draft.whenEnabled"
             v-model="draft.when"
             :operators="operatorOptions"
-            :field-options="COMMON_FIELD_OPTIONS"
+            :field-options="fieldOptions"
           />
 
           <!-- ==================== 合并窗口 ==================== -->
@@ -771,18 +873,16 @@ function dismissPartialFailure() {
           </div>
           <NButton size="small" dashed @click="addAction(draft)">+ 添加动作</NButton>
 
-          <!-- ==================== 排除通用规则：界面做出来，标悬空 ==================== -->
+          <!-- ==================== 排除通用规则 ==================== -->
           <h4>
             排除通用规则
-            <NTooltip>
+            <NTooltip v-if="draft.triggerMode === 'schedule'">
               <template #trigger>
-                <NTag type="warning" size="small">待后端支持</NTag>
+                <NTag type="info" size="small">定时触发不可用</NTag>
               </template>
-              规则引擎目前没有"一条规则命中后跳过指定规则"这种互斥/优先级机制（设计文档
-              §13.6），spec.Rule 也没有字段能装这份声明。下面的多选框能选、能预览，
-              但连状态都不会被保存——点了保存也不会写进后端的规则里，刷新页面、切换
-              直播间、或者离开这页再回来，这里的选择都会复位成空。不是"存了但引擎不认"，
-              是压根没地方存，需要引擎侧新增"命中后跳过指定规则"的能力。
+              压制只在"同一次事件触发命中多条规则"时才有意义，定时触发的规则一次调用只触发自己，
+              配了 suppress 会被后端拒绝保存。切回"事件触发"后即可继续使用；之前选过的内容
+              仍保留在草稿里，不会因为切换触发方式而丢失。
             </NTooltip>
           </h4>
           <p class="hint">
@@ -791,17 +891,15 @@ function dismissPartialFailure() {
           <NSelect
             v-model:value="draft.excludeBuiltinRules"
             multiple
+            :disabled="draft.triggerMode === 'schedule'"
             :options="BUILTIN_RULE_OPTIONS"
-            placeholder="选择命中后要屏蔽的通用规则（当前不生效）"
+            placeholder="选择命中后要屏蔽的通用规则"
             style="min-width: 320px"
           />
 
           <NCollapse class="preview-collapse">
             <NCollapseItem title="预览将要生成的规则 JSON（本地草稿，尚未保存）" name="preview">
               <pre class="json-preview">{{ JSON.stringify(buildCustomRule(draft), null, 2) }}</pre>
-              <p class="hint">
-                「排除通用规则」的选择不会出现在上面的 JSON 里——见上方"排除通用规则"小节的悬空说明。
-              </p>
             </NCollapseItem>
           </NCollapse>
         </NCard>

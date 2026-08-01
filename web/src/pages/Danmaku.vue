@@ -17,9 +17,9 @@
  *   这部分的组件与纯函数都挪到独立的 `PkPanel.vue`——见该文件顶部注释。
  * - **轮播消息**：真功能。`spec.Rule.Schedule` 是 cron 驱动，与
  *   `On` 二选一（`rules/rule.go` 第 61-68 行的 `Validate` 会拒绝二者同时
- *   出现），组好的规则只给 `schedule`，绝不给 `on`。**多条模板目前只有
- *   随机抽取没有轮询**（同悬空清单第 5 条的病根），所以这版「轮播」
- *   实际是「随机播」，界面上要把这句话摆在明处，不能只塞进 tooltip。
+ *   出现），组好的规则只给 `schedule`，绝不给 `on`。多条模板的挑选方式
+ *   （随机/轮询）见下方「悬空清单」上方新增的 P4-3 说明——这一项 P4-3
+ *   已经接通，不再是「名不副实的轮播」。
  * - **关注答谢 / 分享答谢 / 上舰答谢**：真功能。`event.UserFollow`/
  *   `UserShare` 只有 `User` 一个字段，模板简单；`event.GuardBuy` 载荷
  *   齐全（`GuardLevel`/`GuardName`/`Count`/`Price`/`IsRenew`），
@@ -39,20 +39,31 @@
  * 但重载失败」提示，具体行为见下方 `onSave` 与 `partialFailureMessage`
  * 处的注释。
  *
- * ## 三处悬空（设计文档 §7.2 页面 4 / §13）
+ * ## P4-3：模板轮询与单人/多人两套模板已接通，不再悬空
  *
- * （原来数的是"四处"，其中一条是"进房欢迎只欢迎佩戴粉丝牌的用户"——后来去读
- * 后端代码发现那条其实**已经打通**，不算悬空，挪到下面单独一节说明，
- * 这里改成三处，不再重新编号旧的四条。）
+ * 后端加了两个字段（`server/internal/rules/spec/spec.go`）：
  *
- * 1. **模板轮询模式**（§13.3）：规则引擎的 `Renderer.Render` 目前只会
- *    从多条模板里 `rand.Intn` 随机挑一条，没有「轮询」需要的游标状态
- *    （`server/internal/rules/template.go` 第 29-39 行）。界面上的
- *    单选框照常渲染，选「轮询」暂不生效。
- * 2. **单人/多人两套模板**（§13.3）：`spec.Action` 只有一个 `Template`
- *    字段（`server/internal/rules/spec/spec.go`），保存时只有单人模板
- *    进了 `do[].template`，多人模板整栏渲染但不参与组装。
- * 3. **盲盒单列**（§13.4）：`event.Gift` 没有任何盲盒字段
+ * - `Action.Pick`（`""`/`"random"`/`"sequential"`，空等同随机，与历史
+ *   配置兼容）：进房欢迎、礼物答谢、轮播消息三处「轮询/随机」单选框现在
+ *   真的接进 `do[].pick`，选「轮询」会让规则引擎按顺序循环模板
+ *   （`server/internal/rules/executor.go` 的 `Renderer` 按游标状态选取），
+ *   不再是「选了也不生效」。
+ * - `Action.TemplateMulti`（合并触发 `count > 1` 时用的模板，留空则回落到
+ *   `Template`）：进房欢迎的「多人合并欢迎语」现在真的接进
+ *   `do[].templateMulti`。进房欢迎的规则**始终带 `aggregate`**
+ *   （见 `buildAggregateCommon` 的调用点），所以不会撞上后端那条
+ *   「只配 templateMulti 又没有 aggregate」的校验（`rule.go` 第
+ *   110-128 行）——这条校验只在没有合并窗口的规则上才可能触发，进房
+ *   欢迎恒有合并窗口，天然安全，不需要额外的前端防呆。礼物答谢/轮播
+ *   消息本页没有多人/单人两套模板的界面，`TemplateMulti` 不适用。
+ *
+ * ## 一处悬空（设计文档 §7.2 页面 4 / §13）
+ *
+ * （原来数的是"四处"：一条"进房欢迎只欢迎佩戴粉丝牌的用户"经核实**已经
+ * 打通**，见下方单独一节；P4-3 又接通了"模板轮询"与"单人/多人两套模板"
+ * 两条，见上方新增说明。现在只剩一处。）
+ *
+ * 1. **盲盒单列**（§13.4）：`event.Gift` 没有任何盲盒字段
  *    （`server/internal/event/payload.go` 第 19-27 行），开关渲染但不生效。
  *    **需要用户在真实直播间刷一次盲盒、抓包确认报文形状**，
  *    这一步控制器代劳不了。
@@ -194,12 +205,22 @@ export function parseEnterFilter(condition: Condition | undefined): EnterFilter 
 
 // ---- 合并/去重窗口，进房与礼物共用同一套草稿形状 ----
 
-export type PickMode = 'random' | 'roundrobin'
+/**
+ * PickMode 直接对应 spec.Action.Pick 的取值（`""`/`"random"`/`"sequential"`）。
+ * 草稿态不使用空字符串——`parseXxxDraft` 把「空」也当作 `'random'`
+ * 处理（与历史配置兼容），保存时统一显式写出 `'random'` 或 `'sequential'`。
+ */
+export type PickMode = 'random' | 'sequential'
 
 export const PICK_MODE_OPTIONS: { label: string; value: PickMode }[] = [
   { label: '随机抽取', value: 'random' },
-  { label: '轮询（按顺序循环）', value: 'roundrobin' },
+  { label: '轮询（按顺序循环）', value: 'sequential' },
 ]
+
+/** parsePickMode 把后端的 pick 字段（可能是空字符串或缺省）还原成草稿用的 PickMode。 */
+function parsePickMode(pick: string | undefined): PickMode {
+  return pick === 'sequential' ? 'sequential' : 'random'
+}
 
 /** 把秒数转成 spec.Duration 要求的字符串形式，如 "180s"。 */
 function secondsToDuration(seconds: number): string {
@@ -289,7 +310,13 @@ function buildAggregateCommon(a: {
   return agg
 }
 
-/** buildEnterRule 把草稿组装成 spec.Rule。多人模板与轮询模式不写进去——见文件头悬空说明。 */
+/**
+ * buildEnterRule 把草稿组装成 spec.Rule。
+ *
+ * `pick`/`templateMulti` 都直接写进 action：进房欢迎的规则始终带
+ * `aggregate`（见上面的 buildAggregateCommon 调用），不会撞上后端
+ * 「只配 templateMulti 又没有 aggregate」的校验，见文件头 P4-3 说明。
+ */
 export function buildEnterRule(draft: EnterDraft, roomId: string): Rule {
   const rule: Rule = {
     name: ENTER_RULE_NAME,
@@ -302,7 +329,14 @@ export function buildEnterRule(draft: EnterDraft, roomId: string): Rule {
       minCount: draft.minCount,
       applyMinCount: draft.groupMode === 'merge',
     }),
-    do: [{ type: 'danmaku', template: draft.singleTemplates.filter((t) => t.trim() !== '') }],
+    do: [
+      {
+        type: 'danmaku',
+        template: draft.singleTemplates.filter((t) => t.trim() !== ''),
+        templateMulti: draft.multiTemplates.filter((t) => t.trim() !== ''),
+        pick: draft.pickMode,
+      },
+    ],
   }
   const when = buildEnterCondition(draft.filter, roomId)
   if (when) rule.when = when
@@ -331,8 +365,10 @@ export function parseEnterDraft(rule: Rule | null): EnterDraft {
   if (action?.template && action.template.length > 0) {
     draft.singleTemplates = action.template
   }
-  // pickMode 与 multiTemplates 在后端没有落地字段（见悬空说明），
-  // 加载已保存规则时无从恢复，维持默认值。
+  if (action?.templateMulti && action.templateMulti.length > 0) {
+    draft.multiTemplates = action.templateMulti
+  }
+  draft.pickMode = parsePickMode(action?.pick)
   return draft
 }
 
@@ -393,7 +429,13 @@ export function buildGiftRule(draft: GiftDraft): Rule {
       minCount: draft.minCount,
       applyMinCount: draft.groupMode === 'merge',
     }),
-    do: [{ type: 'danmaku', template: draft.templates.filter((t) => t.trim() !== '') }],
+    do: [
+      {
+        type: 'danmaku',
+        template: draft.templates.filter((t) => t.trim() !== ''),
+        pick: draft.pickMode,
+      },
+    ],
   }
 }
 
@@ -417,7 +459,8 @@ export function parseGiftDraft(rule: Rule | null): GiftDraft {
   if (action?.template && action.template.length > 0) {
     draft.templates = action.template
   }
-  // 盲盒两个开关、pickMode 同样没有后端字段承接，维持默认值。
+  draft.pickMode = parsePickMode(action?.pick)
+  // 盲盒两个开关仍然没有后端字段承接，维持默认值——见文件头「一处悬空」说明。
   return draft
 }
 
@@ -485,7 +528,13 @@ export function buildBroadcastRule(draft: BroadcastDraft): Rule {
     name: BROADCAST_RULE_NAME,
     enabled: draft.enabled,
     schedule: buildBroadcastSchedule(draft),
-    do: [{ type: 'danmaku', template: draft.templates.filter((t) => t.trim() !== '') }],
+    do: [
+      {
+        type: 'danmaku',
+        template: draft.templates.filter((t) => t.trim() !== ''),
+        pick: draft.pickMode,
+      },
+    ],
   }
 }
 
@@ -509,7 +558,7 @@ export function parseBroadcastDraft(rule: Rule | null): BroadcastDraft {
   if (action?.template && action.template.length > 0) {
     draft.templates = action.template
   }
-  // pickMode 同进房欢迎/礼物答谢，后端没有落地字段，维持默认值。
+  draft.pickMode = parsePickMode(action?.pick)
   return draft
 }
 
@@ -929,16 +978,6 @@ function dismissPartialFailure() {
                 {{ opt.label }}
               </NRadio>
             </NRadioGroup>
-            <NTooltip>
-              <template #trigger>
-                <NTag type="warning" size="small">待后端支持</NTag>
-              </template>
-              规则引擎目前只实现了随机抽取（server/internal/rules/template.go 的 Renderer.Render 用
-              rand.Intn），轮询需要引擎侧记住这条规则
-              上次用到第几条模板的游标状态，选中「轮询」暂不生效。这个选择也不会被保存—— spec.Action
-              没有 pick 字段，点了保存也不会写进后端，刷新页面或切换直播间后
-              会复位成「随机抽取」，不是「存了但引擎不认」，是压根没地方存。
-            </NTooltip>
           </div>
 
           <div class="template-block">
@@ -949,13 +988,10 @@ function dismissPartialFailure() {
             <span class="label">多人合并欢迎语</span>
             <NTooltip>
               <template #trigger>
-                <NTag type="warning" size="small">待后端支持</NTag>
+                <NTag type="info" size="small">仅合并触发时使用</NTag>
               </template>
-              spec.Action 目前只有一个 Template 字段，一条规则装不下两套模板。
-              这一栏会正常渲染、可以编辑，但保存时只有上面「单人欢迎语」进入
-              规则体，这一栏暂不生效——需要引擎侧支持按合并条数（count==1 vs count>1）选模板集。
-              这里填的内容也不会被保存：点了保存也不会写进后端，刷新页面或切换直播间后
-              这一栏会清空复位。
+              窗口内只有一人时仍然用上面的「单人欢迎语」；合并出多人（count >
+              1）时才会改用这里的模板。 留空则不论单人多人都用「单人欢迎语」——与旧配置兼容。
             </NTooltip>
             <TemplateList v-model="enterDraft.multiTemplates" placeholder="多人合并欢迎语模板" />
           </div>
@@ -1018,13 +1054,6 @@ function dismissPartialFailure() {
                 {{ opt.label }}
               </NRadio>
             </NRadioGroup>
-            <NTooltip>
-              <template #trigger>
-                <NTag type="warning" size="small">待后端支持</NTag>
-              </template>
-              同进房欢迎：规则引擎目前只有随机抽取，轮询需要引擎侧记游标状态。同样不会
-              被保存——点了保存也不会写进后端，刷新页面或切换直播间后会复位成「随机抽取」。
-            </NTooltip>
           </div>
           <TemplateList v-model="giftDraft.templates" placeholder="答谢语模板" />
           <p class="hint">
@@ -1129,19 +1158,10 @@ function dismissPartialFailure() {
                 {{ opt.label }}
               </NRadio>
             </NRadioGroup>
-            <NTooltip>
-              <template #trigger>
-                <NTag type="warning" size="small">待后端支持</NTag>
-              </template>
-              同进房欢迎/礼物答谢：规则引擎目前只有随机抽取，选「轮询」暂不生效，也不会
-              被保存——点了保存也不会写进后端，刷新页面或切换直播间后会复位成「随机抽取」。
-            </NTooltip>
           </div>
           <p class="hint">
-            <strong>「轮播」这个词目前名不副实：</strong>
-            多条模板一律随机抽取一条播出，不是按顺序循环。想要严格按顺序轮询， 要等
-            <code>server/internal/rules/template.go</code> 的 <code>Renderer</code>
-            支持模板游标状态（同悬空清单第 5 条）。
+            默认「随机抽取」：每次触发从多条模板里随机挑一条播出。选「轮询」则按顺序循环，
+            播完最后一条回到第一条。
           </p>
           <TemplateList v-model="broadcastDraft.templates" placeholder="轮播消息模板" />
 

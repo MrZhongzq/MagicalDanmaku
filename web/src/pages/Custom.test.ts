@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
-import { NSelect, NSwitch } from 'naive-ui'
+import { NRadioGroup, NSelect, NSwitch } from 'naive-ui'
 import type { Permission } from '@/api'
 
 // Custom 是「自定义弹幕姬」页，P4-2 最难的组件的落地场景。核心断言分三层：
@@ -29,14 +29,17 @@ const {
   buildCustomRule,
   buildCustomAction,
   buildCustomSchedule,
+  buildFieldOptions,
   defaultCustomRuleDraft,
   defaultActionDraft,
   parseCustomRuleDraft,
 } = Custom
-const { OWNED_RULE_NAMES } = await import('./Danmaku.vue')
+const { OWNED_RULE_NAMES, ENTER_RULE_NAME, GUARD_RULE_NAME } = await import('./Danmaku.vue')
 const { useBindingsStore } = await import('@/stores/bindings')
+const { default: ConditionTree } = await import('@/components/ConditionTree.vue')
 
 type RuleView = import('@/api/rule-types').RuleView
+type VariablesResponse = import('./Custom.vue').VariablesResponse
 
 function ok(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
@@ -84,6 +87,36 @@ const FULL_AGGREGATE_BY = [
   { value: 'user', label: '按类型 + 用户：仅去重不聚合' },
 ]
 
+/**
+ * 默认的 /api/meta/variables 响应，字段大小写照抄后端真实形状
+ * （rules.Variable 没有 json tag，序列化出来是首字母大写的
+ * Path/Label/Optional，见 Custom.vue 里 VariableItem 的注释）。
+ *
+ * 这份默认值只是让"不关心变量清单"的既有测试不会因为新增的这次 fetch
+ * 而崩掉，条数无所谓；真正要证明"清单来自接口"的那条测试
+ * （见下方"变量清单必须来自接口"一节）会用一份**只有 3 条**的响应覆盖它。
+ */
+const FULL_VARIABLES: VariablesResponse = {
+  common: [
+    { Path: 'type', Label: '事件类型', Optional: false },
+    { Path: 'roomId', Label: '直播间号', Optional: false },
+    { Path: 'timestamp', Label: '事件时间戳', Optional: false },
+  ],
+  byEvent: {
+    danmaku: [
+      { Path: 'user.uid', Label: '用户 UID', Optional: false },
+      { Path: 'user.username', Label: '用户昵称', Optional: false },
+      { Path: 'user.medal.level', Label: '粉丝勋章等级', Optional: true },
+      { Path: 'text', Label: '弹幕正文', Optional: false },
+    ],
+    gift: [
+      { Path: 'user.uid', Label: '用户 UID', Optional: false },
+      { Path: 'gift.name', Label: '礼物名称', Optional: false },
+      { Path: 'gift.count', Label: '礼物数量', Optional: false },
+    ],
+  },
+}
+
 function err(status: number, message: string) {
   return new Response(JSON.stringify({ error: message }), {
     status,
@@ -99,16 +132,19 @@ function err(status: number, message: string) {
  */
 function stubFetch(opts: {
   rules?: RuleView[]
+  variables?: VariablesResponse
   onWrite?: (url: string, init: RequestInit) => void
   putResponse?: () => Response
   reloadResponse?: () => Response
 }) {
   const rules = opts.rules ?? []
+  const variables = opts.variables ?? FULL_VARIABLES
   const f = vi.fn().mockImplementation((url: string, init?: RequestInit) => {
     if (url === '/api/meta/event-types') return Promise.resolve(ok(FULL_EVENT_TYPES))
     if (url === '/api/meta/action-types') return Promise.resolve(ok(FULL_ACTION_TYPES))
     if (url === '/api/meta/operators') return Promise.resolve(ok(FULL_OPERATORS))
     if (url === '/api/meta/aggregate-by') return Promise.resolve(ok(FULL_AGGREGATE_BY))
+    if (url === '/api/meta/variables') return Promise.resolve(ok(variables))
     if (url === '/api/bindings/1/rules' && (!init || init.method === 'GET')) {
       return Promise.resolve(ok(rules))
     }
@@ -367,6 +403,81 @@ describe('Custom 页元数据加载', () => {
       'user_enter',
     ])
   })
+
+  // ---- 变量清单必须来自接口，不是内置——这是本次接线最重要的一条证据 ----
+  //
+  // ConditionTree.vue 在 P4-2 时内置了一份从 vars.go 手抄的
+  // COMMON_FIELD_OPTIONS（20 条），P4-3 把它删掉、改成从
+  // GET /api/meta/variables 拉。下面这条测试通过 mock 一份只有 3 个变量
+  // 的响应、断言字段候选也只有 3 项，来证明"清单确实来自接口"——如果
+  // 实现悄悄又变回了内置 20 条清单，这条测试会失败（渲染出 20 项而不是
+  // 3 项）。已按控制器要求做过变异测试验证，见 task-10a-report.md。
+  it(
+    '【关键证据】后端 /api/meta/variables 只返回 3 个变量时，' +
+      '条件树的字段候选也只有 3 项——证明清单来自接口而不是内置的 20 条',
+    async () => {
+      setupStores()
+      stubFetch({
+        rules: [],
+        variables: {
+          common: [
+            { Path: 'type', Label: '事件类型', Optional: false },
+            { Path: 'roomId', Label: '直播间号', Optional: false },
+            { Path: 'timestamp', Label: '事件时间戳', Optional: false },
+          ],
+          byEvent: {},
+        },
+      })
+      const wrapper = await mountCustom()
+
+      const addRuleBtn = wrapper.findAll('button').find((b) => b.text().includes('新增自定义规则'))
+      await addRuleBtn!.trigger('click')
+      await flushPromises()
+
+      // 打开"触发条件"开关才会渲染 ConditionTree（第一个 switch 是规则
+      // 启停，第二个才是"触发条件"的启用开关，见文件下方同款测试）。
+      const switches = wrapper.findAllComponents(NSwitch)
+      switches[1].vm.$emit('update:value', true)
+      await flushPromises()
+
+      const conditionTree = wrapper.findComponent(ConditionTree)
+      expect(conditionTree.exists()).toBe(true)
+      const fieldOptions = conditionTree.props('fieldOptions') as { value: string }[]
+      expect(fieldOptions).toHaveLength(3)
+      expect(fieldOptions.map((o) => o.value).sort()).toEqual(['roomId', 'timestamp', 'type'])
+    },
+  )
+})
+
+describe('buildFieldOptions：把 VariablesResponse 拍平成 ConditionTree 要的候选项', () => {
+  it('common 与 byEvent 各分组按路径去重后合并；Optional 字段的 label 带"可能不存在"提示', () => {
+    const resp: VariablesResponse = {
+      common: [{ Path: 'roomId', Label: '直播间号', Optional: false }],
+      byEvent: {
+        gift: [
+          { Path: 'user.uid', Label: '用户 UID', Optional: false },
+          { Path: 'user.medal.level', Label: '粉丝勋章等级', Optional: true },
+        ],
+        danmaku: [
+          { Path: 'user.uid', Label: '用户 UID（重复，应被去重）', Optional: false },
+          { Path: 'text', Label: '弹幕正文', Optional: false },
+        ],
+      },
+    }
+    const options = buildFieldOptions(resp)
+    // 拍平顺序：common 在前，byEvent 按事件类型名字母序遍历——"danmaku" < "gift"，
+    // 所以 danmaku 分组（user.uid、text）排在 gift 分组（user.medal.level，
+    // user.uid 因已出现过被去重）前面。
+    expect(options.map((o) => o.value)).toEqual(['roomId', 'user.uid', 'text', 'user.medal.level'])
+    const medal = options.find((o) => o.value === 'user.medal.level')
+    expect(medal!.label).toContain('可能不存在')
+    const roomId = options.find((o) => o.value === 'roomId')
+    expect(roomId!.label).not.toContain('可能不存在')
+  })
+
+  it('common/byEvent 都为空时返回空数组，不抛错', () => {
+    expect(buildFieldOptions({ common: [], byEvent: {} })).toEqual([])
+  })
 })
 
 // ============================================================
@@ -492,8 +603,8 @@ describe('Custom 页：条件开关控制 ConditionTree 是否出现', () => {
   })
 })
 
-describe('Custom 页：排除通用规则——渲染出来但不参与组装（悬空）', () => {
-  it('多选框选中内置规则名后，规则 JSON 预览里不包含这个选择', async () => {
+describe('Custom 页：排除通用规则——真功能（spec.Rule.Suppress）', () => {
+  it('多选框候选项是七个内置规则名；选中后规则 JSON 预览里出现 suppress 字段', async () => {
     setupStores()
     stubFetch({ rules: [] })
     const wrapper = await mountCustom()
@@ -502,7 +613,6 @@ describe('Custom 页：排除通用规则——渲染出来但不参与组装（
     await addRuleBtn!.trigger('click')
     await flushPromises()
 
-    expect(wrapper.text()).toContain('待后端支持')
     // NSelect 的候选项只在下拉展开时才进 DOM 文本，直接读 options prop 更可靠
     const excludeSelect = wrapper
       .findAllComponents(NSelect)
@@ -516,13 +626,97 @@ describe('Custom 页：排除通用规则——渲染出来但不参与组装（
       (o) => o.value,
     )
     BUILTIN_RULE_NAMES.forEach((n) => expect(optionValues).toContain(n))
+    expect(excludeSelect!.props('disabled')).toBeFalsy() // 默认 triggerMode='on'，不该被禁用
+
+    excludeSelect!.vm.$emit('update:value', [ENTER_RULE_NAME])
+    await flushPromises()
 
     // NCollapseItem 默认懒渲染，内容要展开后才出现在 DOM 里；实际绑定点击
     // 事件的是 header-main 这个子元素，点外层 header 容器不会触发展开。
     const collapseHeader = wrapper.find('.n-collapse-item__header-main')
     await collapseHeader.trigger('click')
     await flushPromises()
-    expect(wrapper.find('.json-preview').text()).not.toContain('excludeBuiltinRules')
+    const preview = JSON.parse(wrapper.find('.json-preview').text()) as { suppress?: string[] }
+    expect(preview.suppress).toEqual([ENTER_RULE_NAME])
+  })
+
+  it('触发方式切到"定时触发"时，排除通用规则的多选框被禁用——避免配出必然被后端拒绝的组合', async () => {
+    setupStores()
+    stubFetch({ rules: [] })
+    const wrapper = await mountCustom()
+
+    const addRuleBtn = wrapper.findAll('button').find((b) => b.text().includes('新增自定义规则'))
+    await addRuleBtn!.trigger('click')
+    await flushPromises()
+
+    const excludeSelectBefore = () =>
+      wrapper
+        .findAllComponents(NSelect)
+        .find(
+          (s) =>
+            (s.props('options') as { value: string }[] | undefined)?.length ===
+            BUILTIN_RULE_NAMES.length,
+        )
+    expect(excludeSelectBefore()!.props('disabled')).toBeFalsy()
+
+    const triggerModeRadio = wrapper.findComponent(NRadioGroup)
+    triggerModeRadio.vm.$emit('update:value', 'schedule')
+    await flushPromises()
+
+    expect(excludeSelectBefore()!.props('disabled')).toBe(true)
+    expect(wrapper.text()).toContain('定时触发不可用')
+  })
+})
+
+describe('buildCustomRule/parseCustomRuleDraft：suppress 往返，且定时触发时永不带 suppress', () => {
+  it('triggerMode=on 且 excludeBuiltinRules 非空时，rule.suppress 原样带上', () => {
+    const draft = {
+      ...defaultCustomRuleDraft(),
+      name: '测试',
+      excludeBuiltinRules: [ENTER_RULE_NAME, GUARD_RULE_NAME],
+    }
+    expect(buildCustomRule(draft).suppress).toEqual([ENTER_RULE_NAME, GUARD_RULE_NAME])
+  })
+
+  it('excludeBuiltinRules 为空数组时不带 suppress 字段', () => {
+    const draft = { ...defaultCustomRuleDraft(), name: '测试', excludeBuiltinRules: [] }
+    expect(buildCustomRule(draft).suppress).toBeUndefined()
+  })
+
+  it(
+    '【关键：防呆】triggerMode=schedule 时即便 excludeBuiltinRules 还留着上次选的值，' +
+      '组装出的规则也绝不带 suppress——否则会撞上后端"定时触发配 suppress 必拒"的校验',
+    () => {
+      const draft = {
+        ...defaultCustomRuleDraft(),
+        name: '测试',
+        triggerMode: 'schedule' as const,
+        excludeBuiltinRules: [ENTER_RULE_NAME],
+      }
+      expect(buildCustomRule(draft).suppress).toBeUndefined()
+    },
+  )
+
+  it('parseCustomRuleDraft 还原 rule.suppress 到 excludeBuiltinRules', () => {
+    const rule: RuleView = {
+      name: '舰长专属欢迎',
+      enabled: true,
+      on: ['user_enter'],
+      suppress: [ENTER_RULE_NAME],
+      do: [{ type: 'danmaku', template: ['欢迎回家'] }],
+      position: 0,
+    }
+    expect(parseCustomRuleDraft(rule).excludeBuiltinRules).toEqual([ENTER_RULE_NAME])
+  })
+
+  it('parseCustomRuleDraft：rule.suppress 缺省时 excludeBuiltinRules 是空数组（默认草稿值）', () => {
+    const rule: RuleView = {
+      name: '舰长专属欢迎',
+      on: ['user_enter'],
+      do: [{ type: 'danmaku', template: ['欢迎回家'] }],
+      position: 0,
+    }
+    expect(parseCustomRuleDraft(rule).excludeBuiltinRules).toEqual([])
   })
 })
 
@@ -700,6 +894,7 @@ describe('Custom 页：保存（Task 13 接上 useDraft）', () => {
         if (url === '/api/meta/action-types') return Promise.resolve(ok(FULL_ACTION_TYPES))
         if (url === '/api/meta/operators') return Promise.resolve(ok(FULL_OPERATORS))
         if (url === '/api/meta/aggregate-by') return Promise.resolve(ok(FULL_AGGREGATE_BY))
+        if (url === '/api/meta/variables') return Promise.resolve(ok(FULL_VARIABLES))
         if (url === '/api/bindings/1/rules' && method === 'GET') return Promise.resolve(ok([]))
         if (url === '/api/bindings/1/rules' && method === 'PUT') {
           return Promise.resolve(ok({ status: 'ok' }))
@@ -805,6 +1000,7 @@ describe('Custom 页：从房管页「去配置」跳转过来的自动禁言预
       if (url === '/api/meta/action-types') return Promise.resolve(ok(FULL_ACTION_TYPES))
       if (url === '/api/meta/operators') return Promise.resolve(ok(FULL_OPERATORS))
       if (url === '/api/meta/aggregate-by') return Promise.resolve(ok(FULL_AGGREGATE_BY))
+      if (url === '/api/meta/variables') return Promise.resolve(ok(FULL_VARIABLES))
       if (url === '/api/bindings/1/rules' && method === 'GET') return Promise.resolve(ok([]))
       if (url === '/api/bindings/2/rules' && method === 'GET') return Promise.resolve(ok([]))
       throw new Error(`unexpected fetch: ${method} ${url}`)

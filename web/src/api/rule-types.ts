@@ -57,12 +57,23 @@ export interface Aggregate {
 /**
  * Action 对应 spec.Action。
  *
- * `type` 没有 `omitempty`，必填；其余三个按用途二选一/三选一使用，
- * 都是 omitempty，可选。
+ * `type` 没有 `omitempty`，必填；其余字段都是 omitempty，可选，按 `type`
+ * 决定用哪些。
+ *
+ * `template`/`templateMulti` 二选一即可（也可以两个都给）：单人触发用
+ * `template`，合并触发（`count > 1`）优先用 `templateMulti`，留空则回落到
+ * `template`。**后端有一条校验**：只给 `templateMulti`、不给 `template`、
+ * 且规则没有 `aggregate` 时会被拒（422）——不合并的触发永远只有一个人，
+ * `templateMulti` 用不上（`server/internal/rules/rule.go` 第 110-128 行）。
+ *
+ * `pick` 控制 `template`/`templateMulti` 有多条时怎么挑："random"（默认，
+ * 空字符串等同 `"random"`，与历史配置兼容）或 `"sequential"`（轮询）。
  */
 export interface Action {
   type: string
   template?: string[]
+  templateMulti?: string[]
+  pick?: string
   hours?: number
   script?: string
 }
@@ -86,6 +97,12 @@ export interface Rule {
   cooldown?: Duration
   cooldownGroup?: string
   do?: Action[]
+  /**
+   * Suppress 列出本规则命中后要跳过的规则名。**只对同一次触发生效**，
+   * **只对事件驱动（`on`）的规则生效**——定时（`schedule`）规则配了会被
+   * 后端 `Validate()` 拒绝（`server/internal/rules/rule.go` 第 89-100 行）。
+   */
+  suppress?: string[]
 }
 
 /**

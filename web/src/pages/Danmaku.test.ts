@@ -184,11 +184,18 @@ describe('Danmaku 纯函数：条件拼装与还原', () => {
 })
 
 describe('Danmaku 纯函数：build/parse 往返（组装成 spec.Rule 与从中还原草稿）', () => {
-  it('buildEnterRule 组装出的规则用固定 name 与 on: ["user_enter"]', () => {
+  it('buildEnterRule 组装出的规则用固定 name 与 on: ["user_enter"]，do[0] 带 template/templateMulti/pick 三项', () => {
     const rule = buildEnterRule(defaultEnterDraft(), '9000')
     expect(rule.name).toBe(ENTER_RULE_NAME)
     expect(rule.on).toEqual(['user_enter'])
-    expect(rule.do).toEqual([{ type: 'danmaku', template: defaultEnterDraft().singleTemplates }])
+    expect(rule.do).toEqual([
+      {
+        type: 'danmaku',
+        template: defaultEnterDraft().singleTemplates,
+        templateMulti: defaultEnterDraft().multiTemplates,
+        pick: 'random',
+      },
+    ])
   })
 
   it('buildGiftRule 组装出的规则用固定 name 与 on: ["gift"]', () => {
@@ -197,11 +204,41 @@ describe('Danmaku 纯函数：build/parse 往返（组装成 spec.Rule 与从中
     expect(rule.on).toEqual(['gift'])
   })
 
+  describe('Pick/TemplateMulti：P4-3 接通的两个字段', () => {
+    it('buildEnterRule：pickMode="sequential" 时 do[0].pick 是 "sequential"', () => {
+      const draft = { ...defaultEnterDraft(), pickMode: 'sequential' as const }
+      expect(buildEnterRule(draft, '9000').do![0].pick).toBe('sequential')
+    })
+
+    it('buildEnterRule：多人模板过滤空白后写进 do[0].templateMulti', () => {
+      const draft = { ...defaultEnterDraft(), multiTemplates: ['多人模板A', '  ', ''] }
+      expect(buildEnterRule(draft, '9000').do![0].templateMulti).toEqual(['多人模板A'])
+    })
+
+    it('buildEnterRule：进房欢迎恒带 aggregate，不会撞上「templateMulti 无 aggregate」的后端校验', () => {
+      // 断言 aggregate 字段确实总是存在——这是「templateMulti 天然安全」的前提，
+      // 见 Danmaku.vue 文件头 P4-3 说明。
+      expect(buildEnterRule(defaultEnterDraft(), '9000').aggregate).toBeTruthy()
+    })
+
+    it('buildGiftRule/buildBroadcastRule：pickMode 直接进 do[0].pick', () => {
+      expect(
+        buildGiftRule({ ...defaultGiftDraft(), pickMode: 'sequential' as const }).do![0].pick,
+      ).toBe('sequential')
+      expect(
+        buildBroadcastRule({ ...defaultBroadcastDraft(), pickMode: 'sequential' as const }).do![0]
+          .pick,
+      ).toBe('sequential')
+      expect(buildGiftRule(defaultGiftDraft()).do![0].pick).toBe('random')
+      expect(buildBroadcastRule(defaultBroadcastDraft()).do![0].pick).toBe('random')
+    })
+  })
+
   it('parseEnterDraft(null) 返回默认草稿——新绑定还没配过规则', () => {
     expect(parseEnterDraft(null)).toEqual(defaultEnterDraft())
   })
 
-  it('parseEnterDraft 还原 enabled/aggregate/模板，multiTemplates 与 pickMode 保持默认（后端没有对应字段）', () => {
+  it('parseEnterDraft 还原 enabled/aggregate/模板；已保存规则没有 templateMulti/pick 时回落默认值（与旧配置兼容）', () => {
     const savedRule = {
       name: ENTER_RULE_NAME,
       enabled: false,
@@ -216,9 +253,39 @@ describe('Danmaku 纯函数：build/parse 往返（组装成 spec.Rule 与从中
     expect(draft.maxWaitSeconds).toBe(300)
     expect(draft.minCount).toBe(4)
     expect(draft.singleTemplates).toEqual(['已保存单人模板A', '已保存单人模板B'])
-    // 后端没有 multiTemplates/pickMode 的落地字段，加载时无从恢复
+    // 已保存规则没有 templateMulti 字段（旧配置），回落默认值；pick 未写等同 "random"。
     expect(draft.multiTemplates).toEqual(defaultEnterDraft().multiTemplates)
     expect(draft.pickMode).toBe('random')
+  })
+
+  it('parseEnterDraft 还原真实存在的 templateMulti 与 pick="sequential"', () => {
+    const savedRule = {
+      name: ENTER_RULE_NAME,
+      enabled: true,
+      on: ['user_enter'],
+      aggregate: { window: '2m', by: 'type' },
+      do: [
+        {
+          type: 'danmaku',
+          template: ['单人模板'],
+          templateMulti: ['多人模板A', '多人模板B'],
+          pick: 'sequential',
+        },
+      ],
+    }
+    const draft = parseEnterDraft(savedRule)
+    expect(draft.multiTemplates).toEqual(['多人模板A', '多人模板B'])
+    expect(draft.pickMode).toBe('sequential')
+  })
+
+  it('parseEnterDraft：pick 为空字符串时等同 "random"（与历史配置兼容）', () => {
+    const savedRule = {
+      name: ENTER_RULE_NAME,
+      on: ['user_enter'],
+      aggregate: { window: '2m', by: 'type' },
+      do: [{ type: 'danmaku', template: ['模板'], pick: '' }],
+    }
+    expect(parseEnterDraft(savedRule).pickMode).toBe('random')
   })
 
   it('parseGiftDraft 还原 groupMode=dedupeGift（by: "gift"）与模板', () => {
@@ -349,8 +416,8 @@ describe('Danmaku 页面：认领已保存配置（核心场景）', () => {
   })
 })
 
-describe('Danmaku 页面：三处悬空控件全部渲染，且都不 disabled', () => {
-  it('八处"待后端支持"标签都出现（Task9 五处 + Task10 新增：轮播轮询、PK匹配信息、PK串门欢迎）', async () => {
+describe('Danmaku 页面：一处悬空控件全部渲染，且都不 disabled', () => {
+  it('四处"待后端支持"标签都出现（P4-3 接通了轮询/多人模板后，只剩盲盒 x2 + PK x2）', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn().mockImplementation(() => Promise.resolve(ok([]))),
@@ -359,9 +426,8 @@ describe('Danmaku 页面：三处悬空控件全部渲染，且都不 disabled',
     const wrapper = await mountDanmaku()
 
     const tags = wrapper.findAll('.n-tag').filter((t) => t.text() === '待后端支持')
-    // Task9：轮询x2（进房欢迎/礼物答谢）、多人模板、盲盒单列、盲盒盈亏 = 5
-    // Task10：轮播消息的轮询、PK匹配信息、PK串门欢迎（来自子组件 PkPanel）= 3
-    expect(tags.length).toBe(8)
+    // 礼物答谢的盲盒单列、盲盒盈亏 = 2；PkPanel 的 PK匹配信息、PK串门欢迎 = 2
+    expect(tags.length).toBe(4)
   })
 
   it('轮询单选框、多人模板输入框、盲盒复选框都能正常交互（不是 disabled）', async () => {
@@ -775,14 +841,15 @@ describe('Danmaku 页面：轮播消息 / 其他答谢 认领与渲染', () => {
     expect(valueOf('上舰答谢模板')).toBe('房间专属上舰答谢')
   })
 
-  it('「轮播」实际是随机播放这句话在界面上明确出现，不藏在 tooltip 里', async () => {
+  it('轮播消息的默认播放方式（随机抽取）与轮询选项在界面上明确说明，不藏在 tooltip 里', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn().mockImplementation(() => Promise.resolve(ok([]))),
     )
     setupStores()
     const wrapper = await mountDanmaku()
-    expect(wrapper.text()).toContain('这个词目前名不副实')
+    expect(wrapper.text()).toContain('默认「随机抽取」')
+    expect(wrapper.text()).toContain('选「轮询」则按顺序循环')
   })
 })
 

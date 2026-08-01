@@ -204,45 +204,23 @@ export function buildLeafValue(state: {
         : state.listValues
   }
 }
-
-/** 常用变量路径清单，兜底给字段下拉用——见下方 <script setup> 顶部的详细说明。 */
-export const COMMON_FIELD_OPTIONS: { label: string; value: string }[] = [
-  { label: 'user.uid（用户 UID）', value: 'user.uid' },
-  { label: 'user.username（用户昵称）', value: 'user.username' },
-  { label: 'user.guardLevel（大航海档位，1总督/2提督/3舰长/0无）', value: 'user.guardLevel' },
-  { label: 'user.userLevel（用户等级）', value: 'user.userLevel' },
-  { label: 'user.wealthLevel（财富等级）', value: 'user.wealthLevel' },
-  { label: 'user.isAdmin（是否房管）', value: 'user.isAdmin' },
-  { label: 'user.medal.name（粉丝牌名字）', value: 'user.medal.name' },
-  { label: 'user.medal.level（粉丝牌等级）', value: 'user.medal.level' },
-  { label: 'user.medal.roomId（粉丝牌所属房间）', value: 'user.medal.roomId' },
-  { label: 'user.medal.isLighted（粉丝牌是否点亮）', value: 'user.medal.isLighted' },
-  { label: 'text（弹幕/醒目留言正文）', value: 'text' },
-  { label: 'gift.name（礼物名）', value: 'gift.name' },
-  { label: 'gift.count（礼物数量）', value: 'gift.count' },
-  { label: 'gift.totalCoin（礼物总价，瓜子）', value: 'gift.totalCoin' },
-  { label: 'guard.level（本次上舰档位）', value: 'guard.level' },
-  { label: 'guard.name（本次上舰档位名）', value: 'guard.name' },
-  { label: 'guard.count（本次购买月数）', value: 'guard.count' },
-  { label: 'guard.isRenew（是否续费）', value: 'guard.isRenew' },
-  { label: 'superChat.price（醒目留言价格）', value: 'superChat.price' },
-  { label: 'roomId（本直播间房间号）', value: 'roomId' },
-]
 </script>
 
 <script setup lang="ts">
 /**
- * 变量清单的坑：没有 `GET /api/meta/variables` 这个接口。
+ * 变量清单：字段下拉的候选项由调用方（`Custom.vue`）通过 `fieldOptions`
+ * prop 传入，本组件自己不知道清单从哪来。
  *
- * `Condition.field` 是点分路径（`user.uid`、`user.medal.isLighted` 这些），
- * 理论上应该跟 operators/event-types 一样从后端拉，但后端压根没开这个口。
- * 去读了 `server/internal/rules/vars.go`（`VarsFromEvent`/`userVars`）后
- * 把它实际展开的路径整理成了上面的 `COMMON_FIELD_OPTIONS`，作为下拉的
- * 候选项；但 `NSelect` 开了 `filterable tag`，用户可以直接打字输入
- * 任意路径（比如 `battle.subCommand` 这种没进清单的），不受下拉限制。
+ * P4-2 时这里曾经内置一份从 `server/internal/rules/vars.go` 手抄的
+ * `COMMON_FIELD_OPTIONS`（20 条）——那是抄出来的**第二处定义**：后端
+ * `vars.go` 改了字段，抄来的清单不会跟着变。P4-3 新增了
+ * `GET /api/meta/variables`（`server/internal/httpapi/meta_handler.go`，
+ * 原样转发 `rules.VariableCatalog()`），`Custom.vue` 现在从这个接口拉取
+ * 真实清单再传下来，本组件不再持有任何硬编码候选项。
  *
- * 这是**第二处定义**：后端 `vars.go` 改了字段，这份清单不会跟着变。
- * 已登记进 `docs/superpowers/specs/2026-08-01-p4-2-悬空清单.md`。
+ * `NSelect` 仍然开着 `filterable tag`：清单不全（比如某个新事件类型的
+ * 字段还没进清单）或后端一时没拉到时，用户始终能直接打字输入任意路径，
+ * 不受下拉候选项限制。
  */
 import { computed, ref, watch } from 'vue'
 import {
