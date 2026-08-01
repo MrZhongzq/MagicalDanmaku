@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
-import { NRadioGroup } from 'naive-ui'
+import { NRadioGroup, NStatistic } from 'naive-ui'
 
 const { default: Stats } = await import('./Stats.vue')
 const { useBindingsStore } = await import('@/stores/bindings')
@@ -312,6 +312,65 @@ describe('Stats 页', () => {
     expect(wrapper.text()).toContain('乙房间观众')
     // 统计卡片也要跟着换成乙绑定的数字
     expect(wrapper.find('.stats-grid').text()).toContain('2')
+  })
+
+  // ---- 全批次终审项【4】：没有分桶数据时不能显示 0 ----
+  //
+  // 修复前 totals 对空数组求和永远得到 0，卡片会斩钉截铁地显示
+  // "弹幕数 0"——而这不代表"这段时间真的一条弹幕都没有"，可能只是
+  // "压根没有分桶数据可算"。这正是这一页此前用占位符防住的错误，
+  // 只是这次的触发条件是空桶数组，不是接口报错。
+  it('by=day 没有任何分桶数据时，六张真实数字卡片显示占位符「—」而不是 0', async () => {
+    setupStore()
+    stubFetch({ statsByDay: [] })
+    const wrapper = mount(Stats)
+    await flushPromises()
+
+    const values = wrapper.findAllComponents(NStatistic).map((c) => c.props('value'))
+    // 7 张卡片：6 张真实数字 + 1 张一直悬空的盲盒盈亏，全部应为占位符
+    expect(values).toEqual(['—', '—', '—', '—', '—', '—', '—'])
+  })
+
+  it(
+    'by=session 没有任何分桶数据时，页面给出关于 live_start/live_stop 的明确说明——' +
+      '不能只在顶部提示里说"直播时长会显示 0"，这次连弹幕数、上舰数等全部字段都受影响',
+    async () => {
+      setupStore()
+      const f = stubFetch({
+        statsByDay: [statsBucket({ danmakuCount: 10 })],
+        statsBySession: [],
+      })
+      const wrapper = mount(Stats)
+      await flushPromises()
+
+      wrapper.findComponent(NRadioGroup).vm.$emit('update:value', 'session')
+      await flushPromises()
+
+      const lastStatsCall = [...f.mock.calls]
+        .reverse()
+        .find((call) => String(call[0]).startsWith('/api/bindings/1/stats'))
+      expect(String(lastStatsCall![0])).toContain('by=session')
+
+      const values = wrapper.findAllComponents(NStatistic).map((c) => c.props('value'))
+      expect(values.every((v) => v === '—')).toBe(true)
+
+      // 页面级说明必须点名 live_start/live_stop，而不是一句笼统的"没有数据"
+      expect(wrapper.text()).toContain('live_start')
+      expect(wrapper.text()).toContain('live_stop')
+      expect(wrapper.text()).toContain('按场次维度无法分桶')
+    },
+  )
+
+  it('by=session 有分桶数据时不显示"按场次维度暂时无法分桶"的说明', async () => {
+    setupStore()
+    stubFetch({ statsBySession: [statsBucket({ danmakuCount: 5 })] })
+    const wrapper = mount(Stats)
+    wrapper.findComponent(NRadioGroup).vm.$emit('update:value', 'session')
+    await flushPromises()
+
+    expect(wrapper.text()).not.toContain('按场次维度暂时无法分桶')
+    const values = wrapper.findAllComponents(NStatistic).map((c) => c.props('value'))
+    expect(values[0]).toBe('5') // 弹幕数卡片：真实数字，不是占位符
   })
 
   it('维度切换（按场次/按日）会重新请求聚合接口，带上对应的 by 参数，且明细表跟着变', async () => {

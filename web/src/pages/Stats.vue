@@ -141,42 +141,77 @@ interface StatCardDef {
   hanging?: boolean
 }
 
+/**
+ * hasBuckets 为假时（接口返回空数组），六张"真实数字"卡片一律不显示
+ * `totals` 算出来的 0，改走 PLACEHOLDER。
+ *
+ * **这正是这一页的设计初衷要防的东西，只是换了个触发条件**：`by=session`
+ * 时，每一个现存用户在升级后、第一次开播被记录到之前，切到「按场次」
+ * 都会拿到空数组——`live_start`/`live_stop` 是这次才进日志白名单的。
+ * 空数组求和，六项全是 0，卡片会斩钉截铁地显示「弹幕数 0」「上舰数 0」，
+ * 而这不是「这段时间真的一条弹幕都没有」，是「压根没能分出场次」，两者
+ * 混在一起显示就是把「算不出来」读成了「确实是零」——与这一页此前用
+ * 占位符防住的是同一类错误。
+ */
+const hasBuckets = computed(() => statsBuckets.value.length > 0)
+
+/**
+ * noBucketsHint 是没有分桶数据时卡片统一显示的说明，取代逐字段各自的
+ * hint——这时候连"有没有数据"都不确定，继续显示字段各自的固有说明
+ * （比如"本维度内的弹幕总条数"）容易让人以为占位符只是碰巧显示、
+ * 数字本该是真实算出来的 0。
+ *
+ * `by=session` 单独给一句更具体的说明：这是目前唯一已知、会稳定触发
+ * 空分桶的场景（原因见 hasBuckets 的注释），点名 live_start/live_stop
+ * 比一句通用的"没有数据"更能让用户判断这是不是自己直播间的问题。
+ */
+const noBucketsHint = computed(() =>
+  dimension.value === 'session'
+    ? '这段时间没有记录到开播/下播事件，按场次维度无法分桶——' +
+      'live_start/live_stop 是本次升级才开始记录的，现存的历史数据里没有这两类事件'
+    : '这段时间没有可用的统计数据',
+)
+
 const STAT_CARDS = computed<StatCardDef[]>(() => [
   {
     key: 'danmakuCount',
     label: '弹幕数',
-    value: String(totals.value.danmakuCount),
-    hint: '本维度内的弹幕总条数',
+    value: hasBuckets.value ? String(totals.value.danmakuCount) : PLACEHOLDER,
+    hint: hasBuckets.value ? '本维度内的弹幕总条数' : noBucketsHint.value,
   },
   {
     key: 'enterCount',
     label: '进房人数',
-    value: String(totals.value.enterCount),
-    hint: '本维度内的进房人次',
+    value: hasBuckets.value ? String(totals.value.enterCount) : PLACEHOLDER,
+    hint: hasBuckets.value ? '本维度内的进房人次' : noBucketsHint.value,
   },
   {
     key: 'giftKinds',
     label: '礼物种类',
-    value: String(totals.value.giftKinds),
-    hint: `各${dimensionLabel.value}种类数之和：同一件礼物如果在多个${dimensionLabel.value}都出现过，会被重复计入，不是这段时间内去重后的真实种类数`,
+    value: hasBuckets.value ? String(totals.value.giftKinds) : PLACEHOLDER,
+    hint: hasBuckets.value
+      ? `各${dimensionLabel.value}种类数之和：同一件礼物如果在多个${dimensionLabel.value}都出现过，会被重复计入，不是这段时间内去重后的真实种类数`
+      : noBucketsHint.value,
   },
   {
     key: 'giftCount',
     label: '礼物数量',
-    value: String(totals.value.giftCount),
-    hint: '本维度内送出的礼物总件数',
+    value: hasBuckets.value ? String(totals.value.giftCount) : PLACEHOLDER,
+    hint: hasBuckets.value ? '本维度内送出的礼物总件数' : noBucketsHint.value,
   },
   {
     key: 'guardCount',
     label: '上舰数',
-    value: String(totals.value.guardCount),
-    hint: '本维度内新增/续费的大航海数量',
+    value: hasBuckets.value ? String(totals.value.guardCount) : PLACEHOLDER,
+    hint: hasBuckets.value ? '本维度内新增/续费的大航海数量' : noBucketsHint.value,
   },
   {
     key: 'liveDuration',
     label: '直播时长',
-    value: formatDuration(totals.value.liveSeconds),
-    hint: 'live_start/live_stop 是这次才加入日志记录范围的，更早的历史数据没有这两类事件，那些日子/场次会显示 0，不代表当时没有开播',
+    value: hasBuckets.value ? formatDuration(totals.value.liveSeconds) : PLACEHOLDER,
+    hint: hasBuckets.value
+      ? 'live_start/live_stop 是这次才加入日志记录范围的，更早的历史数据没有这两类事件，那些日子/场次会显示 0，不代表当时没有开播'
+      : noBucketsHint.value,
   },
   {
     key: 'blindBoxProfit',
@@ -309,6 +344,21 @@ const previewColumns: DataTableColumns<PreviewRow> = [
         </span>
       </div>
 
+      <NAlert
+        v-if="!loadingStats && !statsError && dimension === 'session' && !hasBuckets"
+        type="warning"
+        title="按场次维度暂时无法分桶"
+        class="session-empty-alert"
+      >
+        这段时间没有记录到开播/下播事件，按场次维度无法分桶——<code>live_start</code>/<code
+          >live_stop</code
+        >
+        是本次升级才开始记录的，现存的历史数据里没有这两类事件。下面的卡片会显示为「{{
+          PLACEHOLDER
+        }}」而不是 0：0 会被误读成「这段时间确实没有任何弹幕/礼物/上舰」，但实际情况是
+        「压根分不出场次」，切回「按日」或等下一次开播后再看会更准确。
+      </NAlert>
+
       <NSpin :show="loadingStats">
         <p v-if="statsError" class="stats-error">{{ statsError }}</p>
 
@@ -370,6 +420,9 @@ const previewColumns: DataTableColumns<PreviewRow> = [
 
 <style scoped>
 .hanging-alert {
+  margin-bottom: 16px;
+}
+.session-empty-alert {
   margin-bottom: 16px;
 }
 .dimension-row {
