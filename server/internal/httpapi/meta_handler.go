@@ -54,6 +54,7 @@ var eventTypeLabels = []struct {
 	{event.TypeOnlineRankUpdate, "高能榜更新"},
 	{event.TypeRoomStatsUpdate, "房间统计更新"},
 	{event.TypeBattle, "PK 大乱斗"},
+	{event.TypeManual, "手动操作"},
 	{event.TypeUnknown, "未识别事件"},
 }
 

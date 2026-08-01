@@ -275,8 +275,10 @@ func TestQRCodePollRejectsOtherUsersKey(t *testing.T) {
 	li := loginAs(t, srv, st, "李四", false)
 	resp := jsonRequest(t, li, "POST", srv.URL+"/api/accounts/qrcode/K", "")
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusNotFound && resp.StatusCode != http.StatusForbidden {
-		t.Errorf("别人的扫码会话状态码 = %d, 期望 404 或 403", resp.StatusCode)
+	// handleQRCodePoll 里 pending.UserID != u.ID 时无条件回 404
+	// （与「扫码会话不存在或已过期」同一句文案），不存在 403 分支。
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("别人的扫码会话状态码 = %d, 期望 404", resp.StatusCode)
 	}
 	if _, err := st.GetAccountByName(context.Background(), "小号"); err == nil {
 		t.Error("不该替别人把账号建出来")
@@ -361,8 +363,10 @@ func TestPatchAccountRequiresAccountManage(t *testing.T) {
 	li := loginAs(t, srv, st, "李四", false)
 	resp := jsonRequest(t, li, "PATCH", srv.URL+"/api/accounts/小号", `{"rateLimitMs":2000}`)
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusForbidden && resp.StatusCode != http.StatusNotFound {
-		t.Errorf("无权限状态码 = %d, 期望 403 或 404", resp.StatusCode)
+	// handlePatchAccount 里 !isAccountOwner(u, acc) 时无条件回 404
+	// （「不是所有者就当作不存在」），不存在 403 分支。
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("无权限状态码 = %d, 期望 404", resp.StatusCode)
 	}
 }
 

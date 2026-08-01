@@ -307,7 +307,12 @@ func newReloadTestStore(t *testing.T) (*store.Store, int64, int64) {
 			"然后：export MAGICD_TEST_DATABASE_URL='postgres://magicd:magicd@localhost:5433/magicd?sslmode=disable'")
 	}
 
-	const schema = "h_magicd_reload_test"
+	// "h_" 是 internal/httpapi 测试用的命名空间（schemaNameFor 里写死的
+	// 前缀）。go test ./... 会并行跑这两个包，而 cleanup 是
+	// DROP SCHEMA ... CASCADE——两个包各自建一个同名 schema 时，一个的
+	// DROP 会把另一个正在用的表也删掉，表现是「随机报表不存在」。
+	// 用 "m_" 前缀（magicd 命令本身）避开这个命名空间。
+	const schema = "m_magicd_reload_test"
 	ctx := context.Background()
 
 	admin, err := pgxpool.New(ctx, dsn)

@@ -73,6 +73,24 @@ func TestMetaEventTypesNonEmpty(t *testing.T) {
 	}
 }
 
+// 手动操作（event.TypeManual）已经进 activity_logs 且 eventType="manual"，
+// 但日志页的筛选下拉框里选不到它，因为 eventTypeLabels 里漏了这一项。
+func TestMetaEventTypesIncludesManual(t *testing.T) {
+	srv, st := newTestServer(t)
+	c := loginAs(t, srv, st, "张三", false)
+
+	got := fetchMeta(t, c, srv.URL+"/api/meta/event-types")
+	for _, it := range got {
+		if it.Value == "manual" {
+			if it.Label != "手动操作" {
+				t.Errorf("manual 的标签 = %q, 期望 手动操作", it.Label)
+			}
+			return
+		}
+	}
+	t.Error("元数据缺少事件类型 manual（手动操作），日志页筛选框里选不到它")
+}
+
 func TestMetaActionTypes(t *testing.T) {
 	srv, st := newTestServer(t)
 	c := loginAs(t, srv, st, "张三", false)
