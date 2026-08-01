@@ -11,6 +11,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -272,6 +273,13 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 		ReadHeaderTimeout: defaultReadTimeout,
 		WriteTimeout:      defaultWriteTimeout,
 		IdleTimeout:       defaultIdleTimeout,
+
+		// srv.Shutdown 只关监听器与 idle 连接，不会取消在途请求的
+		// context；handleStream 只在 r.Context().Done() 时才退出循环，
+		// keepalive 是 30 秒一次。不把请求 ctx 系在 ListenAndServe 的
+		// ctx 上，SSE 连接就会挂满整个 defaultShutdownTimeout，Ctrl+C
+		// 固定多等一截，容易被误读成「机器人卡死」。
+		BaseContext: func(net.Listener) context.Context { return ctx },
 	}
 
 	errCh := make(chan error, 1)
