@@ -98,21 +98,21 @@ const FULL_AGGREGATE_BY = [
  */
 const FULL_VARIABLES: VariablesResponse = {
   common: [
-    { Path: 'type', Label: '事件类型', Optional: false },
-    { Path: 'roomId', Label: '直播间号', Optional: false },
-    { Path: 'timestamp', Label: '事件时间戳', Optional: false },
+    { path: 'type', label: '事件类型', optional: false },
+    { path: 'roomId', label: '直播间号', optional: false },
+    { path: 'timestamp', label: '事件时间戳', optional: false },
   ],
   byEvent: {
     danmaku: [
-      { Path: 'user.uid', Label: '用户 UID', Optional: false },
-      { Path: 'user.username', Label: '用户昵称', Optional: false },
-      { Path: 'user.medal.level', Label: '粉丝勋章等级', Optional: true },
-      { Path: 'text', Label: '弹幕正文', Optional: false },
+      { path: 'user.uid', label: '用户 UID', optional: false },
+      { path: 'user.username', label: '用户昵称', optional: false },
+      { path: 'user.medal.level', label: '粉丝勋章等级', optional: true },
+      { path: 'text', label: '弹幕正文', optional: false },
     ],
     gift: [
-      { Path: 'user.uid', Label: '用户 UID', Optional: false },
-      { Path: 'gift.name', Label: '礼物名称', Optional: false },
-      { Path: 'gift.count', Label: '礼物数量', Optional: false },
+      { path: 'user.uid', label: '用户 UID', optional: false },
+      { path: 'gift.name', label: '礼物名称', optional: false },
+      { path: 'gift.count', label: '礼物数量', optional: false },
     ],
   },
 }
@@ -421,9 +421,9 @@ describe('Custom 页元数据加载', () => {
         rules: [],
         variables: {
           common: [
-            { Path: 'type', Label: '事件类型', Optional: false },
-            { Path: 'roomId', Label: '直播间号', Optional: false },
-            { Path: 'timestamp', Label: '事件时间戳', Optional: false },
+            { path: 'type', label: '事件类型', optional: false },
+            { path: 'roomId', label: '直播间号', optional: false },
+            { path: 'timestamp', label: '事件时间戳', optional: false },
           ],
           byEvent: {},
         },
@@ -452,15 +452,15 @@ describe('Custom 页元数据加载', () => {
 describe('buildFieldOptions：把 VariablesResponse 拍平成 ConditionTree 要的候选项', () => {
   it('common 与 byEvent 各分组按路径去重后合并；Optional 字段的 label 带"可能不存在"提示', () => {
     const resp: VariablesResponse = {
-      common: [{ Path: 'roomId', Label: '直播间号', Optional: false }],
+      common: [{ path: 'roomId', label: '直播间号', optional: false }],
       byEvent: {
         gift: [
-          { Path: 'user.uid', Label: '用户 UID', Optional: false },
-          { Path: 'user.medal.level', Label: '粉丝勋章等级', Optional: true },
+          { path: 'user.uid', label: '用户 UID', optional: false },
+          { path: 'user.medal.level', label: '粉丝勋章等级', optional: true },
         ],
         danmaku: [
-          { Path: 'user.uid', Label: '用户 UID（重复，应被去重）', Optional: false },
-          { Path: 'text', Label: '弹幕正文', Optional: false },
+          { path: 'user.uid', label: '用户 UID（重复，应被去重）', optional: false },
+          { path: 'text', label: '弹幕正文', optional: false },
         ],
       },
     }

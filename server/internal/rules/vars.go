@@ -119,10 +119,13 @@ func userVars(u event.User) map[string]any {
 }
 
 // Variable 是一条可用于条件与模板的变量。
+// json tag 不能省：这个结构体会经 /api/meta/variables 直接吐给前端，
+// 不带 tag 的话字段名是大写的 Path/Label/Optional，与其余 /api/meta/*
+// 接口（metaItem 用的是 value/label）风格不一致，前端只能跟着迁就。
 type Variable struct {
-	Path     string // 点分路径，如 "user.medal.isLighted"，与 LookupPath 的参数同形
-	Label    string // 中文说明，供前端下拉框展示
-	Optional bool   // 可能不存在（如未佩戴粉丝牌时没有 medal.*），配条件时仍可选用
+	Path     string `json:"path"`     // 点分路径，如 "user.medal.isLighted"，与 LookupPath 的参数同形
+	Label    string `json:"label"`    // 中文说明，供前端下拉框展示
+	Optional bool   `json:"optional"` // 可能不存在（如未佩戴粉丝牌时没有 medal.*），配条件时仍可选用
 }
 
 // commonVariables 是任意事件都会产出的公共字段。

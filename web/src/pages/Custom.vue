@@ -34,7 +34,7 @@
  * 类型的字段还没登记）或接口一时没拉到时，`ConditionTree` 的 `NSelect`
  * 仍开着 `filterable tag`，用户始终能直接打字输入任意路径。
  *
- * `Variable.Optional` 标记的字段（如未佩戴粉丝牌时不存在的 `medal.*`）
+ * `optional` 标记的字段（如未佩戴粉丝牌时不存在的 `medal.*`）
  * 仍然出现在候选项里、仍然可选——只是标签里加一句「可能不存在」提示，
  * 不能因为字段是可选的就不让配。
  *
@@ -100,18 +100,13 @@ export const BUILTIN_RULE_OPTIONS: { label: string; value: string }[] = BUILTIN_
 )
 
 // ---- 变量清单：GET /api/meta/variables 的响应形状 ----
-//
-// **注意大小写**：这个接口背后的 rules.Variable（server/internal/rules/vars.go）
-// 没有 json tag，字段名走 Go 默认的 encoding/json 规则，序列化结果是
-// 首字母大写的 "Path"/"Label"/"Optional"，不是其它 /api/meta/* 接口那种
-// 小写 "value"/"label"（那些接口背后的 metaItem 显式写了 json tag）。
-// 两个接口的大小写约定不一致是后端现状，前端照抄字段名即可，不用猜。
 
 /** VariableItem 对应后端 rules.Variable 序列化后的一项。 */
 export interface VariableItem {
-  Path: string
-  Label: string
-  Optional: boolean
+  path: string
+  label: string
+  /** 可能不存在（如未佩戴粉丝牌时没有 medal.*），配条件时仍可选用。 */
+  optional: boolean
 }
 
 /** VariablesResponse 对应 GET /api/meta/variables 的响应体。 */
@@ -142,10 +137,10 @@ export function buildFieldOptions(resp: VariablesResponse): { label: string; val
 
   function addAll(vars: VariableItem[]) {
     for (const v of vars) {
-      if (seen.has(v.Path)) continue
-      seen.add(v.Path)
-      const suffix = v.Optional ? '，可能不存在' : ''
-      out.push({ label: `${v.Path}（${v.Label}${suffix}）`, value: v.Path })
+      if (seen.has(v.path)) continue
+      seen.add(v.path)
+      const suffix = v.optional ? '，可能不存在' : ''
+      out.push({ label: `${v.path}（${v.label}${suffix}）`, value: v.path })
     }
   }
 
