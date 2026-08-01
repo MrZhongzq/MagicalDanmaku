@@ -1,19 +1,26 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
-import { NSwitch } from 'naive-ui'
+import { NDatePicker, NSelect, NSwitch } from 'naive-ui'
 
-// Logs 页最容易出问题的两处：
+// Logs 页最容易出问题的几处：
 //   1. 后端推的是命名 SSE 事件（event: danmaku），不是默认 message——
 //      这部分的正确性已经由 useEventStream.test.ts 单独钉住了；这里只
 //      验证「组件把 useEventStream 的产出正确混进了列表顶部」。
-//   2. 「清除」是悬空功能，点了不能假装删除了什么。
+//   2. 「清除」是真删库操作，必须二次确认，确认前绝不能发 DELETE。
+//
+// 用 vi.mock 顶掉 naive-ui 的 useDialog/useMessage，做法与 Accounts.test.ts
+// 删除账号的测试一致：mock 拿到 dialog.warning 收到的 onPositiveClick 之后
+// 手动调用它，等价于「用户点了确认框里的确认」，但是确定性的，不用去挂
+// 真的 NDialogProvider 处理 Teleport 与动画时序。
+const warningMock = vi.fn()
 const messageMock = { success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn() }
 
 vi.mock('naive-ui', async () => {
   const actual = await vi.importActual<typeof import('naive-ui')>('naive-ui')
   return {
     ...actual,
+    useDialog: () => ({ warning: warningMock }),
     useMessage: () => messageMock,
   }
 })
@@ -130,6 +137,7 @@ describe('Logs 页', () => {
     vi.unstubAllGlobals()
     FakeEventSource.instances = []
     vi.stubGlobal('EventSource', FakeEventSource)
+    warningMock.mockClear()
     messageMock.success.mockClear()
     messageMock.error.mockClear()
     messageMock.warning.mockClear()
@@ -211,25 +219,130 @@ describe('Logs 页', () => {
     expect(wrapper.text()).not.toContain('关不掉也不该显示')
   })
 
-  it('点击清除只提示「待后端支持」，不发送任何删除请求', async () => {
+  function deleteCall(f: ReturnType<typeof vi.fn>) {
+    return f.mock.calls.find((call) => (call[1] as RequestInit | undefined)?.method === 'DELETE')
+  }
+
+  it('点击清除先弹二次确认，确认之前不发 DELETE 请求', async () => {
     setupStore()
     const f = stubFetch()
     const wrapper = mount(Logs)
     await flushPromises()
-    const callsBefore = f.mock.calls.length
 
     const clearBtn = wrapper.findAll('button').find((b) => b.text() === '清除')
     expect(clearBtn).toBeTruthy()
     await clearBtn!.trigger('click')
     await flushPromises()
 
-    expect(messageMock.warning).toHaveBeenCalledWith('后端尚未提供删除业务日志的接口')
-    // 没有多发出任何请求（尤其不能是 DELETE）
-    expect(f.mock.calls.length).toBe(callsBefore)
-    const hasDelete = f.mock.calls.some(
-      (call) => (call[1] as RequestInit | undefined)?.method === 'DELETE',
-    )
-    expect(hasDelete).toBe(false)
+    expect(warningMock).toHaveBeenCalledTimes(1)
+    expect(deleteCall(f)).toBeUndefined()
+  })
+
+  it('未设置时间范围时确认清除：请求带 all=1，成功后把 deleted 数字显示出来', async () => {
+    setupStore()
+    const f = vi.fn().mockImplementation((url: string, init?: RequestInit) => {
+      if (url === '/api/meta/event-types') return Promise.resolve(ok([]))
+      if (url.startsWith('/api/bindings/1/activity') && init?.method === 'DELETE') {
+        return Promise.resolve(ok({ deleted: 42 }))
+      }
+      if (url.startsWith('/api/bindings/1/activity')) return Promise.resolve(ok(历史记录))
+      return Promise.resolve(ok({ status: 'ok' }))
+    })
+    vi.stubGlobal('fetch', f)
+
+    const wrapper = mount(Logs)
+    await flushPromises()
+
+    const clearBtn = wrapper.findAll('button').find((b) => b.text() === '清除')
+    await clearBtn!.trigger('click')
+    await flushPromises()
+
+    // 模拟用户在确认框里点击「清除」
+    const opts = warningMock.mock.calls[0][0] as {
+      onPositiveClick: () => void
+      content: () => unknown
+    }
+    // 未设置时间范围，确认框文案要说明将清除全部历史
+    expect(JSON.stringify(opts.content())).toContain('全部历史')
+
+    opts.onPositiveClick()
+    await flushPromises()
+
+    const call = deleteCall(f)
+    expect(call).toBeTruthy()
+    expect(String(call![0])).toContain('all=1')
+    expect(messageMock.success).toHaveBeenCalledWith('已清除 42 条业务日志')
+    expect(wrapper.text()).toContain('上次清除了 42 条')
+  })
+
+  it('设置了时间范围时确认清除：请求带 since/until，不带 all', async () => {
+    setupStore()
+    const f = vi.fn().mockImplementation((url: string, init?: RequestInit) => {
+      if (url === '/api/meta/event-types') return Promise.resolve(ok([]))
+      if (url.startsWith('/api/bindings/1/activity') && init?.method === 'DELETE') {
+        return Promise.resolve(ok({ deleted: 5 }))
+      }
+      if (url.startsWith('/api/bindings/1/activity')) return Promise.resolve(ok(历史记录))
+      return Promise.resolve(ok({ status: 'ok' }))
+    })
+    vi.stubGlobal('fetch', f)
+
+    const wrapper = mount(Logs)
+    await flushPromises()
+
+    const since = new Date('2026-07-30T00:00:00Z').getTime()
+    const until = new Date('2026-07-31T00:00:00Z').getTime()
+    const picker = wrapper.findComponent(NDatePicker)
+    picker.vm.$emit('update:value', [since, until])
+    await flushPromises()
+
+    const clearBtn = wrapper.findAll('button').find((b) => b.text() === '清除')
+    await clearBtn!.trigger('click')
+    await flushPromises()
+
+    const opts = warningMock.mock.calls[0][0] as {
+      onPositiveClick: () => void
+      content: () => unknown
+    }
+    // 有时间范围时不该再说「全部历史」
+    expect(JSON.stringify(opts.content())).not.toContain('全部历史')
+
+    opts.onPositiveClick()
+    await flushPromises()
+
+    const call = deleteCall(f)
+    expect(call).toBeTruthy()
+    const url = String(call![0])
+    expect(url).toContain('since=')
+    expect(url).toContain('until=')
+    expect(url).not.toContain('all=1')
+    expect(messageMock.success).toHaveBeenCalledWith('已清除 5 条业务日志')
+  })
+
+  it('筛选了事件类型但没设置时间范围时，确认框会说明清除不支持按类型筛选', async () => {
+    setupStore()
+    const f = vi.fn().mockImplementation((url: string) => {
+      if (url === '/api/meta/event-types') {
+        return Promise.resolve(ok([{ value: 'danmaku', label: '弹幕' }]))
+      }
+      if (url.startsWith('/api/bindings/1/activity')) return Promise.resolve(ok(历史记录))
+      return Promise.resolve(ok({ status: 'ok' }))
+    })
+    vi.stubGlobal('fetch', f)
+
+    const wrapper = mount(Logs)
+    await flushPromises()
+
+    const eventTypeSelect = wrapper.findAllComponents(NSelect)[1]
+    eventTypeSelect.vm.$emit('update:value', 'danmaku')
+    await flushPromises()
+
+    const clearBtn = wrapper.findAll('button').find((b) => b.text() === '清除')
+    await clearBtn!.trigger('click')
+    await flushPromises()
+
+    const opts = warningMock.mock.calls[0][0] as { content: () => unknown }
+    expect(JSON.stringify(opts.content())).toContain('不支持按类型')
   })
 
   it('关键词只在已加载的记录里过滤，且界面说明了这一点', async () => {

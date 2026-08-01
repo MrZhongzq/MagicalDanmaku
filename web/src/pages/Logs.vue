@@ -14,10 +14,21 @@
  * 「实时」开关打开时，SSE 推来的事件混进列表顶部；关掉时只看历史查询结果，
  * 同时断开 SSE 连接——开着日志页却不看实时数据不该白占一个长连接。
  *
- * 「清除」按钮：设计文档要求真的删库，但 P4-1 的后端没有删除业务日志的
- * 接口。所以这里跟 Moderation.vue「主播区」同一处理方式：控件照常渲染、
- * **不 disabled**（会让人以为是权限问题），标一个「待后端支持」的
- * NTag + NTooltip，点击如实提示。
+ * 「清除」按钮：接的是 `DELETE /api/bindings/{id}/activity?since=...&until=...&all=1`，
+ * 返回 `{"deleted": N}`。设计文档明写「『清除』是真的删库，需要二次确认」，
+ * 所以点击先弹 `dialog.warning`，文案要把删除范围与「不可恢复」都说清楚，
+ * 确认之后才真的发 DELETE。
+ *
+ * **两个容易踩的坑**：
+ *
+ *   1. 后端 `handleDeleteActivity` 不带 since/until 时要求显式 `all=1`，
+ *      否则 422——一次手滑的清除不该清空整个房间的历史。这里的策略是：
+ *      有时间范围就按范围删，没有就在确认框里把「将清除全部历史」说明白，
+ *      并在请求里带上 `all=1`。
+ *   2. 后端删除只认 since/until，**不认 kind/eventType**——这两个过滤器
+ *      只用来筛「查询」，删除接口没有这两个参数。如果用户开着类型筛选
+ *      去清除，清掉的仍是这段时间范围内的全部日志，不只是筛选出来的那些。
+ *      不说明这一点，用户会以为清除只删了他筛出来的类型，其实全删了。
  *
  * 关键词过滤在前端做（后端 `/activity` 没有搜索参数），所以界面上必须
  * 说清楚「只在已加载的记录里搜」——不说明的话，用户会以为搜的是全部历史，
@@ -35,7 +46,7 @@ import {
   NSpin,
   NSwitch,
   NTag,
-  NTooltip,
+  useDialog,
   useMessage,
 } from 'naive-ui'
 import type { DataTableColumns } from 'naive-ui'
@@ -47,6 +58,16 @@ import type { StreamEvent } from '@/composables/useEventStream'
 
 const bindings = useBindingsStore()
 const message = useMessage()
+/**
+ * useDialog() 要求外层有 NDialogProvider——App.vue 里已经套好了。
+ *
+ * **不要为迁就缺 provider 的测试加 `if (!dialog)` 之类的降级分支。**
+ * 清除是真的删库，缺 provider 属于配置错误，应当响亮地抛异常而不是悄悄
+ * 跳过二次确认；测试缺 provider 时应该给测试补 provider（或按 Accounts.vue
+ * 的既定做法直接 mock `useDialog`），这是 Accounts.vue 已经踩过、写进
+ * 注释里的教训。
+ */
+const dialog = useDialog()
 
 /** 「值 + 中文说明」，与后端 GET /api/meta/event-types 的返回形状一致。 */
 interface MetaItem {
@@ -286,11 +307,76 @@ const columns: DataTableColumns<LogRow> = [
   },
 ]
 
-// ---- 清除：后端没有删除业务日志的接口 ----
+// ---- 清除：真的删库，必须二次确认 ----
 
-/** 如实告知，而不是假装删了什么。不 disabled——那会让人以为是权限问题。 */
-function clearNotSupported() {
-  message.warning('后端尚未提供删除业务日志的接口')
+const clearingHistory = ref(false)
+/** 最近一次清除的结果，常驻显示在按钮旁边——message 提示会自己消失，
+ * 用户过一会儿回头看的话，仍然要能确认「删成功了、删了多少条」，
+ * 而不是只能靠回忆刚才那条 toast 说了什么。 */
+const lastClearResult = ref<number | null>(null)
+
+/** 把当前时间范围翻成人话，用在确认框标题下面。 */
+function clearScopeText(): string {
+  if (!range.value) return '全部历史（未设置时间范围）'
+  return `${new Date(range.value[0]).toLocaleString()} 至 ${new Date(range.value[1]).toLocaleString()}`
+}
+
+function confirmClearHistory() {
+  const b = bindings.current
+  if (!b) return
+
+  const scope = clearScopeText()
+  // 删除接口只认 since/until，不认 kind/eventType——用户开着类型筛选
+  // 去清除的话，删掉的仍是这段时间范围内的全部日志，不只是筛选出来的
+  // 那部分。不说清楚这一点，用户会以为清除只删了他看到的这些。
+  const filterActive = kindFilter.value !== 'all' || !!eventTypeFilter.value
+  const contentLines = [
+    `确定要清除「${scope}」范围内的业务日志吗？这是真的从数据库删除，不可恢复。`,
+  ]
+  if (filterActive) {
+    contentLines.push(
+      '注意：清除只按时间范围执行，不支持按类型/关键词筛选——即使你已经用类型或关键词筛出了' +
+        '一部分记录，清除的仍是这个时间范围内的全部日志，不局限于当前筛选结果。',
+    )
+  }
+
+  dialog.warning({
+    title: '清除业务日志',
+    content: () =>
+      h(
+        'div',
+        contentLines.map((line) => h('p', { style: 'margin: 4px 0' }, line)),
+      ),
+    positiveText: '清除',
+    negativeText: '取消',
+    onPositiveClick: () => void doClearHistory(b.id),
+  })
+}
+
+async function doClearHistory(bindingId: number) {
+  clearingHistory.value = true
+  try {
+    const params = new URLSearchParams()
+    if (range.value) {
+      params.set('since', new Date(range.value[0]).toISOString())
+      params.set('until', new Date(range.value[1]).toISOString())
+    } else {
+      // 后端不带 since/until 时要求显式 all=1，否则 422——这是它的
+      // 防手滑机制，前端配合带上，而不是绕过去。
+      params.set('all', '1')
+    }
+    const res = await request<{ deleted: number }>(
+      'DELETE',
+      `/api/bindings/${bindingId}/activity?${params.toString()}`,
+    )
+    lastClearResult.value = res.deleted
+    message.success(`已清除 ${res.deleted} 条业务日志`)
+    await loadHistory()
+  } catch (e) {
+    message.error(e instanceof ApiError ? e.message : '清除失败')
+  } finally {
+    clearingHistory.value = false
+  }
 }
 </script>
 
@@ -322,13 +408,12 @@ function clearNotSupported() {
         <NInput v-model:value="keyword" placeholder="按关键词搜索" style="width: 260px" />
         <span class="hint">只在已加载的记录里搜，不检索全部历史</span>
         <div class="clear-group">
-          <NTooltip>
-            <template #trigger>
-              <NTag type="warning" size="small">待后端支持</NTag>
-            </template>
-            后端尚未提供删除业务日志的接口，点击「清除」只会提示，不会真的删除任何数据
-          </NTooltip>
-          <NButton @click="clearNotSupported">清除</NButton>
+          <span v-if="lastClearResult !== null" class="clear-result">
+            上次清除了 {{ lastClearResult }} 条
+          </span>
+          <NButton type="error" :loading="clearingHistory" @click="confirmClearHistory">
+            清除
+          </NButton>
         </div>
       </div>
 
@@ -376,5 +461,9 @@ function clearNotSupported() {
   align-items: center;
   gap: 6px;
   margin-left: auto;
+}
+.clear-result {
+  font-size: 12px;
+  opacity: 0.7;
 }
 </style>

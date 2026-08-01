@@ -39,6 +39,15 @@ export interface MeResponse {
   memberships: Membership[]
 }
 
+/**
+ * 账号登录态的三个取值。与后端 `store.LoginState*` 常量一一对应。
+ *
+ * **`unknown` 不等于失效**：网络不通、探测本身出错时也会落在这一档，
+ * 与「valid」「invalid」并列的第三态，不是「invalid 的弱化版」。把它当作
+ * 「已失效」显示会在断网时把用户吓得去重新扫码——账号可能什么问题都没有。
+ */
+export type LoginState = 'valid' | 'invalid' | 'unknown'
+
 export interface Account {
   id: number
   name: string
@@ -55,6 +64,14 @@ export interface Account {
   isOwner: boolean
   createdAt: string
   // 注意：后端刻意不返回 cookie 字段。前端不该有任何地方去接它。
+
+  /** 最近一次登录态检测的结果，由后端每 10 分钟的检测循环写入。 */
+  loginState: LoginState
+  /**
+   * 最近一次检测发生的时间。`null` 表示这个账号从未被检测过——
+   * 刚建号、或后端进程刚启动、检测循环的首次探测还没跑到它。
+   */
+  loginCheckedAt: string | null
 }
 
 export interface Binding {
@@ -94,4 +111,27 @@ export interface Activity {
 export interface Member {
   username: string
   permissions: Permission[]
+}
+
+/** 统计聚合的维度：按日 / 按场次。与后端 `store.StatsBy*` 常量一一对应。 */
+export type StatsDimension = 'day' | 'session'
+
+/**
+ * `GET /api/bindings/{id}/stats` 返回的一行聚合统计。
+ *
+ * 字段名照抄后端 `httpapi.statsView`（`stats_handler.go`），逐字段核对过。
+ *
+ * **`liveSeconds` 有历史数据缺口**：`live_start`/`live_stop` 是这次才加进
+ * `logging/sink.go` 的入库白名单的，在此之前的数据里没有这两类事件，
+ * 更早的直播时长永远算不出来、会是 0——不代表那天没有开播。
+ */
+export interface StatsBucket {
+  /** 分桶标识：`by=day` 时是日期（如 `2026-08-01`），`by=session` 时是场次标识。 */
+  bucket: string
+  danmakuCount: number
+  enterCount: number
+  giftCount: number
+  giftKinds: number
+  guardCount: number
+  liveSeconds: number
 }

@@ -291,7 +291,7 @@ describe('Moderation 禁言名单：加入/删除之后刷新列表', () => {
   })
 })
 
-describe('Moderation 主播区：待后端支持，不隐藏、不 disabled、点击如实告知', () => {
+describe('Moderation 主播区：拉黑接到禁言接口（hours 固定 720），不是独立功能', () => {
   beforeEach(() => {
     vi.unstubAllGlobals()
     messageMock.success.mockClear()
@@ -300,20 +300,92 @@ describe('Moderation 主播区：待后端支持，不隐藏、不 disabled、�
     messageMock.info.mockClear()
   })
 
-  it('点拉黑/解除拉黑提示后端接口未实现，且不发任何请求', async () => {
-    const f = vi.fn().mockImplementation(() => Promise.resolve(ok([])))
+  it('不再显示「待后端支持」标签', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(() => Promise.resolve(ok([]))),
+    )
+    const { router } = setupStores(['user:block'])
+    const wrapper = await mountModeration(router)
+
+    expect(wrapper.text()).not.toContain('待后端支持')
+  })
+
+  it('点「拉黑」发送 POST .../block，hours 固定 720', async () => {
+    let blockBody: unknown = null
+    const f = vi.fn().mockImplementation((url: string, init?: RequestInit) => {
+      if (url.endsWith('/blocklist')) return Promise.resolve(ok([]))
+      if (url.endsWith('/block') && init?.method === 'POST') {
+        blockBody = init?.body ? JSON.parse(String(init.body)) : null
+        return Promise.resolve(ok({ uid: '10086', hours: 720 }))
+      }
+      return Promise.resolve(ok({ status: 'ok' }))
+    })
     vi.stubGlobal('fetch', f)
 
     const { router } = setupStores(['user:block'])
     const wrapper = await mountModeration(router)
-    const callsBefore = f.mock.calls.length
 
+    // 「拉黑」的 UID 输入框是第 4 个（快捷禁言/快捷解禁/加入名单/拉黑/解除拉黑）
+    const uidInput = wrapper.findAll('input[placeholder="UID"]')[3]
+    await uidInput.setValue('10086')
     const blackoutBtn = wrapper.findAll('button').find((b) => b.text() === '拉黑')
     await blackoutBtn!.trigger('click')
     await flushPromises()
 
-    expect(messageMock.warning).toHaveBeenCalledWith('拉黑功能的后端接口尚未实现')
-    expect(f.mock.calls.length).toBe(callsBefore)
+    expect(blockBody).toEqual({ uid: '10086', hours: 720 })
+    expect(messageMock.success).toHaveBeenCalledWith('已拉黑 UID 10086（禁言 720 小时）')
+  })
+
+  it('点「解除拉黑」发送 POST .../unblock，与解禁走同一个接口', async () => {
+    let unblockBody: unknown = null
+    const f = vi.fn().mockImplementation((url: string, init?: RequestInit) => {
+      if (url.endsWith('/blocklist')) return Promise.resolve(ok([]))
+      if (url.endsWith('/unblock') && init?.method === 'POST') {
+        unblockBody = init?.body ? JSON.parse(String(init.body)) : null
+        return Promise.resolve(ok({ uid: '10086' }))
+      }
+      return Promise.resolve(ok({ status: 'ok' }))
+    })
+    vi.stubGlobal('fetch', f)
+
+    const { router } = setupStores(['user:block'])
+    const wrapper = await mountModeration(router)
+
+    const uidInput = wrapper.findAll('input[placeholder="UID"]')[4]
+    await uidInput.setValue('10086')
+    const unblockBtn = wrapper.findAll('button').find((b) => b.text() === '解除拉黑')
+    await unblockBtn!.trigger('click')
+    await flushPromises()
+
+    expect(unblockBody).toEqual({ uid: '10086' })
+    expect(messageMock.success).toHaveBeenCalledWith('已解除 UID 10086 的拉黑')
+  })
+
+  it('拉黑失败时把后端原文原样显示，不包装成笼统提示，且非主播账号仍能点（不锁死）', async () => {
+    const backendMessage = '禁言失败: 你不是本直播间的主播'
+    const f = vi.fn().mockImplementation((url: string, init?: RequestInit) => {
+      if (url.endsWith('/blocklist')) return Promise.resolve(ok([]))
+      if (url.endsWith('/block') && init?.method === 'POST') {
+        return Promise.resolve(err(502, backendMessage))
+      }
+      return Promise.resolve(ok({ status: 'ok' }))
+    })
+    vi.stubGlobal('fetch', f)
+
+    const { router } = setupStores(['user:block'])
+    const wrapper = await mountModeration(router)
+
+    const blackoutBtn = wrapper.findAll('button').find((b) => b.text() === '拉黑')
+    // 不 disabled——「保持不锁死」原则同样适用于主播区
+    expect(blackoutBtn!.attributes('disabled')).toBeUndefined()
+
+    const uidInput = wrapper.findAll('input[placeholder="UID"]')[3]
+    await uidInput.setValue('10086')
+    await blackoutBtn!.trigger('click')
+    await flushPromises()
+
+    expect(messageMock.error).toHaveBeenCalledWith(backendMessage)
   })
 })
 

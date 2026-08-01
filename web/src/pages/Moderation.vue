@@ -4,9 +4,16 @@
  *
  *   - 房管区：禁言、解除禁言、禁言名单。主播本人与粉丝房管都能用，
  *     对应权限点 user:block。
- *   - 主播区：拉黑、解除拉黑。设计文档要求仅主播本人可用，但 P4-1 后端
- *     只实现了禁言/解禁——拉黑的接口还没有。这一区整块标「待后端支持」，
- *     控件照常渲染（**不隐藏、不 disabled**），点击时提示接口尚未实现。
+ *   - 主播区：拉黑、解除拉黑。
+ *
+ * **「拉黑」不是独立的封禁动作，B 站没有独立的直播间拉黑接口**（P4-3
+ * 查证结论，见悬空清单第 2 条）。原 C++ 项目的「拉黑」按钮实际调的是
+ * `livedanmakuwindow.cpp:3049` 的 `signalAddBlockUser(uid, 720, msg)`——
+ * 就是把禁言时长打满 720 小时（30 天，B 站最长禁言时长），走的是同一个
+ * 禁言接口。所以这里「拉黑」直接接 `POST .../block`（`hours` 固定
+ * 720），「解除拉黑」直接接 `POST .../unblock`，与房管区的禁言/解禁是
+ * 同一个后端动作，只是时长固定、界面上分开摆放。**文案必须诚实**：
+ * 不能让用户以为这是一个独立于禁言之外的功能。
  *
  * 全页最重要的一条，来自用户原话：
  *
@@ -216,14 +223,58 @@ async function doUnblock() {
   }
 }
 
-// ---- 主播区：拉黑 / 解除拉黑（后端接口未实现） ----
+// ---- 主播区：拉黑 / 解除拉黑 ----
+//
+// 「拉黑」= 禁言 720 小时（B 站最长时限），走与房管区完全相同的接口，
+// 只是时长固定。「保持不锁死」原则同样适用：非主播账号点这两个按钮
+// 一样可用，B 站会在真正调用时回退操作失败，把原因原样透出。
+
+/** 拉黑固定用 B 站允许的最长禁言时长——这就是「拉黑」在协议层的真实含义。 */
+const BLACKLIST_HOURS = 720
 
 const ownerBlockUid = ref('')
 const ownerUnblockUid = ref('')
 
-/** 后端还没有拉黑相关接口，点击时如实告知，而不是假装做了什么。 */
-function ownerActionNotSupported() {
-  message.warning('拉黑功能的后端接口尚未实现')
+async function doOwnerBlock() {
+  const b = bindings.current
+  if (!b) {
+    message.warning('请先选择直播间')
+    return
+  }
+  const uid = ownerBlockUid.value.trim()
+  if (!uid) {
+    message.warning('请输入 UID')
+    return
+  }
+  try {
+    await request('POST', `/api/bindings/${b.id}/block`, { uid, hours: BLACKLIST_HOURS })
+    message.success(`已拉黑 UID ${uid}（禁言 ${BLACKLIST_HOURS} 小时）`)
+    ownerBlockUid.value = ''
+  } catch (e) {
+    // 与房管区的禁言一致：原样显示后端错误（例如「你不是本直播间的主播」），
+    // 不包装成笼统提示——重试没用，原因才有用。
+    message.error(e instanceof ApiError ? e.message : '拉黑失败')
+  }
+}
+
+async function doOwnerUnblock() {
+  const b = bindings.current
+  if (!b) {
+    message.warning('请先选择直播间')
+    return
+  }
+  const uid = ownerUnblockUid.value.trim()
+  if (!uid) {
+    message.warning('请输入 UID')
+    return
+  }
+  try {
+    await request('POST', `/api/bindings/${b.id}/unblock`, { uid })
+    message.success(`已解除 UID ${uid} 的拉黑`)
+    ownerUnblockUid.value = ''
+  } catch (e) {
+    message.error(e instanceof ApiError ? e.message : '解除拉黑失败')
+  }
 }
 
 // ---- 自动禁言规则：跳转到「自定义弹幕姬」页并预填一条草稿 ----
@@ -297,22 +348,27 @@ function goToCustomDanmaku() {
         <template #header-extra>
           <NTooltip>
             <template #trigger>
-              <NTag type="warning" size="small">待后端支持</NTag>
+              <NTag type="info" size="small">拉黑＝禁言到顶</NTag>
             </template>
-            拉黑/解除拉黑的后端接口尚未实现（P4-1 只做了禁言/解禁），控件先渲染出来，
-            点击会如实提示，不会假装成功
+            B 站没有独立的直播间拉黑接口——「拉黑」在这里是禁言 720 小时 （30 天，B
+            站允许的最长禁言时长），走的是与房管区完全相同的接口， 不是另一个独立的封禁动作
           </NTooltip>
         </template>
+
+        <p class="hint">
+          拉黑（禁言 720 小时，B 站最长时限）——这不是一个独立的封禁动作，只是把
+          禁言时长打满，与上面「房管区」的禁言/解禁走同一个接口
+        </p>
 
         <div class="row">
           <span class="label">拉黑</span>
           <NInput v-model:value="ownerBlockUid" placeholder="UID" style="width: 140px" />
-          <NButton @click="ownerActionNotSupported">拉黑</NButton>
+          <NButton type="primary" @click="doOwnerBlock">拉黑</NButton>
         </div>
         <div class="row">
           <span class="label">解除拉黑</span>
           <NInput v-model:value="ownerUnblockUid" placeholder="UID" style="width: 140px" />
-          <NButton @click="ownerActionNotSupported">解除拉黑</NButton>
+          <NButton @click="doOwnerUnblock">解除拉黑</NButton>
         </div>
       </NCard>
 

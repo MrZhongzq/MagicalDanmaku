@@ -23,6 +23,7 @@ vi.mock('naive-ui', async () => {
 })
 
 const { default: Accounts } = await import('./Accounts.vue')
+const { default: QRCodeLogin } = await import('@/components/QRCodeLogin.vue')
 
 const 小号: {
   id: number
@@ -33,6 +34,8 @@ const 小号: {
   ownerId: number
   isOwner: boolean
   createdAt: string
+  loginState: 'valid' | 'invalid' | 'unknown'
+  loginCheckedAt: string | null
 } = {
   id: 1,
   name: '小号',
@@ -42,6 +45,8 @@ const 小号: {
   ownerId: 1,
   isOwner: true,
   createdAt: '',
+  loginState: 'unknown',
+  loginCheckedAt: null,
 }
 
 function ok(body: unknown) {
@@ -51,9 +56,9 @@ function ok(body: unknown) {
   })
 }
 
-function stubFetch() {
+function stubFetch(accounts: unknown[] = [小号]) {
   const f = vi.fn().mockImplementation((url: string) => {
-    if (url === '/api/accounts') return Promise.resolve(ok([小号]))
+    if (url === '/api/accounts') return Promise.resolve(ok(accounts))
     if (url === '/api/bindings') return Promise.resolve(ok([]))
     return Promise.resolve(ok({ status: 'ok' }))
   })
@@ -99,5 +104,89 @@ describe('Accounts 删除账号的二次确认', () => {
     await flushPromises()
 
     expect(deleteCallCount(f)).toBe(1)
+  })
+})
+
+// 登录状态三态：valid/invalid/unknown 必须显示成三种不同的文案与样式，
+// 「待后端支持」标签要整个撤掉。unknown 尤其要验证不能被误读成「已失效」。
+describe('Accounts 登录状态三态展示', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.unstubAllGlobals()
+    localStorage.clear()
+    messageMock.success.mockClear()
+    messageMock.error.mockClear()
+    messageMock.warning.mockClear()
+  })
+
+  it('不再显示「待后端支持」标签', async () => {
+    stubFetch()
+    const wrapper = mount(Accounts)
+    await flushPromises()
+
+    expect(wrapper.text()).not.toContain('待后端支持')
+  })
+
+  it('valid：显示「登录有效」，不带失效高亮样式', async () => {
+    stubFetch([{ ...小号, loginState: 'valid', loginCheckedAt: '2026-08-01T12:00:00Z' }])
+    const wrapper = mount(Accounts)
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('登录有效')
+    expect(wrapper.find('.account-card--invalid').exists()).toBe(false)
+  })
+
+  it('invalid：显示「登录已失效」并高亮，重新扫码按钮跟着变色', async () => {
+    stubFetch([{ ...小号, loginState: 'invalid', loginCheckedAt: '2026-08-01T12:00:00Z' }])
+    const wrapper = mount(Accounts)
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('登录已失效')
+    expect(wrapper.find('.account-card--invalid').exists()).toBe(true)
+    const rescanBtn = wrapper.findAll('button').find((b) => b.text() === '重新扫码')
+    expect(rescanBtn).toBeTruthy()
+    expect(rescanBtn!.classes().join(' ')).toContain('error')
+  })
+
+  it('unknown 且从未检测过（loginCheckedAt 为 null）：显示「尚未检测」，不是「已失效」', async () => {
+    stubFetch([{ ...小号, loginState: 'unknown', loginCheckedAt: null }])
+    const wrapper = mount(Accounts)
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('尚未检测')
+    expect(wrapper.text()).not.toContain('登录已失效')
+    expect(wrapper.find('.account-card--invalid').exists()).toBe(false)
+  })
+
+  it('unknown 且曾经检测过（loginCheckedAt 非 null，说明上次探测失败）：显示「状态未知」，且说明不代表失效', async () => {
+    stubFetch([{ ...小号, loginState: 'unknown', loginCheckedAt: '2026-08-01T12:00:00Z' }])
+    const wrapper = mount(Accounts)
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('状态未知')
+    expect(wrapper.text()).not.toContain('登录已失效')
+
+    // 详情文案常驻显示（不塞进悬浮提示），要说明「不代表失效」
+    expect(wrapper.text()).toContain('不代表账号已失效')
+  })
+
+  it('扫码成功后的提示说明状态会在下一轮检测后更新，而不是宣称已经有效', async () => {
+    stubFetch()
+    const wrapper = mount(Accounts)
+    await flushPromises()
+
+    // 直接调用组件内部的成功回调路径：点击「重新扫码」打开弹窗，
+    // 再触发 QRCodeLogin 的 success 事件，而不是真的走一遍扫码轮询。
+    const rescanBtn = wrapper.findAll('button').find((b) => b.text() === '重新扫码')
+    await rescanBtn!.trigger('click')
+    await flushPromises()
+
+    const qrLogin = wrapper.findComponent(QRCodeLogin)
+    expect(qrLogin.exists()).toBe(true)
+    qrLogin.vm.$emit('success', '小号')
+    await flushPromises()
+
+    const call = messageMock.success.mock.calls.find((c) => String(c[0]).includes('小号'))
+    expect(call?.[0]).toContain('下一轮检测')
   })
 })

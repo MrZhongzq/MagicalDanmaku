@@ -4,30 +4,33 @@
  * 进房人数、礼物种类与数量、上舰数、直播时长、盲盒盈亏，按场次与按日两个
  * 维度。
  *
- * **这一页没有后端聚合接口，这是本页最重要的约束，不是次要细节。**
+ * **P4-3 接上了真实聚合接口**：`GET /api/bindings/{id}/stats?by=day|session`
+ * 由 SQL 侧 `GROUP BY` 聚合，不再是从 `/activity` 的 500 条截断样本里
+ * 算出来的假数字（那正是这一页此前一直显示占位符的原因）。接口一次返回
+ * 一组分桶（`by=day` 每天一桶，`by=session` 每场直播一桶），本页把它们
+ * 汇总成 7 张总览卡片，并在下面附一张分桶明细表——明细表是「维度切换有
+ * 真实效果」最直接的证据：按日/按场次切出来的行数、边界都不一样。
  *
- * 后端目前只有 `GET /api/bindings/{id}/activity`，单次最多返回 500 条
- * 原始行（`maxActivityLimit`，见 `server/internal/httpapi/activity_handler.go`）。
- * 一个活跃房间一天的行数远超 500。如果在前端把这 500 条当全量数字加总
- * 展示——「今天弹幕 500 条」——那是一个**错误的数字，而且不会告诉任何人
- * 它是错的**：用户会以为这就是真实总数。这比空着糟得多，空着至少诚实。
+ * **两个仍然要在界面上说清楚的限制，不能被真实数字的出现盖过去**：
  *
- * 所以这一版的处理方式：
+ *   1. **`liveSeconds` 有历史数据缺口**：`live_start`/`live_stop` 是这次
+ *      才加进 `logging/sink.go` 的入库白名单的，在此之前的数据里没有这
+ *      两类事件，更早的日子/场次时长永远算不出来、会显示 0——**不代表
+ *      那天没有开播**，是数据缺口，不是「没直播」。页面上有醒目提示。
+ *   2. **`giftKinds`（礼物种类）汇总卡片是「各分桶种类数之和」，不是
+ *      全局去重后的真实种类数**：每个分桶内部是去重的，但跨分桶求和时，
+ *      同一件礼物如果在不同的日子/场次都出现过，会被重复计入。这是求和
+ *      算法本身的局限，不是接口返回错了——已经在卡片提示里写明，不能
+ *      让用户误以为这是精确的全局种类数。
  *
- *   1. 图表与卡片的**结构**照设计文档全部渲染出来，让用户能靠界面评审
- *      「功能划分对不对」——这正是当前阶段（用户裁决：后端接口统一最后处理）
- *      要验证的东西。
- *   2. 卡片里的**数字**一律是占位符 `PLACEHOLDER`（`—`），不读取任何接口
- *      返回值去计算它。
- *   3. 页面顶部有醒目的说明条，指向悬空清单里登记的聚合接口缺口。
- *   4. 额外做了一个**可选**的「最近活动预览」区块，复用 `/activity`
- *      展示最近的原始事件行——但它被极其明确地标注为「采样，不是统计」，
- *      默认折叠、需要手动点开才加载，且物理上和上面的统计卡片区分开，
- *      不会被误认成统计数字。
+ * 盲盒盈亏那张卡片仍然悬空：聚合接口本身已经补上了（悬空清单第 14 条
+ * 已解决），但 `event.Gift` 依然没有盲盒字段（悬空清单第 7、15 条），
+ * 没有原始数据可聚合，算不出盈亏，卡片继续显示占位符。
  *
- * 盲盒盈亏那张卡片是**双重悬空**：既缺这里的聚合接口，也缺 `event.Gift`
- * 的盲盒字段（悬空清单第 7 条）。即使补上聚合接口，没有盲盒字段也算不出
- * 盈亏——两层缺口分别登记，见悬空清单第 14、15 条。
+ * 「最近活动预览」区块保留：它展示的是原始事件行（含用户、类型），
+ * 统计卡片/明细表展示的是聚合数字，两者用途不同（“最近发生了什么”
+ * vs “这段时间总共发生了多少”），不是同一份信息的两种画法，见文件
+ * 末尾该区块自己的注释。
  */
 import { computed, ref, watch } from 'vue'
 import {
@@ -38,61 +41,169 @@ import {
   NEmpty,
   NRadioButton,
   NRadioGroup,
+  NSpin,
   NStatistic,
   NTag,
 } from 'naive-ui'
 import type { DataTableColumns } from 'naive-ui'
 import { ApiError, request } from '@/api'
-import type { Activity } from '@/api'
+import type { Activity, StatsBucket, StatsDimension } from '@/api'
 import { useBindingsStore } from '@/stores/bindings'
 
 const bindings = useBindingsStore()
 
-/**
- * 数字位置的唯一合法取值。
- *
- * **绝不要用 `activityPreview.value.length` 或任何从 `/activity` 算出来的
- * 值替换它**——那正是这个文件存在的意义要防的事。真实数字必须来自后端
- * 聚合接口（悬空清单第 14 条），接口补上之前，这里只能是占位符。
- */
+/** 唯一合法的占位符——目前只有盲盒盈亏还在用它，其余卡片都是真实数字了。 */
 const PLACEHOLDER = '—'
 
-// ---- 维度切换：按场次 / 按日 ----
-//
-// 目前没有聚合接口可供请求，切换维度不会改变卡片里的任何数字（因为数字
-// 本来就是占位符）。控件仍然照常渲染并可以点——评审的是「维度这个概念
-// 有没有在界面上出现」，不是「切换后数字会不会变」。
+// ---- 维度切换：按场次 / 按日，现在真的会重新请求聚合接口 ----
 
 const DIMENSION_OPTIONS = [
   { label: '按日', value: 'day' as const },
   { label: '按场次', value: 'session' as const },
 ]
-const dimension = ref<'day' | 'session'>('day')
+const dimension = ref<StatsDimension>('day')
+const dimensionLabel = computed(() => (dimension.value === 'day' ? '每日' : '每场'))
 
-// ---- 统计卡片：结构渲染，数字占位 ----
+// ---- 聚合统计：GET /api/bindings/{id}/stats?by=day|session ----
+
+const statsBuckets = ref<StatsBucket[]>([])
+const loadingStats = ref(false)
+const statsError = ref<string | null>(null)
+
+async function loadStats() {
+  const b = bindings.current
+  if (!b) {
+    statsBuckets.value = []
+    return
+  }
+  loadingStats.value = true
+  statsError.value = null
+  try {
+    statsBuckets.value = await request<StatsBucket[]>(
+      'GET',
+      `/api/bindings/${b.id}/stats?by=${dimension.value}`,
+    )
+  } catch (e) {
+    statsError.value = e instanceof ApiError ? e.message : '加载统计数据失败'
+    statsBuckets.value = []
+  } finally {
+    loadingStats.value = false
+  }
+}
+
+// 绑定或维度任一变化都要重新拉取——这正是「维度切换现在有真实效果」的
+// 落地位置：切换按日/按场次会发出带不同 by 参数的新请求。
+watch(
+  () => [bindings.currentId, dimension.value] as const,
+  () => void loadStats(),
+  { immediate: true },
+)
+
+/**
+ * totals 把分桶数组汇总成总览卡片用的数字。
+ *
+ * danmakuCount/enterCount/giftCount/guardCount/liveSeconds 五项可以放心
+ * 相加——它们是各分桶（互不重叠的时间窗口）内的计数，求和就是这段返回
+ * 范围内的真实总数。**giftKinds 不在此列**：那是「种类数」而不是
+ * 「件数」，各分桶内部去重，但跨分桶求和会把同一件礼物在不同分桶重复
+ * 计入，不是真正的全局去重种类数——卡片提示里必须说明这一点，不能让
+ * 用户当成精确值使用。
+ */
+const totals = computed(() => {
+  const buckets = statsBuckets.value
+  const sum = (pick: (b: StatsBucket) => number) => buckets.reduce((acc, b) => acc + pick(b), 0)
+  return {
+    danmakuCount: sum((b) => b.danmakuCount),
+    enterCount: sum((b) => b.enterCount),
+    giftCount: sum((b) => b.giftCount),
+    giftKinds: sum((b) => b.giftKinds),
+    guardCount: sum((b) => b.guardCount),
+    liveSeconds: sum((b) => b.liveSeconds),
+  }
+})
+
+/** 把秒数格式化成「N 小时 M 分钟」，0 秒单独处理成「0 分钟」而不是空字符串。 */
+function formatDuration(totalSeconds: number): string {
+  if (totalSeconds <= 0) return '0 分钟'
+  const hours = Math.floor(totalSeconds / 3600)
+  const minutes = Math.floor((totalSeconds % 3600) / 60)
+  return hours > 0 ? `${hours} 小时 ${minutes} 分钟` : `${minutes} 分钟`
+}
+
+// ---- 统计卡片：真实数字，随 totals 变化 ----
 
 interface StatCardDef {
   key: string
   label: string
+  value: string
   hint: string
-  /** 双重悬空的卡片（目前只有盲盒盈亏）额外挂一个标签，提醒缺口不止一层。 */
-  doublyHanging?: boolean
+  /** 目前只有盲盒盈亏还悬空——聚合接口本身已经补上了（原来的「双重」只剩一重）。 */
+  hanging?: boolean
 }
 
-const STAT_CARDS: StatCardDef[] = [
-  { key: 'danmakuCount', label: '弹幕数', hint: '本维度内的弹幕总条数' },
-  { key: 'enterCount', label: '进房人数', hint: '本维度内的进房人次' },
-  { key: 'giftKinds', label: '礼物种类', hint: '本维度内出现过的不同礼物种类数' },
-  { key: 'giftCount', label: '礼物数量', hint: '本维度内送出的礼物总件数' },
-  { key: 'guardCount', label: '上舰数', hint: '本维度内新增/续费的大航海数量' },
-  { key: 'liveDuration', label: '直播时长', hint: '本维度内的开播时长' },
+const STAT_CARDS = computed<StatCardDef[]>(() => [
+  {
+    key: 'danmakuCount',
+    label: '弹幕数',
+    value: String(totals.value.danmakuCount),
+    hint: '本维度内的弹幕总条数',
+  },
+  {
+    key: 'enterCount',
+    label: '进房人数',
+    value: String(totals.value.enterCount),
+    hint: '本维度内的进房人次',
+  },
+  {
+    key: 'giftKinds',
+    label: '礼物种类',
+    value: String(totals.value.giftKinds),
+    hint: `各${dimensionLabel.value}种类数之和：同一件礼物如果在多个${dimensionLabel.value}都出现过，会被重复计入，不是这段时间内去重后的真实种类数`,
+  },
+  {
+    key: 'giftCount',
+    label: '礼物数量',
+    value: String(totals.value.giftCount),
+    hint: '本维度内送出的礼物总件数',
+  },
+  {
+    key: 'guardCount',
+    label: '上舰数',
+    value: String(totals.value.guardCount),
+    hint: '本维度内新增/续费的大航海数量',
+  },
+  {
+    key: 'liveDuration',
+    label: '直播时长',
+    value: formatDuration(totals.value.liveSeconds),
+    hint: 'live_start/live_stop 是这次才加入日志记录范围的，更早的历史数据没有这两类事件，那些日子/场次会显示 0，不代表当时没有开播',
+  },
   {
     key: 'blindBoxProfit',
     label: '盲盒盈亏',
-    hint: '双重悬空：既缺聚合接口，也缺 Gift 事件的盲盒字段，见悬空清单第 14、15 条',
-    doublyHanging: true,
+    value: PLACEHOLDER,
+    hint: '聚合接口已经补上了，但 event.Gift 依然没有盲盒字段，算不出盈亏，见悬空清单第 7、15 条',
+    hanging: true,
   },
-]
+])
+
+// ---- 分桶明细表：维度切换真实效果的直接证据 ----
+//
+// 用 computed 而不是常量：第一列表头要随维度在「日期」/「场次」之间切换，
+// 写成常量的话只会在组件初始化那一刻求值一次，切维度后表头不会跟着变。
+const bucketColumns = computed<DataTableColumns<StatsBucket>>(() => [
+  { title: dimension.value === 'day' ? '日期' : '场次', key: 'bucket' },
+  { title: '弹幕数', key: 'danmakuCount' },
+  { title: '进房人数', key: 'enterCount' },
+  { title: '礼物种类', key: 'giftKinds' },
+  { title: '礼物数量', key: 'giftCount' },
+  { title: '上舰数', key: 'guardCount' },
+  {
+    title: '直播时长',
+    key: 'liveSeconds',
+    render: (row) => formatDuration(row.liveSeconds),
+  },
+])
 
 // ---- 可选的「最近活动预览」：明确标注为采样，不是统计 ----
 //
@@ -172,13 +283,14 @@ const previewColumns: DataTableColumns<PreviewRow> = [
     <NEmpty v-if="!bindings.current" description="请先在顶部选择一个直播间" />
 
     <template v-else>
-      <NAlert type="warning" title="统计需要后端聚合接口" class="hanging-alert">
-        下面卡片里的数字目前都是占位符 <NTag size="small">{{ PLACEHOLDER }}</NTag
-        >， 不是算出来的 0 或任何真实数字。后端只有 <code>GET /activity</code>，单次最多 返回 500
-        条原始行，一个活跃房间一天的行数远超于此——在前端把这 500 条当全量
-        加总展示会给出一个错误的数字而不告诉任何人，所以宁可空着。 补丁方向见悬空清单第 14、15
-        条：需要一个按 <code>GROUP BY</code> 聚合的
-        <code>GET /api/bindings/{id}/stats?by=day|session</code> 接口。
+      <NAlert type="info" title="两点需要注意" class="hanging-alert">
+        下面的数字来自后端聚合接口（<code>GET /api/bindings/{id}/stats</code>），是真实统计值，
+        不再是占位符——除了「盲盒盈亏」，那张卡片仍标着<NTag type="warning" size="small"
+          >待后端支持</NTag
+        >。另外两点务必留意：①「直播时长」在这批改动之前的历史数据里没有开播/下播事件，
+        更早的日子会显示 0，<strong>不代表当时没开播</strong>；②「礼物种类」是各分桶种类数
+        之和，同一件礼物跨多个日子/场次出现会被重复计入，不是全局去重后的精确值。下面每张卡片
+        自己也带着一行小字说明，不必悬停就能看到。
       </NAlert>
 
       <div class="dimension-row">
@@ -192,19 +304,35 @@ const previewColumns: DataTableColumns<PreviewRow> = [
           />
         </NRadioGroup>
         <span class="dimension-hint">
-          维度切换目前不会改变任何数字——数字是占位符，与维度无关；这里渲染出来是为了让评审确认「按场次/按日」两个入口都在
+          切换维度会重新向后端请求聚合数据（<code>by={{ dimension }}</code
+          >）， 上面的卡片与下面的明细表都会跟着变
         </span>
       </div>
 
-      <div class="stats-grid">
-        <NCard v-for="card in STAT_CARDS" :key="card.key" class="stat-card" size="small">
-          <NStatistic :label="card.label" :value="PLACEHOLDER" />
-          <NTag v-if="card.doublyHanging" type="warning" size="small" class="doubly-hanging-tag">
-            双重悬空
-          </NTag>
-          <div class="stat-hint">{{ card.hint }}</div>
+      <NSpin :show="loadingStats">
+        <p v-if="statsError" class="stats-error">{{ statsError }}</p>
+
+        <div class="stats-grid">
+          <NCard v-for="card in STAT_CARDS" :key="card.key" class="stat-card" size="small">
+            <NStatistic :label="card.label" :value="card.value" />
+            <NTag v-if="card.hanging" type="warning" size="small" class="hanging-tag">
+              待后端支持
+            </NTag>
+            <div class="stat-hint">{{ card.hint }}</div>
+          </NCard>
+        </div>
+
+        <NCard title="分桶明细" class="bucket-card" size="small">
+          <NDataTable
+            :columns="bucketColumns"
+            :data="statsBuckets"
+            :row-key="(row: StatsBucket) => row.bucket"
+            :bordered="false"
+            size="small"
+          />
+          <NEmpty v-if="statsBuckets.length === 0" description="没有数据" size="small" />
         </NCard>
-      </div>
+      </NSpin>
 
       <NCard title="最近活动预览（可选，辅助功能）" class="preview-card" size="small">
         <template #header-extra>
@@ -269,8 +397,15 @@ const previewColumns: DataTableColumns<PreviewRow> = [
   font-size: 12px;
   opacity: 0.7;
 }
-.doubly-hanging-tag {
+.hanging-tag {
   margin-top: 8px;
+}
+.stats-error {
+  color: var(--n-error-color, #d03050);
+  margin-bottom: 12px;
+}
+.bucket-card {
+  margin-bottom: 16px;
 }
 .preview-card {
   margin-bottom: 16px;

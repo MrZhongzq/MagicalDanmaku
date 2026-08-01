@@ -3,8 +3,14 @@
  * Accounts 是「账号与直播间」页——设计文档 §7.2 把它排第一，因为
  * B 站登录态失效得很快，这里是唯一能重新扫码续命的入口。
  *
- * 后端的定期登录态检测还没做（§13.1），所以本页的登录状态是
- * 「待后端支持」的悬空占位，见下面账号卡片里 NTooltip 附近的说明。
+ * 登录状态现在接的是真实数据（`cmd/magicd` 里 10 分钟一轮的检测循环，
+ * 启动时立刻测一次）：`Account.loginState` 是 `valid`/`invalid`/`unknown`
+ * 三态之一，`loginCheckedAt` 是最近一次检测时间（`null` 表示从未检测过）。
+ *
+ * **三态的区别很重要，不能把 unknown 当成 invalid 的弱化版显示**：
+ * 探测本身失败（比如后端连不上 B 站）也会落在 unknown，与「从未检测过」
+ * 是同一档。把 unknown 显示成「已失效」会在网络抖动时把用户吓得去重新
+ * 扫码——账号可能什么问题都没有。见下面 `loginStateMeta` 的说明。
  */
 import { computed, onMounted, reactive, ref } from 'vue'
 import {
@@ -19,7 +25,6 @@ import {
   NSpin,
   NSwitch,
   NTag,
-  NTooltip,
   useDialog,
   useMessage,
 } from 'naive-ui'
@@ -91,6 +96,46 @@ const bindingsByAccount = computed(() => {
 const grantedBindings = computed(() =>
   bindings.list.filter((b) => !ownedAccountIds.value.has(b.accountId)),
 )
+
+/**
+ * loginStateMeta 把 `Account.loginState` + `loginCheckedAt` 翻译成界面文案。
+ *
+ * **`unknown` 单独一档，不是 `invalid` 的弱化版**：探测本身失败（网络不通、
+ * B 站接口超时）与「从未检测过」都会落在这里，与「确认失效」是完全不同
+ * 的两件事，绝不能显示成「已失效」——那会在断网时把用户吓得去重新扫码。
+ */
+function loginStateMeta(acc: Account): {
+  tagType: 'success' | 'error' | 'default'
+  text: string
+  detail: string
+} {
+  const checkedAt = acc.loginCheckedAt
+  if (acc.loginState === 'valid') {
+    return {
+      tagType: 'success',
+      text: '登录有效',
+      detail: checkedAt ? `上次检测：${checkedAt}` : '上次检测：无',
+    }
+  }
+  if (acc.loginState === 'invalid') {
+    return {
+      tagType: 'error',
+      text: '登录已失效',
+      detail: checkedAt
+        ? `上次检测：${checkedAt}，确认登录已失效，请重新扫码`
+        : '确认登录已失效，请重新扫码',
+    }
+  }
+  // unknown：区分「从未检测过」与「上次检测失败」，两种情况文案不同，
+  // 但都不能读成「已失效」。
+  return {
+    tagType: 'default',
+    text: checkedAt ? '状态未知' : '尚未检测',
+    detail: checkedAt
+      ? `上次尝试检测于 ${checkedAt}，但未能确认结果（例如网络问题），不代表账号已失效`
+      : '还没有被检测过，后台每 10 分钟轮询一次，稍等即可看到结果',
+  }
+}
 
 function isDirty(acc: Account): boolean {
   const d = drafts[acc.id]
@@ -225,7 +270,10 @@ function confirmAccountName() {
 
 function onQrSuccess(name: string) {
   qrModalVisible.value = false
-  message.success(`账号「${name}」登录成功`)
+  // 换 Cookie 后后端会把登录态重置为 unknown（新 Cookie 还没被探测循环
+  // 测过），所以这里不能说「状态显示为有效」——扫完码卡片上大概率还是
+  // 「尚未检测」或「状态未知」，要在这里说清楚，否则用户会以为扫码没成功。
+  message.success(`账号「${name}」登录成功，登录状态将在下一轮检测（最长约 10 分钟）后更新`)
   void loadAccounts()
 }
 
@@ -243,22 +291,37 @@ onMounted(() => void loadAccounts())
       <NEmpty v-if="ownedAccounts.length === 0" description="还没有账号，先扫码添加一个" />
 
       <NSpace vertical size="large" style="width: 100%">
-        <NCard v-for="acc in ownedAccounts" :key="acc.id" class="account-card">
+        <NCard
+          v-for="acc in ownedAccounts"
+          :key="acc.id"
+          class="account-card"
+          :class="{ 'account-card--invalid': acc.loginState === 'invalid' }"
+        >
           <template #header>
             <span>{{ acc.name }}</span>
             <span class="uid">UID {{ acc.uid }}</span>
           </template>
           <template #header-extra>
-            <NTooltip>
-              <template #trigger>
-                <NTag type="warning" size="small">待后端支持</NTag>
-              </template>
-              后端的定期登录态检测尚未实现（设计文档 §13.1），这里暂不反映真实状态
-            </NTooltip>
+            <NTag :type="loginStateMeta(acc).tagType" size="small">
+              {{ loginStateMeta(acc).text }}
+            </NTag>
           </template>
 
+          <!-- 检测详情常驻显示，不塞进悬浮提示——unknown 到底是「从未检测」
+               还是「上次检测失败」，以及它不代表账号失效，这些话必须让人
+               不用悬停就能看到，否则等于没说。 -->
+          <div class="row login-detail">
+            <span class="login-detail-text">{{ loginStateMeta(acc).detail }}</span>
+          </div>
+
           <div class="row">
-            <NButton size="small" @click="openRescanModal(acc.name)">重新扫码</NButton>
+            <NButton
+              size="small"
+              :type="acc.loginState === 'invalid' ? 'error' : 'default'"
+              @click="openRescanModal(acc.name)"
+            >
+              重新扫码
+            </NButton>
           </div>
 
           <NDivider style="margin: 12px 0" />
@@ -374,9 +437,17 @@ onMounted(() => void loadAccounts())
   font-size: 12px;
   opacity: 0.6;
 }
+/* 登录已失效的账号要在一堆卡片里跳出来，不能只靠一个小标签 */
+.account-card--invalid {
+  border: 1px solid var(--n-error-color, #d03050);
+}
 .row {
   display: flex;
   gap: 8px;
+}
+.login-detail-text {
+  font-size: 12px;
+  opacity: 0.7;
 }
 .params-row {
   display: flex;
