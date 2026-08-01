@@ -71,6 +71,16 @@ describe('useBindingsStore', () => {
     expect(s.current?.id).toBe(1)
   })
 
+  // 回退发生后要把新选中的那个写回 localStorage，不然下次刷新页面
+  // （这次 999 已经不在了）会读到旧的 999 又走一遍回退分支
+  it('回退到第一个之后，把这个新选中写回 localStorage', async () => {
+    localStorage.setItem('magicd.currentBinding', '999')
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(ok([甲])))
+    const s = useBindingsStore()
+    await s.refresh()
+    expect(localStorage.getItem('magicd.currentBinding')).toBe('1')
+  })
+
   it('列表为空时 current 是 null，不该抛异常', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(ok([])))
     const s = useBindingsStore()
