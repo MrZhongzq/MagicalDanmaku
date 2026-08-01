@@ -28,6 +28,13 @@ function ok(body: unknown) {
   })
 }
 
+function err(status: number, message: string) {
+  return new Response(JSON.stringify({ error: message }), {
+    status,
+    headers: { 'Content-Type': 'application/json' },
+  })
+}
+
 describe('useBindingsStore', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
@@ -86,5 +93,32 @@ describe('useBindingsStore', () => {
     const s = useBindingsStore()
     await s.refresh()
     expect(s.current).toBeNull()
+  })
+
+  // ---- 全分支终审第 2 条：refresh() 失败不能静默 ----
+  //
+  // 原来只有 finally 没有 catch，GET /api/bindings 非 401 失败时，顶部
+  // 选择器渲染 placeholder="没有可用的直播间"，与「这个账号确实没绑过
+  // 直播间」在界面上完全无法区分，一条错误提示都不出现。
+  it('刷新失败时记录后端原文到 loadError，不能静默吞掉', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(err(500, '数据库连不上')))
+    const s = useBindingsStore()
+    await s.refresh()
+    expect(s.loadError).toBe('数据库连不上')
+    expect(s.list).toEqual([])
+  })
+
+  it('刷新成功后 loadError 归 null，不会残留上一次的错误', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(() => Promise.resolve(err(500, '第一次失败'))),
+    )
+    const s = useBindingsStore()
+    await s.refresh()
+    expect(s.loadError).toBe('第一次失败')
+
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(ok([甲])))
+    await s.refresh()
+    expect(s.loadError).toBeNull()
   })
 })

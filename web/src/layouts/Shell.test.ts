@@ -14,6 +14,13 @@ function ok(body: unknown) {
   })
 }
 
+function err(status: number, message: string) {
+  return new Response(JSON.stringify({ error: message }), {
+    status,
+    headers: { 'Content-Type': 'application/json' },
+  })
+}
+
 // Shell 本身没有注册 NMessageProvider/NDialogProvider（那是 App.vue 的事），
 // 但 go() 里用 useMessage() 提示「还没做」，Task 5 的 Accounts.vue（挂在
 // /accounts 路由下，随 Shell 一起渲染）用 useDialog() 做删除确认，
@@ -92,5 +99,44 @@ describe('Shell', () => {
     await flushPromises()
 
     expect(router.currentRoute.value.name).toBe('accounts')
+  })
+
+  // ---- 全分支终审第 2 条：GET /api/bindings 非 401 失败不能一条提示都不出现 ----
+  //
+  // 原来 bindings.refresh() 只有 finally 没有 catch，失败时顶部选择器
+  // 渲染 placeholder="没有可用的直播间"，与「这个账号确实没绑过直播间」
+  // 在界面上完全无法区分。
+  it('绑定列表加载失败时显示后端错误原文，点「重试」会重新请求', async () => {
+    let bindingsCallCount = 0
+    const f = vi.fn().mockImplementation((url: string) => {
+      if (url === '/api/bindings') {
+        bindingsCallCount += 1
+        if (bindingsCallCount === 1) {
+          return Promise.resolve(err(500, '数据库连不上'))
+        }
+        return Promise.resolve(ok([]))
+      }
+      return Promise.resolve(ok([]))
+    })
+    vi.stubGlobal('fetch', f)
+
+    const auth = useAuthStore()
+    auth.user = { id: 1, username: '张三', isAdmin: false, createdAt: '' }
+    auth.loading = false
+
+    await router.push('/accounts')
+    await router.isReady()
+
+    const wrapper = mount(Wrapped, { global: { plugins: [router] } })
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('数据库连不上')
+
+    const retryBtn = wrapper.findAll('button').find((b) => b.text() === '重试')
+    expect(retryBtn).toBeTruthy()
+    await retryBtn!.trigger('click')
+    await flushPromises()
+
+    expect(wrapper.text()).not.toContain('数据库连不上')
   })
 })

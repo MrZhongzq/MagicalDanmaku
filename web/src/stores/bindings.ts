@@ -1,6 +1,6 @@
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
-import { request } from '@/api'
+import { ApiError, request } from '@/api'
 import type { Binding } from '@/api'
 
 /** 上次选中的绑定记在 localStorage，开播时会在几个页面之间来回切。 */
@@ -10,6 +10,8 @@ export const useBindingsStore = defineStore('bindings', () => {
   const list = ref<Binding[]>([])
   const currentId = ref<number | null>(null)
   const loading = ref(false)
+  /** 加载失败的原因。为 null 表示上次加载成功。 */
+  const loadError = ref<string | null>(null)
 
   const current = computed(() => list.value.find((b) => b.id === currentId.value) ?? null)
 
@@ -20,6 +22,7 @@ export const useBindingsStore = defineStore('bindings', () => {
 
   async function refresh() {
     loading.value = true
+    loadError.value = null
     try {
       list.value = await request<Binding[]>('GET', '/api/bindings')
 
@@ -36,10 +39,16 @@ export const useBindingsStore = defineStore('bindings', () => {
           localStorage.setItem(STORAGE_KEY, String(currentId.value))
         }
       }
+    } catch (e) {
+      // 不能静默。加载失败时选择器会显示「没有可用的直播间」，
+      // 与「这个账号确实没绑过直播间」在界面上完全无法区分——
+      // 用户会以为是自己的数据有问题，而不是服务端出错了。
+      loadError.value = e instanceof ApiError ? e.message : '加载直播间列表失败'
+      list.value = []
     } finally {
       loading.value = false
     }
   }
 
-  return { list, current, currentId, loading, select, refresh }
+  return { list, current, currentId, loading, loadError, select, refresh }
 })

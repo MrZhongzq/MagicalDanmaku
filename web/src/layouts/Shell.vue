@@ -2,6 +2,7 @@
 import { computed, onMounted } from 'vue'
 import { RouterView, useRoute, useRouter } from 'vue-router'
 import {
+  NAlert,
   NLayout,
   NLayoutHeader,
   NLayoutSider,
@@ -93,6 +94,25 @@ function doLogout() {
           <NButton text size="small" @click="doLogout"> 退出 </NButton>
         </div>
       </NLayoutHeader>
+      <!--
+        GET /api/bindings 非 401 失败时不能一条提示都不出现——不然顶部选择器
+        会渲染 placeholder="没有可用的直播间"，与「这个账号确实没绑过直播间」
+        在界面上完全无法区分，用户会以为是自己的数据有问题。
+
+        401 已经由 setUnauthorizedHandler 全局处理（会跳登录页），走到这里
+        时用户已经在跳转了，不需要特判。
+      -->
+      <NAlert
+        v-if="bindings.loadError"
+        type="error"
+        title="加载直播间列表失败"
+        class="binding-error-alert"
+      >
+        <div class="binding-error-body">
+          <span>{{ bindings.loadError }}</span>
+          <NButton size="small" @click="bindings.refresh()">重试</NButton>
+        </div>
+      </NAlert>
       <NLayout content-style="padding: 16px">
         <RouterView />
       </NLayout>
@@ -116,5 +136,14 @@ function doLogout() {
 .who {
   font-size: 13px;
   opacity: 0.8;
+}
+.binding-error-alert {
+  margin: 12px 16px 0;
+}
+.binding-error-body {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
 }
 </style>
