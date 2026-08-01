@@ -32,17 +32,16 @@ const bindings = useBindingsStore()
 const message = useMessage()
 /**
  * useDialog() 要求外层有 NDialogProvider——App.vue 里已经套好了，生产环境
- * 一定能拿到。这里包一层 try/catch 只是为了兼容 Shell.test.ts 那个既有的
- * 测试外壳：它只套了 NMessageProvider，没有 NDialogProvider，而它不在本次
- * 允许改动的文件范围里。拿不到时退化成直接执行（不弹二次确认），
- * 只会在那个测试外壳里触发，真实页面走的是 App.vue，永远有 provider。
+ * 一定能拿到。
+ *
+ * **不要在这里包 try/catch 退化成「拿不到就直接执行」。** 删账号/删绑定都
+ * 是连带删规则、删授权的破坏性操作，缺 provider 是配置错误，应当响亮地
+ * 抛异常，而不是悄悄跳过二次确认——静默跳过确认比抛异常更危险：抛异常
+ * 至少会被看见，静默跳过会在某天这个组件被挂到一个没套 NDialogProvider
+ * 的地方（Storybook、新测试、某种嵌入）时，无声地把删除操作变成不可撤销
+ * 的一键删。Shell.test.ts 已经补上了 NDialogProvider，不需要这层退化。
  */
-let dialog: ReturnType<typeof useDialog> | null = null
-try {
-  dialog = useDialog()
-} catch {
-  dialog = null
-}
+const dialog = useDialog()
 
 const accounts = ref<Account[]>([])
 const loadingAccounts = ref(false)
@@ -118,10 +117,6 @@ async function saveAccountParams(acc: Account) {
 }
 
 function confirmDeleteAccount(acc: Account) {
-  if (!dialog) {
-    void deleteAccount(acc)
-    return
-  }
   dialog.warning({
     title: '删除账号',
     content: `确定要删除账号「${acc.name}」吗？这会连带删除它名下的全部直播间绑定与规则，且不可恢复。`,
@@ -155,6 +150,20 @@ async function toggleBinding(b: Binding, enabled: boolean) {
     // 不刷新的话顶部选择器上的「（已停用）」标记不会更新。
     await bindings.refresh()
   }
+}
+
+/**
+ * 删绑定与删账号是同一类破坏性操作——会连带删掉这个直播间的全部规则
+ * 与授权，只是简报没明写要二次确认。既然删账号要确认，这里没理由不确认。
+ */
+function confirmDeleteBinding(b: Binding) {
+  dialog.warning({
+    title: '删除直播间',
+    content: `确定要删除房间「${b.roomId}」吗？这会连带删除它的全部规则与授权，且不可恢复。`,
+    positiveText: '删除',
+    negativeText: '取消',
+    onPositiveClick: () => void deleteBinding(b),
+  })
 }
 
 async function deleteBinding(b: Binding) {
@@ -290,7 +299,9 @@ onMounted(() => void loadAccounts())
               <span class="room">房间 {{ b.roomId }}</span>
               <NSwitch :value="b.enabled" @update:value="(v: boolean) => toggleBinding(b, v)" />
               <span class="rule-count">{{ b.ruleCount }} 条规则</span>
-              <NButton size="small" text type="error" @click="deleteBinding(b)">删除</NButton>
+              <NButton size="small" text type="error" @click="confirmDeleteBinding(b)"
+                >删除</NButton
+              >
             </div>
             <NEmpty
               v-if="(bindingsByAccount.get(acc.id) ?? []).length === 0"

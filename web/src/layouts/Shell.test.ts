@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { defineComponent, h } from 'vue'
 import { mount, flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
-import { NMenu, NMessageProvider } from 'naive-ui'
+import { NDialogProvider, NMenu, NMessageProvider } from 'naive-ui'
 import Shell from './Shell.vue'
 import router from '@/router'
 import { useAuthStore } from '@/stores/auth'
@@ -14,10 +14,15 @@ function ok(body: unknown) {
   })
 }
 
-// Shell 本身没有注册 NMessageProvider（那是 App.vue 的事），
-// 但 go() 里用 useMessage() 提示「还没做」，测试里得自己套一层。
+// Shell 本身没有注册 NMessageProvider/NDialogProvider（那是 App.vue 的事），
+// 但 go() 里用 useMessage() 提示「还没做」，Task 5 的 Accounts.vue（挂在
+// /accounts 路由下，随 Shell 一起渲染）用 useDialog() 做删除确认，
+// 测试里得自己把两层都套上——少一层，对应的 useXxx() 会在 setup 里同步抛错。
 const Wrapped = defineComponent({
-  render: () => h(NMessageProvider, null, { default: () => h(Shell) }),
+  render: () =>
+    h(NMessageProvider, null, {
+      default: () => h(NDialogProvider, null, { default: () => h(Shell) }),
+    }),
 })
 
 describe('Shell', () => {
