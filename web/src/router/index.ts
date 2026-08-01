@@ -17,6 +17,7 @@ const router = createRouter({
           name: 'moderation',
           component: () => import('@/pages/Moderation.vue'),
         },
+        { path: 'logs', name: 'logs', component: () => import('@/pages/Logs.vue') },
         // 其余页面在后续任务里逐个加进来
       ],
     },
