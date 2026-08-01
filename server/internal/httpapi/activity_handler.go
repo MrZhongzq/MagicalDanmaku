@@ -195,6 +195,12 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		case <-r.Context().Done():
 			return
 
+		case <-s.shuttingDown:
+			// 服务端要关了。SSE 是长连接，只靠 r.Context() 收不到通知
+			// （srv.Shutdown 不取消在途请求的 context），不主动退的话
+			// 会挂满 Shutdown 的整个关停预算。
+			return
+
 		case ev, ok := <-ch:
 			if !ok {
 				return

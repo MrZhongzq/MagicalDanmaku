@@ -11,9 +11,9 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/connector/bilibili/auth"
@@ -71,6 +71,21 @@ type Server struct {
 	// staticHandler 服务前端产物与 SPA 回退，由 mountStatic 装配。
 	// 不挂在 mux 上，见 static.go 里的说明。
 	staticHandler http.Handler
+
+	// shuttingDown 在开始关停时被 close，是一个专给 SSE 用的广播信号。
+	//
+	// SSE 是长连接，只靠 r.Context() 收不到关停通知——srv.Shutdown 只关
+	// 监听器与 idle 连接，不取消在途请求的 context；keepalive 是 30 秒
+	// 一次。不给它单独的信号，每次 Ctrl+C 都会挂满 Shutdown 的整个关停
+	// 预算（WebUI 的日志页正常状态下就是开着一条 SSE）。
+	//
+	// **不要**用 http.Server.BaseContext 把请求 ctx 系在主 ctx 上：那会
+	// 让全部在途请求在关停瞬间一起被取消，而本仓库处理器普遍把
+	// r.Context() 传给 store——正常的 API 请求会以 context.Canceled
+	// 失败返回 500，正好毁掉 srv.Shutdown 本来要给它们的那个优雅完成
+	// 的窗口。SSE 单独需要提前退出，不代表所有请求都该被提前取消。
+	shuttingDown chan struct{}
+	shutdownOnce sync.Once
 }
 
 // qrTTL 是扫码会话在内存表里的存活时间，与 B 站二维码本身的
@@ -90,14 +105,15 @@ func New(st *store.Store, opts Options) *Server {
 	}
 
 	s := &Server{
-		store:   st,
-		opts:    opts,
-		log:     opts.Logger,
-		mux:     http.NewServeMux(),
-		qrs:     newQRSessions(qrTTL),
-		qrLogin: auth.NewQRLogin(nil),
-		hub:     NewHub(),
-		runtime: newRuntimeRegistry(),
+		store:        st,
+		opts:         opts,
+		log:          opts.Logger,
+		mux:          http.NewServeMux(),
+		qrs:          newQRSessions(qrTTL),
+		qrLogin:      auth.NewQRLogin(nil),
+		hub:          NewHub(),
+		runtime:      newRuntimeRegistry(),
+		shuttingDown: make(chan struct{}),
 	}
 	s.routes()
 	return s
@@ -217,6 +233,20 @@ func (s *Server) testRoutes() {
 		panic("测试用的故意 panic")
 	})
 
+	// /api/test/slow 用来验证优雅关停：睡一小段时间，再检查 r.Context()
+	// 是否已被取消才回 200——这是本仓库处理器的通用写法（把 r.Context()
+	// 传给 s.store.XXX(...)，ctx 取消后 store 调用会失败）的一个简化
+	// 复刻。测试在它睡着的时候取消 ListenAndServe 的主 ctx，断言它仍
+	// 拿到 200：关停不该让请求 ctx 被牵连取消。
+	s.mux.HandleFunc("GET /api/test/slow", func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(300 * time.Millisecond)
+		if err := r.Context().Err(); err != nil {
+			respondError(w, http.StatusInternalServerError, "上下文已取消: %v", err)
+			return
+		}
+		respondJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	})
+
 	s.mux.HandleFunc("GET /api/test/guarded/{binding}",
 		s.requirePerm(perm.RuleRead, func(w http.ResponseWriter, r *http.Request) {
 			respondJSON(w, http.StatusOK, map[string]any{"binding": bindingFrom(r.Context()).Label()})
@@ -275,13 +305,6 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 		ReadHeaderTimeout: defaultReadTimeout,
 		WriteTimeout:      defaultWriteTimeout,
 		IdleTimeout:       defaultIdleTimeout,
-
-		// srv.Shutdown 只关监听器与 idle 连接，不会取消在途请求的
-		// context；handleStream 只在 r.Context().Done() 时才退出循环，
-		// keepalive 是 30 秒一次。不把请求 ctx 系在 ListenAndServe 的
-		// ctx 上，SSE 连接就会挂满整个 defaultShutdownTimeout，Ctrl+C
-		// 固定多等一截，容易被误读成「机器人卡死」。
-		BaseContext: func(net.Listener) context.Context { return ctx },
 	}
 
 	errCh := make(chan error, 1)
@@ -298,6 +321,17 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	case err := <-errCh:
 		return err
 	case <-ctx.Done():
+		// 先广播关停信号，让 SSE 自己收摊——它们只靠 r.Context() 收不到
+		// 通知（srv.Shutdown 不取消在途请求的 context）。
+		//
+		// close 只能一次：ListenAndServe 理论上不该被重复调用，但用
+		// sync.Once 兜底，避免万一被调用第二次时 panic。
+		s.shutdownOnce.Do(func() { close(s.shuttingDown) })
+
+		// 用 context.WithoutCancel(ctx) 而不是直接派生自 ctx：ctx 已经
+		// 被取消了，直接派生的 shutCtx 会立刻到期，Shutdown 等于没给
+		// 在途请求任何优雅完成的窗口。WithoutCancel 保留 ctx 上挂的值，
+		// 但不继承它的取消/截止时间，这一行本来就是对的，没有改动。
 		shutCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), defaultShutdownTimeout)
 		defer cancel()
 		if err := srv.Shutdown(shutCtx); err != nil {
