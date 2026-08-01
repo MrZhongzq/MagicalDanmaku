@@ -181,3 +181,195 @@ func TestMergeVarsAddsMissingKeys(t *testing.T) {
 		t.Errorf("缺失的键应被补上，实际 %v", dst)
 	}
 }
+
+// flattenVarPaths 把 VarsFromEvent 的输出展开成一组叶子节点的点分路径，
+// 供与 VariableCatalog() 声明的清单逐条比对。
+func flattenVarPaths(v map[string]any) map[string]bool {
+	out := map[string]bool{}
+	var walk func(prefix string, m map[string]any)
+	walk = func(prefix string, m map[string]any) {
+		for k, val := range m {
+			p := k
+			if prefix != "" {
+				p = prefix + "." + k
+			}
+			if sub, ok := val.(map[string]any); ok {
+				walk(p, sub)
+			} else {
+				out[p] = true
+			}
+		}
+	}
+	walk("", v)
+	return out
+}
+
+// TestVariableCatalogCommonMatchesVarsFromEvent 校验公共变量组：
+// type/roomId/timestamp 是 VarsFromEvent 对任何事件都必产出的字段，
+// 必须出现在 VariableCatalog() 的公共分组里；count/users 只在合并
+// 之后才存在（见 aggregate.go），VarsFromEvent 本身不产出，必须标
+// 记为 Optional，否则这条对照测试会把它们误判为「清单声称存在但
+// 实际没有」。
+func TestVariableCatalogCommonMatchesVarsFromEvent(t *testing.T) {
+	common, _ := VariableCatalog()
+	commonPaths := make(map[string]bool, len(common))
+	optional := make(map[string]bool, len(common))
+	for _, v := range common {
+		commonPaths[v.Path] = true
+		if v.Optional {
+			optional[v.Path] = true
+		}
+	}
+
+	actual := flattenVarPaths(VarsFromEvent(danmakuEvent()))
+	for _, p := range []string{"type", "roomId", "timestamp"} {
+		if !commonPaths[p] {
+			t.Errorf("VarsFromEvent 总是产出 %q，但公共清单未声明", p)
+		}
+		if !actual[p] {
+			t.Errorf("VarsFromEvent 未产出公共字段 %q", p)
+		}
+	}
+	for _, p := range []string{"count", "users"} {
+		if commonPaths[p] && !optional[p] {
+			t.Errorf("公共变量 %q 只在合并窗口聚合后才存在，VarsFromEvent 本身不产出，"+
+				"必须标记 Optional", p)
+		}
+	}
+}
+
+// TestVariableCatalogMatchesVarsFromEvent 是本任务真正的产出：用真实事件
+// 逐个跑 VarsFromEvent，把实际产出的键路径与 VariableCatalog() 按事件
+// 类型声明的清单对照。
+//
+// 两个方向都要查：
+//   - 清单里有、VarsFromEvent 实际不产出、且没标 Optional → 清单撒谎，失败
+//   - VarsFromEvent 实际产出、清单里没声明 → 清单漏了，失败（不管是否
+//     标了 Optional，因为 Optional 只豁免「可能不存在」，不豁免「不存在
+//     这条路径」）
+//
+// 为了让 Optional 字段（avatarUrl、medal.*、stats.*）也走到「实际产出」
+// 这一侧被验证到，这里构造的事件尽量把所有字段都填满。
+func TestVariableCatalogMatchesVarsFromEvent(t *testing.T) {
+	_, byEvent := VariableCatalog()
+
+	fullUser := event.User{
+		UID: "1", Username: "全字段用户", AvatarURL: "http://example.com/a.png",
+		GuardLevel: 3, UserLevel: 10, WealthLevel: 5, IsAdmin: true,
+		Medal: &event.Medal{
+			Name: "测试勋章", Level: 20, AnchorUID: "100", RoomID: "1",
+			GuardLevel: 3, IsLighted: true,
+		},
+	}
+	fans, fansClub, watched, likeCount := int64(100), int64(50), int64(1000), int64(10)
+
+	events := map[event.Type]event.Event{
+		event.TypeDanmaku: {
+			Type: event.TypeDanmaku, RoomID: "1", Timestamp: time.Unix(1700000000, 0),
+			Payload: event.Danmaku{
+				User: fullUser, Text: "弹幕", Color: "#ffffff",
+				IsEmoticon: true, ReplyToUID: "2",
+			},
+		},
+		event.TypeSuperChat: {
+			Type: event.TypeSuperChat, RoomID: "1", Timestamp: time.Unix(1700000000, 0),
+			Payload: event.SuperChat{User: fullUser, ID: 1, Text: "SC", Price: 30, Duration: 60},
+		},
+		event.TypeGift: {
+			Type: event.TypeGift, RoomID: "1", Timestamp: time.Unix(1700000000, 0),
+			Payload: event.Gift{
+				User: fullUser, GiftID: 1, GiftName: "礼物", Count: 1,
+				CoinType: "gold", TotalCoin: 100, Action: "投喂",
+			},
+		},
+		event.TypeGiftCombo: {
+			Type: event.TypeGiftCombo, RoomID: "1", Timestamp: time.Unix(1700000000, 0),
+			Payload: event.GiftCombo{
+				User: fullUser, GiftID: 1, GiftName: "礼物", Count: 5,
+				ComboID: "c1", TotalCoin: 500,
+			},
+		},
+		event.TypeGuardBuy: {
+			Type: event.TypeGuardBuy, RoomID: "1", Timestamp: time.Unix(1700000000, 0),
+			Payload: event.GuardBuy{
+				User: fullUser, GuardLevel: 3, GuardName: "舰长",
+				Count: 1, Price: 198000, IsRenew: true,
+			},
+		},
+		event.TypeUserEnter: {
+			Type: event.TypeUserEnter, RoomID: "1", Timestamp: time.Unix(1700000000, 0),
+			Payload: event.UserEnter{User: fullUser},
+		},
+		event.TypeUserFollow: {
+			Type: event.TypeUserFollow, RoomID: "1", Timestamp: time.Unix(1700000000, 0),
+			Payload: event.UserFollow{User: fullUser},
+		},
+		event.TypeUserShare: {
+			Type: event.TypeUserShare, RoomID: "1", Timestamp: time.Unix(1700000000, 0),
+			Payload: event.UserShare{User: fullUser},
+		},
+		event.TypeUserLike: {
+			Type: event.TypeUserLike, RoomID: "1", Timestamp: time.Unix(1700000000, 0),
+			Payload: event.UserLike{User: fullUser},
+		},
+		event.TypeUserBlocked: {
+			Type: event.TypeUserBlocked, RoomID: "1", Timestamp: time.Unix(1700000000, 0),
+			Payload: event.UserBlocked{User: fullUser, OperatorName: "房管"},
+		},
+		event.TypeRoomChange: {
+			Type: event.TypeRoomChange, RoomID: "1", Timestamp: time.Unix(1700000000, 0),
+			Payload: event.RoomChange{
+				Title: "标题", AreaID: "1", AreaName: "分区",
+				ParentAreaID: "2", ParentAreaName: "父分区",
+			},
+		},
+		event.TypeRoomStatsUpdate: {
+			Type: event.TypeRoomStatsUpdate, RoomID: "1", Timestamp: time.Unix(1700000000, 0),
+			Payload: event.RoomStatsUpdate{
+				Fans: &fans, FansClub: &fansClub, Watched: &watched, LikeCount: &likeCount,
+			},
+		},
+		event.TypeOnlineRankUpdate: {
+			Type: event.TypeOnlineRankUpdate, RoomID: "1", Timestamp: time.Unix(1700000000, 0),
+			Payload: event.OnlineRankUpdate{Count: 50},
+		},
+		event.TypeBattle: {
+			Type: event.TypeBattle, RoomID: "1", Timestamp: time.Unix(1700000000, 0),
+			Payload: event.Battle{SubCommand: "PK_BATTLE_START_NEW"},
+		},
+		event.TypeUnknown: {
+			Type: event.TypeUnknown, RoomID: "1", Timestamp: time.Unix(1700000000, 0),
+			Payload: event.Unknown{Command: "SOME_CMD"},
+		},
+	}
+
+	for typ, ev := range events {
+		t.Run(string(typ), func(t *testing.T) {
+			actual := flattenVarPaths(VarsFromEvent(ev))
+			// 公共字段单独由 TestVariableCatalogCommonMatchesVarsFromEvent 校验，
+			// 这里只比对该事件类型特有的部分。
+			delete(actual, "type")
+			delete(actual, "roomId")
+			delete(actual, "timestamp")
+
+			catalog, ok := byEvent[typ]
+			if !ok {
+				t.Fatalf("VariableCatalog 未声明事件类型 %q，但 VarsFromEvent 为它产出了字段 %v",
+					typ, actual)
+			}
+			catalogPaths := make(map[string]bool, len(catalog))
+			for _, v := range catalog {
+				catalogPaths[v.Path] = true
+				if !v.Optional && !actual[v.Path] {
+					t.Errorf("清单声称路径 %q 存在，但 VarsFromEvent 实际未产出", v.Path)
+				}
+			}
+			for p := range actual {
+				if !catalogPaths[p] {
+					t.Errorf("VarsFromEvent 为事件类型 %q 产出了路径 %q，但 VariableCatalog 未声明",
+						typ, p)
+				}
+			}
+		})
+	}
+}

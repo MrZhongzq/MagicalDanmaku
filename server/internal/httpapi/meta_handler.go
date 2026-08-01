@@ -129,3 +129,23 @@ func (s *Server) handleMetaOperators(w http.ResponseWriter, _ *http.Request) {
 func (s *Server) handleMetaAggregateBy(w http.ResponseWriter, _ *http.Request) {
 	respondJSON(w, http.StatusOK, aggregateByLabels)
 }
+
+// variablesResponse 是 /api/meta/variables 的响应结构：公共变量 + 按
+// 事件类型分组的变量。
+type variablesResponse struct {
+	Common  []rules.Variable                `json:"common"`
+	ByEvent map[event.Type][]rules.Variable `json:"byEvent"`
+}
+
+// handleMetaVariables 下发条件构建器/模板编辑器要用的变量清单。
+//
+// 清单本身不在这里定义——它由 rules.VariableCatalog() 与
+// rules.VarsFromEvent() 一起维护（同一个文件 vars.go），这里只是原样
+// 转发。这个接口存在的唯一价值就是让前端不用再自己抄一份：抄来的那份
+// （ConditionTree.vue 的 COMMON_FIELD_OPTIONS）是本任务要消灭的第二处
+// 定义，改这个处理器时不要在这里另起一份清单，否则等于把第二处定义
+// 从前端搬到了后端，价值归零。
+func (s *Server) handleMetaVariables(w http.ResponseWriter, _ *http.Request) {
+	common, byEvent := rules.VariableCatalog()
+	respondJSON(w, http.StatusOK, variablesResponse{Common: common, ByEvent: byEvent})
+}

@@ -118,6 +118,141 @@ func userVars(u event.User) map[string]any {
 	return m
 }
 
+// Variable 是一条可用于条件与模板的变量。
+type Variable struct {
+	Path     string // 点分路径，如 "user.medal.isLighted"，与 LookupPath 的参数同形
+	Label    string // 中文说明，供前端下拉框展示
+	Optional bool   // 可能不存在（如未佩戴粉丝牌时没有 medal.*），配条件时仍可选用
+}
+
+// commonVariables 是任意事件都会产出的公共字段。
+//
+// count/users 是例外：它们不是 VarsFromEvent 本身产出的，而是合并窗口
+// （见 aggregate.go）算完之后才补进 Vars 的，所以标 Optional——用真实
+// 事件跑 VarsFromEvent 永远看不到它们，但它们是配置聚合规则时用户真实
+// 用得到的路径。
+var commonVariables = []Variable{
+	{Path: "type", Label: "事件类型"},
+	{Path: "roomId", Label: "直播间号"},
+	{Path: "timestamp", Label: "事件时间戳（Unix 秒）"},
+	{Path: "count", Label: "合并窗口内的事件数量（仅聚合规则触发时存在）", Optional: true},
+	{Path: "users", Label: "合并窗口内涉及的用户昵称列表（仅聚合规则触发时存在）", Optional: true},
+}
+
+// userVariables 是 userVars 展开产出的字段，路径不带前缀——
+// 使用处按事件类型套上 "user." 前缀（见 withPrefix）。
+//
+// 这份清单必须和 userVars 函数的实现同步：那边加一个字段，这边就要
+// 加一条，否则要么用户配不出用到新字段的条件，要么清单里有一条
+// VarsFromEvent 从不产出的死路径。TestVariableCatalogMatchesVarsFromEvent
+// 会在两者漂开时报红。
+var userVariables = []Variable{
+	{Path: "uid", Label: "用户 UID"},
+	{Path: "username", Label: "用户昵称"},
+	{Path: "guardLevel", Label: "大航海等级（0 无/1 总督/2 提督/3 舰长）"},
+	{Path: "userLevel", Label: "用户等级（UL）"},
+	{Path: "wealthLevel", Label: "荣耀等级"},
+	{Path: "isAdmin", Label: "是否房管"},
+	{Path: "avatarUrl", Label: "头像地址", Optional: true},
+	{Path: "medal.name", Label: "粉丝勋章名称", Optional: true},
+	{Path: "medal.level", Label: "粉丝勋章等级", Optional: true},
+	{Path: "medal.roomId", Label: "粉丝勋章所属直播间号", Optional: true},
+	{Path: "medal.anchorUid", Label: "粉丝勋章所属主播 UID", Optional: true},
+	{Path: "medal.guardLevel", Label: "粉丝勋章对应的大航海等级", Optional: true},
+	{Path: "medal.isLighted", Label: "粉丝勋章是否点亮", Optional: true},
+}
+
+// withPrefix 给一组变量的 Path 统一加前缀，返回新切片（不改原切片）。
+func withPrefix(prefix string, vars []Variable) []Variable {
+	out := make([]Variable, len(vars))
+	for i, v := range vars {
+		out[i] = Variable{Path: prefix + "." + v.Path, Label: v.Label, Optional: v.Optional}
+	}
+	return out
+}
+
+// VariableCatalog 返回按事件类型分组的变量清单，供前端条件构建器/模板
+// 编辑器渲染下拉框用。
+//
+// **它与 VarsFromEvent 必须一起改。** 前端的条件构建器靠它渲染下拉，
+// 清单漏了某个路径，用户就配不出用到那个路径的条件；清单里有而
+// VarsFromEvent 不产出，用户会配出永远不匹配且不报错的条件。
+// TestVariableCatalogMatchesVarsFromEvent 用真实事件跑 VarsFromEvent，
+// 把实际产出的键路径与这里声明的逐条对照，两边漂开就会红。
+//
+// common 是任意事件类型都有的字段（type/roomId/timestamp，以及只在
+// 合并窗口聚合后才有的 count/users），不在 byEvent 的各分组里重复。
+// byEvent 只覆盖 VarsFromEvent 的 switch 里实际有分支、会产出额外字段
+// 的事件类型；像 live_start/live_stop/super_chat_delete/manual 这些
+// switch 里没有分支的类型不出现在 byEvent 里——它们除了公共字段之外
+// 没有别的变量可选。
+func VariableCatalog() (common []Variable, byEvent map[event.Type][]Variable) {
+	user := withPrefix("user", userVariables)
+
+	byEvent = map[event.Type][]Variable{
+		event.TypeDanmaku: append(append([]Variable{}, user...), []Variable{
+			{Path: "text", Label: "弹幕正文"},
+			{Path: "danmaku.color", Label: "弹幕颜色（十六进制，如 #ffffff）"},
+			{Path: "danmaku.isEmoticon", Label: "是否为表情弹幕"},
+			{Path: "danmaku.replyToUid", Label: "被 @ 回复的用户 UID"},
+		}...),
+		event.TypeSuperChat: append(append([]Variable{}, user...), []Variable{
+			{Path: "text", Label: "醒目留言正文"},
+			{Path: "superChat.id", Label: "醒目留言 ID"},
+			{Path: "superChat.price", Label: "价格（元）"},
+			{Path: "superChat.duration", Label: "展示秒数"},
+		}...),
+		event.TypeGift: append(append([]Variable{}, user...), []Variable{
+			{Path: "gift.id", Label: "礼物 ID"},
+			{Path: "gift.name", Label: "礼物名称"},
+			{Path: "gift.count", Label: "礼物数量"},
+			{Path: "gift.coinType", Label: "瓜子类型（gold 金瓜子 / silver 银瓜子）"},
+			{Path: "gift.totalCoin", Label: "总价值（瓜子）"},
+			{Path: "gift.action", Label: "动作描述（如「投喂」）"},
+		}...),
+		event.TypeGiftCombo: append(append([]Variable{}, user...), []Variable{
+			{Path: "gift.id", Label: "礼物 ID"},
+			{Path: "gift.name", Label: "礼物名称"},
+			{Path: "gift.count", Label: "礼物数量（连击汇总）"},
+			{Path: "gift.totalCoin", Label: "总价值（瓜子）"},
+			{Path: "gift.comboId", Label: "连击 ID"},
+		}...),
+		event.TypeGuardBuy: append(append([]Variable{}, user...), []Variable{
+			{Path: "guard.level", Label: "大航海等级（1 总督/2 提督/3 舰长）"},
+			{Path: "guard.name", Label: "大航海名称（如「舰长」）"},
+			{Path: "guard.count", Label: "购买月数"},
+			{Path: "guard.price", Label: "单价（金瓜子）"},
+			{Path: "guard.isRenew", Label: "是否为续费（false 为新购）"},
+		}...),
+		event.TypeUserEnter:   append([]Variable{}, user...),
+		event.TypeUserFollow:  append([]Variable{}, user...),
+		event.TypeUserShare:   append([]Variable{}, user...),
+		event.TypeUserLike:    append([]Variable{}, user...),
+		event.TypeUserBlocked: append([]Variable{}, user...),
+		event.TypeRoomChange: {
+			{Path: "room.title", Label: "直播间标题"},
+			{Path: "room.areaName", Label: "分区名称"},
+			{Path: "room.parentAreaName", Label: "父分区名称"},
+		},
+		event.TypeRoomStatsUpdate: {
+			{Path: "stats.fans", Label: "粉丝数", Optional: true},
+			{Path: "stats.fansClub", Label: "粉丝团人数", Optional: true},
+			{Path: "stats.watched", Label: "累计看过人数", Optional: true},
+			{Path: "stats.likeCount", Label: "点赞数", Optional: true},
+		},
+		event.TypeOnlineRankUpdate: {
+			{Path: "rank.count", Label: "高能榜总人数（未知时为 -1）"},
+		},
+		event.TypeBattle: {
+			{Path: "battle.subCommand", Label: "PK 原始 CMD 名（P0 只归一化不解释）"},
+		},
+		event.TypeUnknown: {
+			{Path: "unknown.command", Label: "未识别事件的原始 CMD 名"},
+		},
+	}
+	return commonVariables, byEvent
+}
+
 // LookupPath 按点分路径取值，如 "user.medal.level"。
 // 路径不存在时返回 (nil, false)。
 func LookupPath(vars map[string]any, path string) (any, bool) {

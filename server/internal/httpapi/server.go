@@ -139,6 +139,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/meta/action-types", s.requireAuth(s.handleMetaActionTypes))
 	s.mux.HandleFunc("GET /api/meta/operators", s.requireAuth(s.handleMetaOperators))
 	s.mux.HandleFunc("GET /api/meta/aggregate-by", s.requireAuth(s.handleMetaAggregateBy))
+	s.mux.HandleFunc("GET /api/meta/variables", s.requireAuth(s.handleMetaVariables))
 
 	// 用户管理。改密码不走 requireAdmin，因为普通用户要能改自己的，
 	// 具体的授权判断在处理器里——这是第三条轴：绑定级权限点收在
