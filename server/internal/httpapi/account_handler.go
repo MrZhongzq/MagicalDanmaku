@@ -92,7 +92,7 @@ func (s *Server) handleQRCodeStart(w http.ResponseWriter, r *http.Request) {
 
 	// 若账号已存在，只有能管它的人才能换 Cookie
 	if existing, err := s.store.GetAccountByName(r.Context(), name); err == nil {
-		if !u.IsAdmin && existing.OwnerID != u.ID {
+		if !s.isAccountOwner(u, existing) {
 			// 返回 404 而非 403：403 加上「不属于你」的文案等于告诉调用者
 			// 这个账号名被别人占用了，任何登录用户拿任意名字试一次就能探测。
 			// 与 handlePatchAccount / handleDeleteAccount 保持一致。
@@ -184,7 +184,7 @@ func (s *Server) saveScannedAccount(ctx context.Context, p qrPending, cookie str
 		// 它可能已经被别人建出来了。不重查的话，攻击者对一个可猜的账号名
 		// 发起扫码就能把自己的 Cookie 写进受害者的账号行——owner_id 不变，
 		// 受害者的机器人从此以攻击者的 B 站身份发言。
-		if !p.IsAdmin && acc.OwnerID != p.UserID {
+		if !s.isAccountOwner(&store.User{ID: p.UserID, IsAdmin: p.IsAdmin}, acc) {
 			return fmt.Errorf("账号 %s 不存在: %w", p.AccountName, store.ErrNotFound)
 		}
 		return s.store.UpdateAccountCookie(ctx, p.AccountName, cookie, sess.UID)
@@ -213,7 +213,7 @@ func (s *Server) handlePatchAccount(w http.ResponseWriter, r *http.Request) {
 		respondStoreError(w, err, "账号 "+name+" 不存在")
 		return
 	}
-	if !u.IsAdmin && acc.OwnerID != u.ID {
+	if !s.isAccountOwner(u, acc) {
 		// 不是所有者就当作不存在，避免被用来探测别人有哪些账号
 		respondError(w, http.StatusNotFound, "账号 %s 不存在", name)
 		return
@@ -268,7 +268,7 @@ func (s *Server) handleDeleteAccount(w http.ResponseWriter, r *http.Request) {
 		respondStoreError(w, err, "账号 "+name+" 不存在")
 		return
 	}
-	if !u.IsAdmin && acc.OwnerID != u.ID {
+	if !s.isAccountOwner(u, acc) {
 		respondError(w, http.StatusNotFound, "账号 %s 不存在", name)
 		return
 	}

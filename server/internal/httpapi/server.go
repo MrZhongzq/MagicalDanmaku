@@ -125,7 +125,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/meta/aggregate-by", s.requireAuth(s.handleMetaAggregateBy))
 
 	// 用户管理。改密码不走 requireAdmin，因为普通用户要能改自己的，
-	// 具体的授权判断在处理器里（这是唯一的例外，因为它不是绑定级权限）。
+	// 具体的授权判断在处理器里——这是第三条轴：绑定级权限点收在
+	// requirePerm，账号所有权收在 isAccountOwner，改密码是「改自己
+	// 还是管理员」这条单独的判断，不属于前两者中的任何一个。
 	s.mux.HandleFunc("GET /api/users", s.requireAdmin(s.handleListUsers))
 	s.mux.HandleFunc("POST /api/users", s.requireAdmin(s.handleCreateUser))
 	s.mux.HandleFunc("POST /api/users/{name}/password", s.requireAuth(s.handleChangePassword))

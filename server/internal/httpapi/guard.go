@@ -14,8 +14,9 @@ const ctxKeyBinding ctxKey = 1
 
 // requirePerm 要求当前用户对 URL 里的 {binding} 拥有权限点 p。
 //
-// **授权判定只有这一处实现。** 处理器里不得再写权限判断——
-// 多一处就多一处漏判的可能。
+// **绑定级授权判定只有这一处实现。** 处理器里不得再写权限判断——
+// 多一处就多一处漏判的可能。账号所有权判定是另一条轴，收在
+// isAccountOwner；改密码是第三条轴，见 server.go 里的说明。
 //
 // 它同时负责解析并加载绑定，放进 context 供处理器取用，
 // 这样处理器不必再查一次。
@@ -63,6 +64,22 @@ func (s *Server) requirePerm(p perm.Permission, h http.HandlerFunc) http.Handler
 
 		h(w, r.WithContext(context.WithValue(r.Context(), ctxKeyBinding, b)))
 	})
+}
+
+// isAccountOwner 判断调用者能否以「账号所有者」的身份操作这个账号。
+//
+// 管理员一律放行。非所有者返回 false，调用方应当回 404 而不是
+// 403——「不存在」与「不归你」必须不可区分，否则拿账号名就能探测
+// 部署里有谁。
+//
+// 账号所有权与绑定权限点是两条不同的轴，所以它不走 store.Can：
+// 建账号、删账号、换 Cookie 这些操作压根不挂在已有绑定上，没有
+// binding ID 可供 requirePerm 判定。
+//
+// **这是账号所有权判定唯一的实现。** 扫码起始、PATCH/DELETE 账号、
+// 建/删绑定都调它，不再各自重复 `!u.IsAdmin && acc.OwnerID != u.ID`。
+func (s *Server) isAccountOwner(u *store.User, acc *store.Account) bool {
+	return u.IsAdmin || acc.OwnerID == u.ID
 }
 
 // bindingFrom 取出守卫加载好的绑定。

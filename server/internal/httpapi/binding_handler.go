@@ -163,7 +163,7 @@ func (s *Server) handleCreateBinding(w http.ResponseWriter, r *http.Request) {
 		respondStoreError(w, err, "账号 "+req.AccountName+" 不存在")
 		return
 	}
-	if !u.IsAdmin && acc.OwnerID != u.ID {
+	if !s.isAccountOwner(u, acc) {
 		respondError(w, http.StatusNotFound, "账号 %s 不存在", req.AccountName)
 		return
 	}
@@ -232,7 +232,7 @@ func (s *Server) handleDeleteBinding(w http.ResponseWriter, r *http.Request) {
 		respondStoreError(w, err, "账号不存在")
 		return
 	}
-	if !u.IsAdmin && acc.OwnerID != u.ID {
+	if !s.isAccountOwner(u, acc) {
 		// 与 requirePerm 的判定完全一致：这条路径走的是 requireAuth，
 		// 没有守卫替它做可见性判断，所以必须自己做。无条件回 403 的话，
 		// 拿绑定 ID 从 1 递增试一遍就能枚举出部署里有哪些绑定——
