@@ -26,10 +26,16 @@ type accountView struct {
 	OwnerID     int64  `json:"ownerId"`
 	IsOwner     bool   `json:"isOwner"`
 	CreatedAt   string `json:"createdAt"`
+
+	// LoginState 是最近一次登录态检测的结果（"valid"/"invalid"/"unknown"），
+	// 由 cmd/magicd 里的定期检测循环写入。LoginCheckedAt 为 nil 表示
+	// 该账号从未被检测过。
+	LoginState     string  `json:"loginState"`
+	LoginCheckedAt *string `json:"loginCheckedAt"`
 }
 
 func toAccountView(a *store.Account, callerID int64) accountView {
-	return accountView{
+	v := accountView{
 		ID:          a.ID,
 		Name:        a.Name,
 		UID:         a.UID,
@@ -38,7 +44,13 @@ func toAccountView(a *store.Account, callerID int64) accountView {
 		OwnerID:     a.OwnerID,
 		IsOwner:     a.OwnerID == callerID,
 		CreatedAt:   a.CreatedAt.Format(timeLayout),
+		LoginState:  a.LoginState,
 	}
+	if a.LoginCheckedAt != nil {
+		s := a.LoginCheckedAt.Format(timeLayout)
+		v.LoginCheckedAt = &s
+	}
+	return v
 }
 
 // qrStarter 抽出扫码登录的两个方法，便于测试注入假实现

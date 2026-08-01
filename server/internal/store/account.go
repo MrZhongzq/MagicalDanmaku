@@ -16,6 +16,19 @@ const (
 	defaultMaxLength   = 40   // B 站单条弹幕上限，汉字与英文都算 1 个字符
 )
 
+// 账号登录态的三个取值（对应迁移 003 里 login_state 列的 CHECK 约束）。
+//
+// 三态而非「有效布尔值 + 检测时间」：网络不通不等于账号掉线，
+// 检测失败必须有独立于「登录已失效」的表示，否则一次网络抖动就会
+// 在界面上显示成「账号已掉线」，把用户吓得去重新扫码。unknown 同时
+// 表示「从未成功检测过」与「最近一次检测本身失败」——两者对用户
+// 来说是同一种「不确定」，不需要再细分。
+const (
+	LoginStateUnknown = "unknown" // 尚未检测过，或最近一次检测失败（探测本身出错，而非确认未登录）
+	LoginStateValid   = "valid"   // 最近一次检测确认登录有效
+	LoginStateInvalid = "invalid" // 最近一次检测确认登录已失效（B 站 nav 接口返回 code=-101）
+)
+
 // Account 是机器人操作的 B 站账号。
 //
 // 与 User（使用本软件的人）是两回事：账号用 Cookie 操作直播间，
@@ -33,6 +46,12 @@ type Account struct {
 	OwnerID   int64
 	CreatedAt time.Time
 	UpdatedAt time.Time
+
+	// LoginState 是最近一次登录态检测的结果，见 LoginStateValid 等常量。
+	LoginState string
+	// LoginCheckedAt 是最近一次尝试检测的时间（无论检测成功与否）；
+	// 从未检测过为 nil。
+	LoginCheckedAt *time.Time
 }
 
 // AccountInput 是创建或更新账号的入参。
@@ -49,7 +68,7 @@ type AccountInput struct {
 //
 // Cookie 明文存储，读写各收在一处：读是这里加 scanAccount，
 // 写是 encodeCookie。将来要加密只改这两处。
-const accountColumns = `id, name, uid, cookie, rate_limit_ms, max_length, owner_id, created_at, updated_at`
+const accountColumns = `id, name, uid, cookie, rate_limit_ms, max_length, owner_id, created_at, updated_at, login_state, login_checked_at`
 
 // encodeCookie 是 Cookie 写入数据库前的唯一通道。
 //
@@ -67,7 +86,8 @@ func scanAccount(row pgx.Row) (*Account, error) {
 	var a Account
 	var ms int
 	if err := row.Scan(&a.ID, &a.Name, &a.UID, &a.Cookie, &ms,
-		&a.MaxLength, &a.OwnerID, &a.CreatedAt, &a.UpdatedAt); err != nil {
+		&a.MaxLength, &a.OwnerID, &a.CreatedAt, &a.UpdatedAt,
+		&a.LoginState, &a.LoginCheckedAt); err != nil {
 		return nil, err
 	}
 	a.RateLimit = time.Duration(ms) * time.Millisecond
@@ -200,6 +220,29 @@ func (s *Store) UpdateAccountCookie(ctx context.Context, name, cookie, uid strin
 	}
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("store: 账号 %q 不存在: %w", name, ErrNotFound)
+	}
+	return nil
+}
+
+// UpdateAccountLoginState 写入一次登录态检测的结果。
+//
+// state 必须是 LoginStateValid/LoginStateInvalid/LoginStateUnknown 之一，
+// 由调用方（cmd/magicd 的检测循环）判定后传入——探测失败时传
+// LoginStateUnknown，绝不能把探测失败当作 LoginStateInvalid 写进来，
+// 那等于把「网络不通」误报成「账号掉线」。
+//
+// 账号不存在时不算错误：检测循环遍历的是某一时刻的账号快照，
+// 账号在检测期间被删掉是正常竞态，不该让整轮检测因此报错。
+func (s *Store) UpdateAccountLoginState(ctx context.Context, name, state string) error {
+	switch state {
+	case LoginStateValid, LoginStateInvalid, LoginStateUnknown:
+	default:
+		return fmt.Errorf("store: 非法的登录态取值 %q", state)
+	}
+	if _, err := s.pool.Exec(ctx, `
+		UPDATE accounts SET login_state = $1, login_checked_at = now() WHERE name = $2`,
+		state, name); err != nil {
+		return fmt.Errorf("store: 写入账号 %q 的登录态失败: %w", name, err)
 	}
 	return nil
 }

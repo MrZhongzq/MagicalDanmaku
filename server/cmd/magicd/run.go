@@ -479,6 +479,14 @@ func runRun(args []string) error {
 		}()
 	}
 
+	// 账号登录态的定期检测：B 站登录态失效得很快，不能等到发弹幕失败
+	// 才发现账号掉线
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		loginCheckLoop(ctx, st, newAPILoginChecker(), log)
+	}()
+
 	if api != nil {
 		api.SetRuntime(apiRuntimes)
 		if h, err := api.CurrentConfigHash(ctx); err == nil {
@@ -578,6 +586,121 @@ func retentionDays() int {
 		return defaultRetentionDays
 	}
 	return n
+}
+
+// loginCheckInterval 是账号登录态检测的轮询间隔。
+//
+// B 站登录态不会分钟级变化，间隔定得太短只是给 B 站添加无谓的请求；
+// 10 分钟是「掉线后能被较快发现」与「别把接口打爆」之间的折中，
+// 与业务日志清理循环的粒度（每小时）不是一回事——那是清理旧数据，
+// 这是探测一个随时可能变化、影响能不能发弹幕的状态，需要更勤。
+const loginCheckInterval = 10 * time.Minute
+
+// loginInvalidCode 是 B 站 nav 接口在登录态失效时返回的业务码。
+//
+// 目前只确认了 -101 这一个码代表未登录（api/client.go 里 RefreshNav
+// 的注释也是这么写的）。没有依据的码一律当作探测失败处理，不猜测
+// 是否还有别的码也代表掉线——猜错的代价是把「探测异常」误报成
+// 「账号已失效」，会让用户去做不必要的重新扫码。
+const loginInvalidCode = -101
+
+// checkAccountLogin 用 nav 接口探测一个账号的登录态。
+//
+// 这与 api.Client.RefreshNav 是两条独立路径：RefreshNav 只关心
+// wbi_img，未登录时会返回 code=-101，但它的注释明确说这种情况下
+// wbi_img 依然有效，所以 RefreshNav 刻意忽略这个错误。这里要检测的
+// 恰恰是这个被它忽略掉的错误码本身，不能复用 RefreshNav，必须单独
+// 发一次请求。
+//
+// 返回的 state 始终是 store.LoginStateValid/Invalid/Unknown 之一。
+// err 非 nil 表示探测本身失败（网络错误、HTTP 非 200、无法识别的
+// 业务码等）——调用方绝不能把这种失败当作登录已失效处理：网络不通
+// 不等于账号掉线，混为一谈会让用户在断网时看到「账号全部失效」而
+// 慌张地重新扫码。
+func checkAccountLogin(ctx context.Context, c *api.Client) (state string, err error) {
+	getErr := c.GetJSON(ctx, c.URLFor("nav"), nil, false, nil)
+	if getErr == nil {
+		return store.LoginStateValid, nil
+	}
+	var apiErr *api.APIError
+	if errors.As(getErr, &apiErr) && apiErr.Code == loginInvalidCode {
+		return store.LoginStateInvalid, nil
+	}
+	return store.LoginStateUnknown, getErr
+}
+
+// loginChecker 是探测单个账号登录态的能力，抽成函数类型便于测试注入
+// 假实现——道理与 account_handler.go 里的 qrStarter 一样：真打 B 站
+// 接口的测试既慢又不可控，尤其是这里还要验证「探测失败」这条分支，
+// 用真实网络故意制造超时代价太大。
+type loginChecker func(ctx context.Context, cookie string) (state string, err error)
+
+// newAPILoginChecker 是生产环境用的 loginChecker 实现：解析 Cookie、
+// 建一个新的 API 客户端、探测 nav 接口。
+//
+// 每个账号在每一轮检测里都新建一个 Client，而不是复用 buildAccounts
+// 建好的那些——后者只包含当前有启用绑定的账号，而登录态检测覆盖的
+// 是 accounts 表里的全部账号（WebUI 的账号卡片本来就展示全部账号，
+// 不止「正在跑的那些」）。反正 nav 请求很轻量，多建的 Client 没有
+// 额外的网络开销。
+func newAPILoginChecker() loginChecker {
+	return func(ctx context.Context, cookie string) (string, error) {
+		sess, err := auth.ParseSession(cookie)
+		if err != nil {
+			return store.LoginStateUnknown, err
+		}
+		return checkAccountLogin(ctx, api.New(sess))
+	}
+}
+
+// loginCheckOnce 对 accounts 表里的每个账号做一次登录态探测并写库。
+//
+// 探测串行进行（for 循环里直接调用 check，不开 goroutine）：不对
+// B 站同时发出多个账号的请求，这本身也是一种克制的风控姿态。
+//
+// 单个账号探测失败（check 返回 err）不会中断循环——那只是这一个账号
+// 这一轮没测出结果，其余账号必须照常被检测到；此时仍然把 check
+// 返回的 state（应为 LoginStateUnknown）写库，让「未知」这个状态
+// 在界面上及时反映出来，而不是拿着上一轮可能已经过时的结果不放。
+// 写库本身失败（数据库层面的问题）也只记日志、继续下一个账号，
+// 同样不能让一个账号的问题拖累其他账号的检测结果。
+func loginCheckOnce(ctx context.Context, st *store.Store, check loginChecker, log *slog.Logger) {
+	accounts, err := st.ListAccounts(ctx)
+	if err != nil {
+		log.Error("登录态检测: 列出账号失败", "err", err)
+		return
+	}
+	for _, a := range accounts {
+		state, err := check(ctx, a.Cookie)
+		if err != nil {
+			log.Warn("账号登录态探测失败", "account", a.Name, "err", err)
+		}
+		if uerr := st.UpdateAccountLoginState(ctx, a.Name, state); uerr != nil {
+			log.Error("写入账号登录态失败", "account", a.Name, "err", uerr)
+		}
+	}
+}
+
+// loginCheckLoop 定期对全部账号做登录态探测，模式与 purgeLoop 一致：
+// 一个 goroutine + ticker + ctx 取消。
+//
+// 启动时立刻检测一次，不等第一个 tick——间隔是 10 分钟量级，等满一个
+// 周期才知道账号状态，用户开机后要傻等太久。
+func loginCheckLoop(ctx context.Context, st *store.Store, check loginChecker, log *slog.Logger) {
+	ticker := time.NewTicker(loginCheckInterval)
+	defer ticker.Stop()
+
+	run := func() { loginCheckOnce(ctx, st, check, log) }
+
+	run() // 启动时先测一次，不必等满一个周期
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			run()
+		}
+	}
 }
 
 // purgeLoop 每小时清理一次超期的业务日志。

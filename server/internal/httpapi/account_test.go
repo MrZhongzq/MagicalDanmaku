@@ -74,6 +74,66 @@ func stringIndex(s, sub string) int {
 	return -1
 }
 
+// 账号卡片要能显示登录态，否则「待后端支持」的提示永远撤不掉。
+func TestListAccountsIncludesLoginState(t *testing.T) {
+	srv, st := newTestServer(t)
+	c := loginAs(t, srv, st, "张三", false)
+	mustBindingFor(t, st, "张三", "小号", "123")
+
+	if err := st.UpdateAccountLoginState(context.Background(), "小号", store.LoginStateInvalid); err != nil {
+		t.Fatalf("写入登录态报错: %v", err)
+	}
+
+	resp := jsonRequest(t, c, "GET", srv.URL+"/api/accounts", "")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("状态码 = %d", resp.StatusCode)
+	}
+
+	var got []struct {
+		Name           string  `json:"name"`
+		LoginState     string  `json:"loginState"`
+		LoginCheckedAt *string `json:"loginCheckedAt"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("解析报错: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("账号数 = %d, 期望 1", len(got))
+	}
+	if got[0].LoginState != "invalid" {
+		t.Errorf("loginState = %q, 期望 invalid", got[0].LoginState)
+	}
+	if got[0].LoginCheckedAt == nil || *got[0].LoginCheckedAt == "" {
+		t.Errorf("loginCheckedAt 应有值，实际 %v", got[0].LoginCheckedAt)
+	}
+}
+
+// 尚未检测过的账号应报告「未知」，而不是缺省成「有效」——那会让用户
+// 误以为一个从未探测过的账号是安全的。
+func TestListAccountsReportsUnknownLoginStateBeforeFirstCheck(t *testing.T) {
+	srv, st := newTestServer(t)
+	c := loginAs(t, srv, st, "张三", false)
+	mustBindingFor(t, st, "张三", "小号", "123")
+
+	resp := jsonRequest(t, c, "GET", srv.URL+"/api/accounts", "")
+	defer resp.Body.Close()
+
+	var got []struct {
+		LoginState     string  `json:"loginState"`
+		LoginCheckedAt *string `json:"loginCheckedAt"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("解析报错: %v", err)
+	}
+	if len(got) != 1 || got[0].LoginState != "unknown" {
+		t.Errorf("未检测过的账号 loginState = %+v, 期望 unknown", got)
+	}
+	if got[0].LoginCheckedAt != nil {
+		t.Errorf("未检测过时 loginCheckedAt 应为 null，实际 %v", *got[0].LoginCheckedAt)
+	}
+}
+
 func TestListAccountsFiltersByVisibility(t *testing.T) {
 	srv, st := newTestServer(t)
 	loginAs(t, srv, st, "张三", false)

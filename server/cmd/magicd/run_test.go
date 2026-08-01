@@ -4,13 +4,18 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/MrZhongzq/MagicalDanmaku/server/internal/connector/bilibili/api"
+	"github.com/MrZhongzq/MagicalDanmaku/server/internal/connector/bilibili/auth"
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/event"
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/logging"
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/rules"
@@ -618,5 +623,290 @@ func TestRoomRuntimeConcurrentReloadAndEventFanoutIsRaceFree(t *testing.T) {
 
 	for err := range errCh {
 		t.Errorf("并发 Reload 报错: %v", err)
+	}
+}
+
+// ---- 账号登录态检测（任务 8） ----
+
+// newLoginTestAPIClient 建一个指向假 nav 接口的 api.Client，供
+// checkAccountLogin 的单元测试使用——真打 B 站接口的测试既慢又不可控，
+// 与 internal/connector/bilibili/api 包里 newTestClient 是同样的手法。
+func newLoginTestAPIClient(t *testing.T, h http.HandlerFunc) *api.Client {
+	t.Helper()
+	srv := httptest.NewServer(h)
+	t.Cleanup(srv.Close)
+
+	sess, err := auth.ParseSession("SESSDATA=x; bili_jct=y; DedeUserID=1")
+	if err != nil {
+		t.Fatalf("ParseSession 失败: %v", err)
+	}
+	c := api.New(sess, api.WithHTTPClient(srv.Client()))
+	c.SetBaseURL("nav", srv.URL)
+	return c
+}
+
+func TestCheckAccountLoginValid(t *testing.T) {
+	c := newLoginTestAPIClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"code":0,"message":"0","data":{}}`))
+	})
+
+	state, err := checkAccountLogin(context.Background(), c)
+	if err != nil {
+		t.Fatalf("不应报错: %v", err)
+	}
+	if state != store.LoginStateValid {
+		t.Errorf("state = %q, 期望 %q", state, store.LoginStateValid)
+	}
+}
+
+// nav 接口在未登录时返回 code=-101，这是 client.go 注释里明确写出的、
+// 唯一确认代表登录态失效的业务码。
+func TestCheckAccountLoginInvalid(t *testing.T) {
+	c := newLoginTestAPIClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"code":-101,"message":"账号未登录"}`))
+	})
+
+	state, err := checkAccountLogin(context.Background(), c)
+	if err != nil {
+		t.Fatalf("code=-101 应被识别为登录失效而非探测失败，实际报错: %v", err)
+	}
+	if state != store.LoginStateInvalid {
+		t.Errorf("state = %q, 期望 %q", state, store.LoginStateInvalid)
+	}
+}
+
+// 核心行为：探测本身失败（这里模拟成 HTTP 层错误，代表网络不通等情形）
+// 绝不能被当作登录失效处理，否则用户会在断网时看到「账号已掉线」。
+func TestCheckAccountLoginDetectionFailureIsNotInvalid(t *testing.T) {
+	c := newLoginTestAPIClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+
+	state, err := checkAccountLogin(context.Background(), c)
+	if err == nil {
+		t.Fatal("探测失败应返回非 nil 的 err，供调用方与「登录失效」区分")
+	}
+	if state == store.LoginStateInvalid {
+		t.Error("探测失败被误判为登录失效——网络/服务端错误不等于账号掉线")
+	}
+	if state != store.LoginStateUnknown {
+		t.Errorf("state = %q, 期望 %q", state, store.LoginStateUnknown)
+	}
+}
+
+// 只认 -101 代表未登录，别的业务码一律当探测失败，不猜测。
+func TestCheckAccountLoginUnknownCodeIsDetectionFailure(t *testing.T) {
+	c := newLoginTestAPIClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"code":-400,"message":"请求错误"}`))
+	})
+
+	state, err := checkAccountLogin(context.Background(), c)
+	if err == nil {
+		t.Fatal("未在文档中确认过的业务码应当算探测失败，而不是断定为登录失效")
+	}
+	if state != store.LoginStateUnknown {
+		t.Errorf("state = %q, 期望 %q", state, store.LoginStateUnknown)
+	}
+}
+
+// newLoginCheckTestStore 建一个独立 schema 的真实存储，供登录态检测
+// 编排逻辑（loginCheckOnce/loginCheckLoop）的测试使用——它们直接依赖
+// *store.Store 的 ListAccounts/UpdateAccountLoginState。
+//
+// 用固定但独立于 newReloadTestStore 的 schema 名，理由与其注释相同：
+// 避免与 internal/httpapi 包并行测试时 DROP SCHEMA ... CASCADE 互相打架。
+func newLoginCheckTestStore(t *testing.T) *store.Store {
+	t.Helper()
+	dsn := os.Getenv("MAGICD_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("未设置 MAGICD_TEST_DATABASE_URL，跳过需要真实数据库的测试。\n" +
+			"本地起库：docker compose -f docker-compose.dev.yml up -d\n" +
+			"然后：export MAGICD_TEST_DATABASE_URL='postgres://magicd:magicd@localhost:5433/magicd?sslmode=disable'")
+	}
+
+	const schema = "m_magicd_login_check_test"
+	ctx := context.Background()
+
+	admin, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("连接数据库失败: %v", err)
+	}
+	if _, err := admin.Exec(ctx, `DROP SCHEMA IF EXISTS `+schema+` CASCADE`); err != nil {
+		admin.Close()
+		t.Fatalf("清理旧 schema 失败: %v", err)
+	}
+	if _, err := admin.Exec(ctx, `CREATE SCHEMA `+schema); err != nil {
+		admin.Close()
+		t.Fatalf("创建 schema 失败: %v", err)
+	}
+
+	var st *store.Store
+	t.Cleanup(func() {
+		if st != nil {
+			st.Close()
+		}
+		if _, err := admin.Exec(context.Background(),
+			`DROP SCHEMA IF EXISTS `+schema+` CASCADE`); err != nil {
+			t.Logf("清理 schema 失败: %v", err)
+		}
+		admin.Close()
+	})
+
+	st, err = store.OpenWithSchema(ctx, dsn, schema)
+	if err != nil {
+		t.Fatalf("打开存储失败: %v", err)
+	}
+	if err := st.Migrate(ctx); err != nil {
+		t.Fatalf("迁移失败: %v", err)
+	}
+	return st
+}
+
+// TestLoginCheckOnceWritesCheckerResults 验证 loginCheckOnce 把 loginChecker
+// 的判定结果原样落到对应账号身上，不会张冠李戴。
+func TestLoginCheckOnceWritesCheckerResults(t *testing.T) {
+	st := newLoginCheckTestStore(t)
+	ctx := context.Background()
+
+	owner, err := st.CreateUser(ctx, "张三", "密码123456", false)
+	if err != nil {
+		t.Fatalf("建用户报错: %v", err)
+	}
+	valid, err := st.CreateAccount(ctx, store.AccountInput{Name: "有效号", Cookie: "SESSDATA=a", OwnerID: owner.ID})
+	if err != nil {
+		t.Fatalf("建账号报错: %v", err)
+	}
+	if _, err := st.CreateAccount(ctx, store.AccountInput{Name: "失效号", Cookie: "SESSDATA=b", OwnerID: owner.ID}); err != nil {
+		t.Fatalf("建账号报错: %v", err)
+	}
+
+	check := func(_ context.Context, cookie string) (string, error) {
+		if cookie == valid.Cookie {
+			return store.LoginStateValid, nil
+		}
+		return store.LoginStateInvalid, nil
+	}
+
+	loginCheckOnce(ctx, st, check, slog.Default())
+
+	got1, err := st.GetAccountByName(ctx, "有效号")
+	if err != nil {
+		t.Fatalf("查询报错: %v", err)
+	}
+	if got1.LoginState != store.LoginStateValid {
+		t.Errorf("有效号 LoginState = %q, 期望 %q", got1.LoginState, store.LoginStateValid)
+	}
+	if got1.LoginCheckedAt == nil {
+		t.Error("检测完成后应记录 LoginCheckedAt")
+	}
+
+	got2, err := st.GetAccountByName(ctx, "失效号")
+	if err != nil {
+		t.Fatalf("查询报错: %v", err)
+	}
+	if got2.LoginState != store.LoginStateInvalid {
+		t.Errorf("失效号 LoginState = %q, 期望 %q", got2.LoginState, store.LoginStateInvalid)
+	}
+}
+
+// TestLoginCheckOnceOneAccountFailureDoesNotBlockOthers 是本任务里最关键的
+// 一条测试，钉住两件事：
+//  1. 探测失败（loginChecker 返回 err）绝不能被写成 LoginStateInvalid——
+//     网络不通不等于账号掉线；
+//  2. 一个账号探测失败不能让循环提前退出，其余账号必须照常被检测到。
+//
+// 用变异测试验证过它的有效性：把 loginCheckOnce 里「err != nil 时仍按
+// checker 返回的 state 写库」改成「err != nil 就强制写 LoginStateInvalid」，
+// 本测试的第一个断言会失败（见任务报告）。
+func TestLoginCheckOnceOneAccountFailureDoesNotBlockOthers(t *testing.T) {
+	st := newLoginCheckTestStore(t)
+	ctx := context.Background()
+
+	owner, err := st.CreateUser(ctx, "张三", "密码123456", false)
+	if err != nil {
+		t.Fatalf("建用户报错: %v", err)
+	}
+	bad, err := st.CreateAccount(ctx, store.AccountInput{Name: "坏号", Cookie: "SESSDATA=bad", OwnerID: owner.ID})
+	if err != nil {
+		t.Fatalf("建账号报错: %v", err)
+	}
+	if _, err := st.CreateAccount(ctx, store.AccountInput{Name: "好号", Cookie: "SESSDATA=good", OwnerID: owner.ID}); err != nil {
+		t.Fatalf("建账号报错: %v", err)
+	}
+
+	check := func(_ context.Context, cookie string) (string, error) {
+		if cookie == bad.Cookie {
+			return store.LoginStateUnknown, errors.New("网络错误：连接超时")
+		}
+		return store.LoginStateValid, nil
+	}
+
+	loginCheckOnce(ctx, st, check, slog.Default())
+
+	gotBad, err := st.GetAccountByName(ctx, "坏号")
+	if err != nil {
+		t.Fatalf("查询报错: %v", err)
+	}
+	if gotBad.LoginState == store.LoginStateInvalid {
+		t.Error("探测失败的账号被记成了登录失效——网络错误不等于账号掉线")
+	}
+	if gotBad.LoginState != store.LoginStateUnknown {
+		t.Errorf("坏号 LoginState = %q, 期望 %q", gotBad.LoginState, store.LoginStateUnknown)
+	}
+
+	gotGood, err := st.GetAccountByName(ctx, "好号")
+	if err != nil {
+		t.Fatalf("查询报错: %v", err)
+	}
+	if gotGood.LoginState != store.LoginStateValid {
+		t.Errorf("坏号探测失败不该影响好号：好号 LoginState = %q, 期望 %q（说明循环提前退出了）",
+			gotGood.LoginState, store.LoginStateValid)
+	}
+}
+
+// TestLoginCheckLoopRunsImmediatelyAndRespectsCancellation 验证
+// loginCheckLoop 与 purgeLoop 同样的两条约束：启动时立刻做一次检测
+// （不等第一个 10 分钟的 tick），以及 ctx 取消后能干净退出。
+func TestLoginCheckLoopRunsImmediatelyAndRespectsCancellation(t *testing.T) {
+	st := newLoginCheckTestStore(t)
+	ctx := context.Background()
+
+	owner, err := st.CreateUser(ctx, "张三", "密码123456", false)
+	if err != nil {
+		t.Fatalf("建用户报错: %v", err)
+	}
+	if _, err := st.CreateAccount(ctx, store.AccountInput{Name: "小号", Cookie: "SESSDATA=x", OwnerID: owner.ID}); err != nil {
+		t.Fatalf("建账号报错: %v", err)
+	}
+
+	var calls int32
+	check := func(context.Context, string) (string, error) {
+		atomic.AddInt32(&calls, 1)
+		return store.LoginStateValid, nil
+	}
+
+	runCtx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		loginCheckLoop(runCtx, st, check, slog.Default())
+		close(done)
+	}()
+
+	// 轮询等第一次检测跑完，而不是固定 sleep：loginCheckInterval 是
+	// 10 分钟量级，若这里等的是 tick 而不是启动时的立即检测，测试会
+	// 一直卡到超时，能明确暴露「没有立刻检测」这个问题。
+	deadline := time.Now().Add(3 * time.Second)
+	for atomic.LoadInt32(&calls) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("启动时应立刻做一次检测，而不是等第一个 10 分钟的 tick 才开始")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("ctx 取消后 loginCheckLoop 应尽快退出，而不是继续等下一个 tick")
 	}
 }

@@ -248,3 +248,83 @@ func TestDeleteMissingAccount(t *testing.T) {
 		t.Errorf("应返回 ErrNotFound，实际: %v", err)
 	}
 }
+
+// 新建账号从未被检测过，登录态应是三态里的「未知」，而不是默认判定为有效
+// 或失效——这两个判断都没有依据。
+func TestCreateAccountDefaultsToUnknownLoginState(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	owner := mustUser(t, s, "张三")
+
+	a, err := s.CreateAccount(ctx, AccountInput{Name: "主播号", Cookie: "c", OwnerID: owner})
+	if err != nil {
+		t.Fatalf("创建账号报错: %v", err)
+	}
+	if a.LoginState != LoginStateUnknown {
+		t.Errorf("LoginState = %q, 期望 %q", a.LoginState, LoginStateUnknown)
+	}
+	if a.LoginCheckedAt != nil {
+		t.Errorf("从未检测过，LoginCheckedAt 应为 nil，实际 %v", a.LoginCheckedAt)
+	}
+}
+
+func TestUpdateAccountLoginStateWritesStateAndTimestamp(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	owner := mustUser(t, s, "张三")
+
+	if _, err := s.CreateAccount(ctx, AccountInput{Name: "主播号", Cookie: "c", OwnerID: owner}); err != nil {
+		t.Fatalf("创建账号报错: %v", err)
+	}
+
+	before := time.Now()
+	if err := s.UpdateAccountLoginState(ctx, "主播号", LoginStateValid); err != nil {
+		t.Fatalf("写入登录态报错: %v", err)
+	}
+
+	got, err := s.GetAccountByName(ctx, "主播号")
+	if err != nil {
+		t.Fatalf("查询账号报错: %v", err)
+	}
+	if got.LoginState != LoginStateValid {
+		t.Errorf("LoginState = %q, 期望 %q", got.LoginState, LoginStateValid)
+	}
+	if got.LoginCheckedAt == nil || got.LoginCheckedAt.Before(before.Add(-time.Second)) {
+		t.Errorf("LoginCheckedAt = %v, 期望接近 %v", got.LoginCheckedAt, before)
+	}
+
+	// 再写一次 invalid，验证状态可以被覆盖（不是只能单向流转）
+	if err := s.UpdateAccountLoginState(ctx, "主播号", LoginStateInvalid); err != nil {
+		t.Fatalf("二次写入登录态报错: %v", err)
+	}
+	got2, err := s.GetAccountByName(ctx, "主播号")
+	if err != nil {
+		t.Fatalf("查询账号报错: %v", err)
+	}
+	if got2.LoginState != LoginStateInvalid {
+		t.Errorf("LoginState = %q, 期望 %q", got2.LoginState, LoginStateInvalid)
+	}
+}
+
+func TestUpdateAccountLoginStateRejectsUnknownValue(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	owner := mustUser(t, s, "张三")
+	if _, err := s.CreateAccount(ctx, AccountInput{Name: "主播号", Cookie: "c", OwnerID: owner}); err != nil {
+		t.Fatalf("创建账号报错: %v", err)
+	}
+
+	if err := s.UpdateAccountLoginState(ctx, "主播号", "已过期"); err == nil {
+		t.Error("非法的登录态取值应被拒绝")
+	}
+}
+
+func TestUpdateAccountLoginStateOnMissingAccount(t *testing.T) {
+	// 检测循环遍历账号列表期间账号被删掉是正常竞态，不应报错——
+	// UpdateAccountCookie 遇到不存在的账号会报错是因为那是用户显式操作，
+	// 这里是后台轮询，语义不同。
+	s := testStore(t)
+	if err := s.UpdateAccountLoginState(context.Background(), "没这个号", LoginStateValid); err != nil {
+		t.Errorf("账号已不存在不应视为错误，实际: %v", err)
+	}
+}
