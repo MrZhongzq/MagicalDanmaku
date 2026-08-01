@@ -1,4 +1,4 @@
-import{R as de,b2 as ce,b3 as ue,a as H,m as i,b4 as E,d as N,b as l,Y as L,e as he,b5 as W,h as a,q as x,u as be,f as I,aE as fe,r as K,x as ve,b6 as ge,b7 as we,n as F,X as M,A as y,b8 as A,ah as s,t as me}from"./index-CTh2PwO9.js";import{a as pe}from"./_plugin-vue_export-helper-Df3W42YB.js";function xe(e){const{primaryColor:d,opacityDisabled:f,borderRadius:n,textColor3:v}=e;return Object.assign(Object.assign({},ce),{iconColor:v,textColor:"white",loadingColor:d,opacityDisabled:f,railColor:"rgba(0, 0, 0, .14)",railColorActive:d,buttonBoxShadow:"0 1px 4px 0 rgba(0, 0, 0, 0.3), inset 0 0 1px 0 rgba(0, 0, 0, 0.05)",buttonColor:"#FFF",railBorderRadiusSmall:n,railBorderRadiusMedium:n,railBorderRadiusLarge:n,buttonBorderRadiusSmall:n,buttonBorderRadiusMedium:n,buttonBorderRadiusLarge:n,boxShadowFocus:`0 0 0 2px ${ue(d,{alpha:.2})}`})}const ye={common:de,self:xe},ke=H("switch",`
+import{R as de,b3 as ce,b4 as ue,a as H,m as i,b5 as L,d as N,b as l,Y as E,e as he,b6 as W,h as a,q as x,u as be,f as I,ak as fe,r as K,x as ve,b7 as ge,b8 as we,n as F,X as M,A as y,b9 as A,at as s,t as me}from"./index-DYVSScmg.js";import{a as pe}from"./_plugin-vue_export-helper-DuvWluDz.js";function xe(e){const{primaryColor:d,opacityDisabled:f,borderRadius:n,textColor3:v}=e;return Object.assign(Object.assign({},ce),{iconColor:v,textColor:"white",loadingColor:d,opacityDisabled:f,railColor:"rgba(0, 0, 0, .14)",railColorActive:d,buttonBoxShadow:"0 1px 4px 0 rgba(0, 0, 0, 0.3), inset 0 0 1px 0 rgba(0, 0, 0, 0.05)",buttonColor:"#FFF",railBorderRadiusSmall:n,railBorderRadiusMedium:n,railBorderRadiusLarge:n,buttonBorderRadiusSmall:n,buttonBorderRadiusMedium:n,buttonBorderRadiusLarge:n,boxShadowFocus:`0 0 0 2px ${ue(d,{alpha:.2})}`})}const ye={common:de,self:xe},ke=H("switch",`
  height: var(--n-height);
  min-width: var(--n-width);
  vertical-align: middle;
@@ -29,7 +29,7 @@ import{R as de,b2 as ce,b3 as ue,a as H,m as i,b4 as E,d as N,b as l,Y as L,e as
  font-size: calc(var(--n-button-width) - 4px);
  color: var(--n-loading-color);
  transition: color .3s var(--n-bezier);
- `,[E({left:"50%",top:"50%",originalTransform:"translateX(-50%) translateY(-50%)"})]),i("checked, unchecked",`
+ `,[L({left:"50%",top:"50%",originalTransform:"translateX(-50%) translateY(-50%)"})]),i("checked, unchecked",`
  transition: color .3s var(--n-bezier);
  color: var(--n-text-color);
  box-sizing: border-box;
@@ -49,7 +49,7 @@ import{R as de,b2 as ce,b3 as ue,a as H,m as i,b4 as E,d as N,b as l,Y as L,e as
  padding-left: calc(1.25 * var(--n-rail-height) - var(--n-offset));
  `),N("&:focus",[i("rail",`
  box-shadow: var(--n-box-shadow-focus);
- `)]),l("round",[i("rail","border-radius: calc(var(--n-rail-height) / 2);",[i("button","border-radius: calc(var(--n-button-height) / 2);")])]),L("disabled",[L("icon",[l("rubber-band",[l("pressed",[i("rail",[i("button","max-width: var(--n-button-width-pressed);")])]),i("rail",[N("&:active",[i("button","max-width: var(--n-button-width-pressed);")])]),l("active",[l("pressed",[i("rail",[i("button","left: calc(100% - var(--n-offset) - var(--n-button-width-pressed));")])]),i("rail",[N("&:active",[i("button","left: calc(100% - var(--n-offset) - var(--n-button-width-pressed));")])])])])])]),l("active",[i("rail",[i("button","left: calc(100% - var(--n-button-width) - var(--n-offset))")])]),i("rail",`
+ `)]),l("round",[i("rail","border-radius: calc(var(--n-rail-height) / 2);",[i("button","border-radius: calc(var(--n-button-height) / 2);")])]),E("disabled",[E("icon",[l("rubber-band",[l("pressed",[i("rail",[i("button","max-width: var(--n-button-width-pressed);")])]),i("rail",[N("&:active",[i("button","max-width: var(--n-button-width-pressed);")])]),l("active",[l("pressed",[i("rail",[i("button","left: calc(100% - var(--n-offset) - var(--n-button-width-pressed));")])]),i("rail",[N("&:active",[i("button","left: calc(100% - var(--n-offset) - var(--n-button-width-pressed));")])])])])])]),l("active",[i("rail",[i("button","left: calc(100% - var(--n-button-width) - var(--n-offset))")])]),i("rail",`
  overflow: hidden;
  height: var(--n-rail-height);
  min-width: var(--n-rail-width);
@@ -74,7 +74,7 @@ import{R as de,b2 as ce,b3 as ue,a as H,m as i,b4 as E,d as N,b as l,Y as L,e as
  justify-content: center;
  align-items: center;
  line-height: 1;
- `,[E()]),i("button",`
+ `,[L()]),i("button",`
  align-items: center; 
  top: var(--n-offset);
  left: var(--n-offset);
