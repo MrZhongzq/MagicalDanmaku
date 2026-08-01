@@ -32,8 +32,16 @@ describe('Shell', () => {
     localStorage.clear()
   })
 
-  // 菜单里的「弹幕姬」等六项还没接路由（「房管」在 Task 6 接上了，
-  // 这里换一个还没接的 key）。router.push({ name: 'danmaku' }) 找不到
+  // 用一个**永远不会被注册**的哨兵键，不要借用真实菜单项的 key。
+  //
+  // 借用真实 key 的话，每实现一页就要来改一次这条测试——Task 6 把
+  // 'moderation' 接成真路由时就撞过一次，表现是异步组件导航在测试结束前
+  // 没完成，泄漏一个 history is not defined 的未处理 rejection 到后面的
+  // 测试文件里，而且**只在 --sequence.shuffle 下可见**。等八个页面全做完，
+  // 也就没有可借用的键了。
+  //
+  // 这条测试要钉的性质是「go() 对未注册的 name 不抛异常」，与具体是哪个
+  // key 无关。router.push({ name: ... }) 找不到
   // 这个 name 时 vue-router 是同步抛 MATCHER_NOT_FOUND——通配符
   // /:pathMatch(.*)* 只兜未解析的 path，不兜未解析的 name。go() 是从
   // NMenu 的 @update:value 事件调的，Vue 在 dev 模式下会把这个同步异常
@@ -56,7 +64,7 @@ describe('Shell', () => {
     await flushPromises()
 
     const menu = wrapper.findComponent(NMenu)
-    expect(() => menu.vm.$emit('update:value', 'danmaku')).not.toThrow()
+    expect(() => menu.vm.$emit('update:value', '__never_registered__')).not.toThrow()
 
     await flushPromises()
     // 没有跳转：路由还停在 accounts
