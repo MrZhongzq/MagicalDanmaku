@@ -641,4 +641,50 @@ describe('Custom 页：保存（Task 13 接上 useDraft）', () => {
       expect(wrapper.text()).toContain(reloadErrorMessage)
     },
   )
+
+  it(
+    '【审查追加：钉住"第三态不跨绑定泄漏"】在绑定 A 上保存触发第三态提示后切到绑定 B，' +
+      '提示必须清空',
+    async () => {
+      const reloadErrorMessage = '重载失败，仍在用上一份配置运行: 规则 新规则 的正则非法'
+      setupStores()
+      const bindings = useBindingsStore()
+      bindings.list = [
+        { ...绑定, id: 1, roomId: '9000', permissions: [...绑定.permissions] },
+        { ...绑定, id: 2, roomId: '9001', permissions: [...绑定.permissions] },
+      ]
+      bindings.select(1)
+
+      const f = vi.fn().mockImplementation((url: string, init?: RequestInit) => {
+        const method = init?.method ?? 'GET'
+        if (url === '/api/meta/event-types') return Promise.resolve(ok(FULL_EVENT_TYPES))
+        if (url === '/api/meta/action-types') return Promise.resolve(ok(FULL_ACTION_TYPES))
+        if (url === '/api/meta/operators') return Promise.resolve(ok(FULL_OPERATORS))
+        if (url === '/api/meta/aggregate-by') return Promise.resolve(ok(FULL_AGGREGATE_BY))
+        if (url === '/api/bindings/1/rules' && method === 'GET') return Promise.resolve(ok([]))
+        if (url === '/api/bindings/1/rules' && method === 'PUT') {
+          return Promise.resolve(ok({ status: 'ok' }))
+        }
+        if (url === '/api/bindings/1/reload' && method === 'POST') {
+          return Promise.resolve(err(422, reloadErrorMessage))
+        }
+        if (url === '/api/bindings/2/rules' && method === 'GET') return Promise.resolve(ok([]))
+        throw new Error(`unexpected fetch: ${method} ${url}`)
+      })
+      vi.stubGlobal('fetch', f)
+
+      const wrapper = await mountCustom()
+      await addRuleWithName(wrapper, '新规则')
+
+      const saveBtn = () => wrapper.findAll('button').find((b) => b.text() === '保存并生效')!
+      await saveBtn().trigger('click')
+      await flushPromises()
+      expect(wrapper.text()).toContain('已保存到数据库，但重载失败')
+
+      bindings.select(2)
+      await flushPromises()
+
+      expect(wrapper.text()).not.toContain('已保存到数据库，但重载失败')
+    },
+  )
 })

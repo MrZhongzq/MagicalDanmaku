@@ -735,6 +735,12 @@ async function loadRules() {
     Object.assign(shareDraft, parseShareDraft(claimRule(rules, SHARE_RULE_NAME)))
     Object.assign(guardDraft, parseGuardDraft(claimRule(rules, GUARD_RULE_NAME)))
     markSaved()
+    // 换了绑定就把上一个绑定的「保存了一半」提示清掉。
+    //
+    // 不清的话：在甲房间保存失败 -> 切到乙房间 -> 乙房间顶上挂着甲房间的
+    // 警告。更糟的是操作者在乙房间把它关掉，甲房间那个**未解决**的重载
+    // 失败信号也跟着没了——而甲房间的引擎确实还在跑旧规则。
+    partialFailureMessage.value = null
   } catch (e) {
     message.error(e instanceof ApiError ? e.message : '加载规则失败')
   } finally {

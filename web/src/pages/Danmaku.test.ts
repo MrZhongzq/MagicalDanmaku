@@ -530,6 +530,50 @@ describe('Danmaku 页面：保存（Task 13 接上 useDraft）', () => {
       expect(wrapper.text()).toContain(reloadErrorMessage)
     },
   )
+
+  it(
+    '【审查追加：钉住"第三态不跨绑定泄漏"】在绑定 A 上保存触发第三态提示后切到绑定 B，' +
+      '提示必须清空——不清的话，操作者在 B 房间关掉这条提示，会把 A 房间那个' +
+      '"引擎其实还在跑旧配置"的未解决信号一并清没',
+    async () => {
+      const reloadErrorMessage = '重载失败，仍在用上一份配置运行: 规则 内置/进房欢迎 的正则非法'
+      const f = vi.fn().mockImplementation((url: string, init?: RequestInit) => {
+        const method = init?.method ?? 'GET'
+        if (url === '/api/bindings/1/rules' && method === 'GET') return Promise.resolve(ok([]))
+        if (url === '/api/bindings/1/rules' && method === 'PUT') {
+          return Promise.resolve(ok({ status: 'ok' }))
+        }
+        if (url === '/api/bindings/1/reload' && method === 'POST') {
+          return Promise.resolve(err(422, reloadErrorMessage))
+        }
+        if (url === '/api/bindings/2/rules' && method === 'GET') return Promise.resolve(ok([]))
+        throw new Error(`unexpected fetch: ${method} ${url}`)
+      })
+      vi.stubGlobal('fetch', f)
+      const { bindings } = setupStores()
+      bindings.list = [
+        { ...绑定, id: 1, roomId: '9000', permissions: [...绑定.permissions] },
+        { ...绑定, id: 2, roomId: '9001', permissions: [...绑定.permissions] },
+      ]
+      bindings.select(1)
+      const wrapper = await mountDanmaku()
+
+      // 在绑定 A（id=1）上触发一次「PUT 成功但 reload 失败」
+      const firstTemplateInput = wrapper.find('input[placeholder="单人欢迎语模板"]')
+      await firstTemplateInput.setValue('改过的模板')
+      await flushPromises()
+      const saveBtn = () => wrapper.findAll('button').find((b) => b.text() === '保存并生效')!
+      await saveBtn().trigger('click')
+      await flushPromises()
+      expect(wrapper.text()).toContain('已保存到数据库，但重载失败')
+
+      // 切到绑定 B（id=2）——loadRules 成功之后，A 房间的第三态提示必须清空
+      bindings.select(2)
+      await flushPromises()
+
+      expect(wrapper.text()).not.toContain('已保存到数据库，但重载失败')
+    },
+  )
 })
 
 // ============================================================

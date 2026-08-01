@@ -432,6 +432,11 @@ async function loadRules() {
     const drafts = rules.filter(isCustomRule).map(parseCustomRuleDraft)
     customRules.splice(0, customRules.length, ...drafts)
     markSaved()
+    // 换了绑定就把上一个绑定的「保存了一半」提示清掉——理由见
+    // Danmaku.vue 同一处注释：不清的话，操作者在新绑定关掉这条提示，会把
+    // 旧绑定那个未解决的重载失败信号一并清没，而旧绑定的引擎其实还在
+    // 跑旧配置。
+    partialFailureMessage.value = null
   } catch (e) {
     message.error(e instanceof ApiError ? e.message : '加载规则失败')
   } finally {
