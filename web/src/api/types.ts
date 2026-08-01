@@ -13,17 +13,46 @@ export type Permission =
   'rule:read' | 'rule:write' | 'danmaku:send' | 'user:block' | 'member:manage' | 'event:read'
 
 export interface User {
+  id: number
   username: string
   isAdmin: boolean
   createdAt: string
 }
 
+/** 当前用户的一条授权。`GET /api/auth/me` 返回它们的数组。 */
+export interface Membership {
+  bindingId: number
+  accountName: string
+  roomId: string
+  permissions: Permission[]
+}
+
+/**
+ * `GET /api/auth/me` 的响应。
+ *
+ * **注意它不是裸的 User。** 后端返回 `{user, memberships}` 两个字段，
+ * 直接当成 User 用的话 `username` 与 `isAdmin` 都会是 undefined——
+ * 界面看起来登录成功但用户名空着、管理员的管理入口消失，而且不报任何错。
+ */
+export interface MeResponse {
+  user: User
+  memberships: Membership[]
+}
+
 export interface Account {
+  id: number
   name: string
   uid: string
   rateLimitMs: number
   maxLength: number
   ownerId: number
+  /**
+   * 调用者是不是这个账号的所有者（管理员也为 true）。
+   *
+   * 前端靠它决定显不显示编辑与删除按钮。**不要拿 ownerId 去比**——
+   * 账号级操作的判定在后端是「所有者或管理员」，前端重算一遍必然漂。
+   */
+  isOwner: boolean
   createdAt: string
   // 注意：后端刻意不返回 cookie 字段。前端不该有任何地方去接它。
 }
