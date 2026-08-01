@@ -104,6 +104,16 @@ type accountRuntime struct {
 type roomRuntime struct {
 	engine atomic.Pointer[rules.Engine] // 唯一会被热替换的东西
 
+	// reloadMu 串行化整个 Reload。
+	//
+	// engine 的 Swap 是原子的，Scheduler 内部也有自己的锁，但
+	// 「构造 → Swap → 重建定时任务 → 关旧引擎」这一串复合操作不是。
+	// 两次并发 Reload 的 Swap 决定了最终哪个引擎生效，而各自的
+	// RemoveByPrefix+Add 可以排在对方之后——调度器里会留下指向
+	// 一个已被 Close 的引擎的条目，该绑定的定时规则从此静默停摆，
+	// 不崩溃也不报错。两个人同时按保存就够了。
+	reloadMu sync.Mutex
+
 	binding   *account.Binding
 	client    *bilibili.Client
 	bot       *roomBot
@@ -175,7 +185,16 @@ func (rt *roomRuntime) recordManual(a rules.Action, vars map[string]any, err err
 //     关闭的引擎上被丢掉
 //   - 旧引擎关掉是为了结算未决的合并窗口，那里面攒着待发的欢迎语。
 //     这时主 ctx 还活着（roomBot 用的就是它），补发能真的发出去
+//
+// 整个方法体用 reloadMu 串行化：Swap 本身是原子的，但「构造 → Swap →
+// 重建定时任务 → 关旧引擎」这一串复合操作不是。两次并发 Reload 若不
+// 串行化，Swap 决定了最终哪个引擎生效，而各自的 RemoveByPrefix+Add
+// 可以交错完成——调度器里可能留下一个指向已被 Close 的旧引擎的条目，
+// 定时规则从此静默停摆，不崩溃也不报错。
 func (rt *roomRuntime) Reload(ctx context.Context) error {
+	rt.reloadMu.Lock()
+	defer rt.reloadMu.Unlock()
+
 	cfgs, err := rt.st.LoadRunConfig(ctx)
 	if err != nil {
 		return fmt.Errorf("读取配置失败: %w", err)
@@ -208,7 +227,14 @@ func (rt *roomRuntime) Reload(ctx context.Context) error {
 		return fmt.Errorf("规则非法: %w", err)
 	}
 
-	// 再切换。这一刻起新事件都进新引擎
+	// 先切换，再关旧引擎。**顺序不能反。**
+	//
+	// 反过来的话，Close 与 Swap 之间到达的事件会打在已关闭的引擎上——
+	// Engine.Handle 开头查 closed 直接丢弃（rules/engine.go:130），
+	// 事件就这么没了，不报错也不重试。
+	//
+	// 这个顺序没有专门的测试钉住：要确定性复现得往生产代码里塞一个
+	// 仅测试可见的同步钩子，代价大于收益。它靠这条注释和审查守着。
 	prev := rt.engine.Swap(next)
 
 	// 定时规则整组换掉。RemoveByPrefix 就是为这一步加的——不移除的话，

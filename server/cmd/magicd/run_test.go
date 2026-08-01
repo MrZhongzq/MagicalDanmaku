@@ -436,13 +436,100 @@ func TestRoomRuntimeReloadSwapsEngine(t *testing.T) {
 	}
 }
 
+// TestRoomRuntimeReloadFlushesPendingAggregateWindow 验证 Reload 收尾时
+// 旧引擎的 Close() 真的结算了未决的合并窗口——那里面攒着待发的欢迎语。
+//
+// 这条不能用 cmd/magicd 里已有的 TestCloseAllUsesShutdownBudgetForPendingSends
+// 代替：那条测的是关停路径，先调用了 roomBot.setCtx(shutdownCtx) 换上
+// 一个有超时预算、脱离取消链的 ctx，前提是「主 ctx 已被取消」。Reload
+// 路径完全不调 setCtx，依赖的是另一个前提——「主 ctx 仍然存活」（Reload
+// 由 HTTP 请求触发时，进程根本没有在关停）。两条路径的前提不同，一条
+// 测试不能替另一条作证。
+//
+// 手法：给旧引擎挂一条窗口长达 1 小时（必然不会自然到期）的聚合规则，
+// 喂一个进场事件让它进入待决窗口；然后调用 Reload。若 Reload 收尾时
+// 真的 Close 了旧引擎，Aggregator.Close() 会同步结算并通过 bot 把
+// 欢迎语发出去；若收尾时机不对或压根没关旧引擎，bot 什么也收不到。
+func TestRoomRuntimeReloadFlushesPendingAggregateWindow(t *testing.T) {
+	st, _, bindingID := newReloadTestStore(t)
+	ctx := context.Background()
+
+	// Reload 要能读到合法配置，规则内容与本测试验证的行为无关
+	if err := st.ReplaceRules(ctx, bindingID, []spec.Rule{{
+		Name: "规则",
+		On:   []string{"danmaku"},
+		Do:   []spec.Action{{Type: "danmaku", Template: []string{"响应"}}},
+	}}); err != nil {
+		t.Fatalf("写规则报错: %v", err)
+	}
+
+	stub := &bindingStub{}
+	bot := newRoomBot(stub, ctx)
+	activity := logging.NewActivityWriter(logging.ActivityWriterOptions{
+		Flush: func(context.Context, []store.ActivityRow) error { return nil },
+	})
+	t.Cleanup(activity.Close)
+
+	oldEngine, err := rules.NewEngine(rules.EngineOptions{
+		Label: "小号@123", RoomID: "123", Bot: bot,
+		Rules: []rules.Rule{{
+			Name:      "进场欢迎",
+			Enabled:   true,
+			On:        []event.Type{event.TypeUserEnter},
+			Aggregate: &rules.AggregateSpec{Window: time.Hour, By: rules.AggregateByType},
+			Do:        []rules.Action{{Type: rules.ActionDanmaku, Template: []string{"欢迎"}}},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("创建旧引擎报错: %v", err)
+	}
+
+	rt := &roomRuntime{
+		bot: bot, sink: activity.Sink(1, bindingID, "123"), storage: rules.NewMemStorage(),
+		label: "小号@123", roomID: "123", bindingID: bindingID,
+		st: st, sched: scheduler.New(slog.Default()), log: slog.Default(),
+	}
+	rt.engine.Store(oldEngine)
+
+	// 进场事件进入待决窗口，1 小时内不会自然结算
+	rt.Engine().Handle(event.Event{
+		Type:    event.TypeUserEnter,
+		Payload: event.UserEnter{User: event.User{UID: "1", Username: "观众"}},
+	})
+
+	stub.mu.Lock()
+	before := len(stub.sent)
+	stub.mu.Unlock()
+	if before != 0 {
+		t.Fatalf("窗口结算前不该有发送，实际 = %d 条", before)
+	}
+
+	if err := rt.Reload(ctx); err != nil {
+		t.Fatalf("Reload 报错: %v", err)
+	}
+
+	stub.mu.Lock()
+	sent := append([]string{}, stub.sent...)
+	stub.mu.Unlock()
+
+	if len(sent) != 1 || sent[0] != "欢迎" {
+		t.Fatalf("Reload 应结算旧引擎未决的合并窗口并把欢迎语发出去，实际发送 = %v", sent)
+	}
+}
+
 // TestRoomRuntimeConcurrentReloadAndEventFanoutIsRaceFree 用 -race 验证
 // run.go 里事件扇出的 goroutine（每条事件都调 rt.Engine()，不缓存）与
-// Reload 的 atomic.Pointer 替换是并发安全的。
+// Reload 的 atomic.Pointer 替换是并发安全的，且多个 Reload 之间本身
+// 也要互相安全——两个人同时按保存（或一个人双击）时，reloadMu 必须
+// 把「构造 → Swap → 重建定时任务 → 关旧引擎」这一串复合操作串行化，
+// 否则调度器里可能留下一个指向已被 Close 的旧引擎的条目，定时规则
+// 从此静默停摆。
 //
-// 这不是行为断言（谁先谁后不保证），纯粹是给竞态检测器的靶子：
-// 一边不停地 rt.Engine().Handle(ev)，一边不停地 rt.Reload()，
-// 若哪处偷偷缓存了 *rules.Engine 或漏了原子操作，-race 会报出来。
+// 这不是行为断言（谁的 Reload 最终生效不保证，只要求不 panic、不
+// deadlock、不留悬空状态），纯粹是给竞态检测器的靶子：一边不停地
+// rt.Engine().Handle(ev)，一边起多个 goroutine **真正并发地**调用
+// rt.Reload()，若哪处偷偷缓存了 *rules.Engine、漏了原子操作，或者
+// reloadMu 没有把复合操作真正串行化，-race 会报出来。
 func TestRoomRuntimeConcurrentReloadAndEventFanoutIsRaceFree(t *testing.T) {
 	st, _, bindingID := newReloadTestStore(t)
 	ctx := context.Background()
@@ -502,15 +589,29 @@ func TestRoomRuntimeConcurrentReloadAndEventFanoutIsRaceFree(t *testing.T) {
 		}
 	}()
 
-	// 并发反复 Reload，模拟操作者连续点保存
-	for i := 0; i < 20; i++ {
-		if err := rt.Reload(ctx); err != nil {
-			close(stop)
-			wg.Wait()
-			t.Fatalf("Reload 报错: %v", err)
-		}
+	// 多个 goroutine 真正并发地反复 Reload，模拟多人同时按保存
+	const reloaders = 5
+	const reloadsPerGoroutine = 10
+	var reloadWG sync.WaitGroup
+	errCh := make(chan error, reloaders*reloadsPerGoroutine)
+	reloadWG.Add(reloaders)
+	for i := 0; i < reloaders; i++ {
+		go func() {
+			defer reloadWG.Done()
+			for j := 0; j < reloadsPerGoroutine; j++ {
+				if err := rt.Reload(ctx); err != nil {
+					errCh <- err
+				}
+			}
+		}()
 	}
+	reloadWG.Wait()
+	close(errCh)
 
 	close(stop)
 	wg.Wait()
+
+	for err := range errCh {
+		t.Errorf("并发 Reload 报错: %v", err)
+	}
 }

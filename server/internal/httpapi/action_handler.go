@@ -77,7 +77,8 @@ func (s *Server) runtimeFor(w http.ResponseWriter, bindingID int64, label string
 	if !ok {
 		// 503 而非 404：绑定是存在的，只是当前没在跑
 		respondError(w, http.StatusServiceUnavailable,
-			"绑定 %s 当前未在运行，可能是机器人尚未启动、该绑定被停用，或改动后还没重启", label)
+			"绑定 %s 当前未在运行，可能是机器人尚未启动，或该绑定被停用；"+
+				"若只是改了规则，保存后点「重载」即可，不需要重启", label)
 		return nil, false
 	}
 	return rt, true
