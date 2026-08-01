@@ -70,6 +70,8 @@ type Aggregate struct {
 type Action struct {
 	Type     string   `yaml:"type"     json:"type"`
 	Template []string `yaml:"template" json:"template,omitempty"`
-	Hours    int      `yaml:"hours"    json:"hours,omitempty"`
-	Script   string   `yaml:"script"   json:"script,omitempty"`
+	// Pick 控制 Template 有多条时怎么挑："random"（默认）或 "sequential"。
+	Pick   string `yaml:"pick"     json:"pick,omitempty"`
+	Hours  int    `yaml:"hours"    json:"hours,omitempty"`
+	Script string `yaml:"script"   json:"script,omitempty"`
 }

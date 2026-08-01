@@ -133,6 +133,26 @@ func TestActionValidateRejectsUnknownType(t *testing.T) {
 	}
 }
 
+func TestActionValidateAcceptsKnownPickValues(t *testing.T) {
+	for _, pick := range []string{"", PickRandom, PickSequential} {
+		a := Action{Type: ActionDanmaku, Template: []string{"x"}, Pick: pick}
+		if err := a.Validate(); err != nil {
+			t.Errorf("pick=%q 不应报错: %v", pick, err)
+		}
+	}
+}
+
+func TestActionValidateRejectsUnknownPick(t *testing.T) {
+	a := Action{Type: ActionDanmaku, Template: []string{"x"}, Pick: "不存在的取法"}
+	err := a.Validate()
+	if err == nil {
+		t.Fatal("未知的 pick 取值应当报错")
+	}
+	if !strings.Contains(err.Error(), PickRandom) || !strings.Contains(err.Error(), PickSequential) {
+		t.Errorf("错误信息应列出合法值 %q 与 %q，实际: %v", PickRandom, PickSequential, err)
+	}
+}
+
 func TestAggregateSpecValidate(t *testing.T) {
 	ok := AggregateSpec{Window: 2 * time.Second, By: AggregateByType}
 	if err := ok.Validate(); err != nil {

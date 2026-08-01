@@ -19,6 +19,15 @@ const (
 	ActionLog     ActionType = "log"     // 只记日志，用于调试规则
 )
 
+// Pick 决定一个 danmaku 动作有多条模板时怎么挑。
+//
+// 空串或 PickRandom：随机挑一条（默认，与历史行为一致）。
+// PickSequential：按顺序轮流用，到末尾回到第一条。
+const (
+	PickRandom     = "random"
+	PickSequential = "sequential"
+)
+
 // AggregateBy 是合并窗口的分组键。
 type AggregateBy string
 
@@ -156,8 +165,13 @@ func (c Condition) Validate() error {
 type Action struct {
 	Type ActionType
 
-	// Type == ActionDanmaku 时使用，多条则随机挑一条
+	// Type == ActionDanmaku 时使用，多条则按 Pick 指定的方式挑一条
 	Template []string
+
+	// Type == ActionDanmaku 时使用，控制 Template 有多条时怎么挑，
+	// 见 PickRandom / PickSequential。空串等同 PickRandom，
+	// 与引入本字段之前的历史配置兼容。
+	Pick string
 
 	// Type == ActionBlock 时使用，禁言小时数
 	Hours int
@@ -172,6 +186,12 @@ func (a Action) Validate() error {
 	case ActionDanmaku:
 		if len(a.Template) == 0 {
 			return fmt.Errorf("danmaku 动作必须提供至少一条模板")
+		}
+		switch a.Pick {
+		case "", PickRandom, PickSequential:
+			// 合法取值，空串等同 PickRandom
+		default:
+			return fmt.Errorf("pick 取值非法 %q，合法值为 %q 或 %q", a.Pick, PickRandom, PickSequential)
 		}
 	case ActionScript:
 		if a.Script == "" {

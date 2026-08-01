@@ -91,6 +91,7 @@ func (r Rule) ToRule() (rules.Rule, error) {
 		out.Do = append(out.Do, rules.Action{
 			Type:     rules.ActionType(a.Type),
 			Template: a.Template,
+			Pick:     a.Pick,
 			Hours:    a.Hours,
 			Script:   a.Script,
 		})

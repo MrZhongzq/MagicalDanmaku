@@ -185,6 +185,67 @@ func TestExecuteLogAction(t *testing.T) {
 	}
 }
 
+// sequential 模式下单个动作按顺序轮流用模板。
+func TestExecuteSequentialPickCyclesTemplates(t *testing.T) {
+	bot := &failingBot{}
+	ex := newTestExecutor(bot)
+
+	r := Rule{Name: "轮询问好", Do: []Action{
+		{Type: ActionDanmaku, Pick: PickSequential, Template: []string{"甲1", "甲2", "甲3"}},
+	}}
+	for i := 0; i < 4; i++ {
+		if err := ex.Execute(context.Background(), r, enterTrigger("1", "x")); err != nil {
+			t.Fatalf("第 %d 次 Execute 失败: %v", i, err)
+		}
+	}
+
+	got := bot.sent()
+	want := []string{"甲1", "甲2", "甲3", "甲1"}
+	if len(got) != len(want) {
+		t.Fatalf("发送次数 = %d, 期望 %d, 实际 %v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("第 %d 次 = %q, 期望 %q（全部: %v）", i, got[i], want[i], got)
+		}
+	}
+}
+
+// 同一条规则的两个发弹幕动作各有各的游标，不互相打乱。
+//
+// 共用一个游标的话，两个动作会交替推进它——第一个动作拿甲、
+// 第二个拿乙、下一轮第一个拿丙，每个动作看到的都是跳着的。
+func TestSequentialCursorIsPerAction(t *testing.T) {
+	bot := &failingBot{}
+	ex := newTestExecutor(bot)
+
+	r := Rule{Name: "双动作轮询", Do: []Action{
+		{Type: ActionDanmaku, Pick: PickSequential, Template: []string{"甲1", "甲2", "甲3"}},
+		{Type: ActionDanmaku, Pick: PickSequential, Template: []string{"乙1", "乙2", "乙3"}},
+	}}
+
+	for i := 0; i < 3; i++ {
+		if err := ex.Execute(context.Background(), r, enterTrigger("1", "x")); err != nil {
+			t.Fatalf("第 %d 次 Execute 失败: %v", i, err)
+		}
+	}
+
+	got := bot.sent()
+	want := []string{
+		"甲1", "乙1",
+		"甲2", "乙2",
+		"甲3", "乙3",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("发送次数 = %d, 期望 %d, 实际 %v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("第 %d 条 = %q, 期望 %q（全部: %v）", i, got[i], want[i], got)
+		}
+	}
+}
+
 func TestExecuteRunsAllActionsInOrder(t *testing.T) {
 	bot := &failingBot{}
 	ex := newTestExecutor(bot)

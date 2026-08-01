@@ -156,6 +156,58 @@ func TestRenderSingleTemplate(t *testing.T) {
 	}
 }
 
+// 顺序模式按顺序轮流用，到末尾回到第一条。
+func TestRenderSequentialCyclesThroughTemplates(t *testing.T) {
+	r := NewRenderer(nil)
+	tmpls := []string{"甲", "乙", "丙"}
+
+	var got []string
+	for i := 0; i < 5; i++ {
+		s, err := r.RenderAt(tmpls, i, nil)
+		if err != nil {
+			t.Fatalf("渲染报错: %v", err)
+		}
+		got = append(got, s)
+	}
+	want := []string{"甲", "乙", "丙", "甲", "乙"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("第 %d 次 = %q, 期望 %q（全部: %v）", i, got[i], want[i], got)
+		}
+	}
+}
+
+// 下标为负或超界都不该 panic，取模处理即可。
+func TestRenderAtHandlesOutOfRange(t *testing.T) {
+	r := NewRenderer(nil)
+	for _, idx := range []int{-1, 99} {
+		if _, err := r.RenderAt([]string{"甲"}, idx, nil); err != nil {
+			t.Errorf("下标 %d 报错: %v", idx, err)
+		}
+	}
+}
+
+// 模板列表只有一条时，顺序模式与随机模式效果相同。
+func TestRenderAtSingleTemplate(t *testing.T) {
+	r := NewRenderer(nil)
+	for _, idx := range []int{-3, 0, 1, 7} {
+		got, err := r.RenderAt([]string{"只有一条"}, idx, nil)
+		if err != nil {
+			t.Fatalf("下标 %d 报错: %v", idx, err)
+		}
+		if got != "只有一条" {
+			t.Errorf("下标 %d = %q", idx, got)
+		}
+	}
+}
+
+func TestRenderAtEmptyListFails(t *testing.T) {
+	r := NewRenderer(nil)
+	if _, err := r.RenderAt(nil, 0, map[string]any{}); err == nil {
+		t.Error("空模板列表应当报错")
+	}
+}
+
 func TestRenderEmptyListFails(t *testing.T) {
 	r := newTestRenderer()
 	if _, err := r.Render(nil, map[string]any{}); err == nil {

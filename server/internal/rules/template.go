@@ -38,6 +38,22 @@ func (r *Renderer) Render(templates []string, vars map[string]any) (string, erro
 	return r.RenderOne(templates[idx], vars)
 }
 
+// RenderAt 从多条模板中按下标渲染指定一条，供顺序轮询模式使用。
+//
+// idx 对 len(templates) 取模，负数或超界都不报错、不 panic——
+// 调用方（Executor 的游标）不需要自己先做边界检查。
+func (r *Renderer) RenderAt(templates []string, idx int, vars map[string]any) (string, error) {
+	if len(templates) == 0 {
+		return "", fmt.Errorf("rules: 模板列表为空")
+	}
+	n := len(templates)
+	idx %= n
+	if idx < 0 {
+		idx += n
+	}
+	return r.RenderOne(templates[idx], vars)
+}
+
 // RenderOne 渲染单条模板。
 func (r *Renderer) RenderOne(tmpl string, vars map[string]any) (string, error) {
 	t, err := r.compile(tmpl)

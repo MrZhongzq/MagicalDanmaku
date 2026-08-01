@@ -310,6 +310,36 @@ func TestToRuleRunsDomainValidation(t *testing.T) {
 	}
 }
 
+// Pick 字段要原样带到领域模型，否则 WebUI 的轮询开关无法生效。
+func TestToRuleCarriesActionPick(t *testing.T) {
+	r, err := spec.Rule{
+		Name: "x",
+		On:   []string{"user_enter"},
+		Do: []spec.Action{
+			{Type: "danmaku", Template: []string{"甲", "乙"}, Pick: "sequential"},
+		},
+	}.ToRule()
+	if err != nil {
+		t.Fatalf("ToRule 报错: %v", err)
+	}
+	if len(r.Do) != 1 || r.Do[0].Pick != rules.PickSequential {
+		t.Errorf("Pick 未正确转换: %+v", r.Do)
+	}
+}
+
+func TestToRuleRejectsUnknownPick(t *testing.T) {
+	_, err := spec.Rule{
+		Name: "x",
+		On:   []string{"user_enter"},
+		Do: []spec.Action{
+			{Type: "danmaku", Template: []string{"甲"}, Pick: "不存在的取法"},
+		},
+	}.ToRule()
+	if err == nil {
+		t.Fatal("未知的 pick 取值应在转换时报错")
+	}
+}
+
 func TestToRuleCarriesAggregateFields(t *testing.T) {
 	r, err := spec.Rule{
 		Name: "x",
