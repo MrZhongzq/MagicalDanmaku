@@ -411,7 +411,7 @@ export function defaultGiftDraft(): GiftDraft {
     maxWaitSeconds: 60,
     minCount: 2,
     pickMode: 'random',
-    templates: ['感谢 {{join .users "、"}} 的 {{.gift.name}} 等，您的支持就是对主播最大的鼓励'],
+    templates: ['感谢 {{join .users "、"}} 的 {{join .gifts "、"}}，您的支持就是对主播最大的鼓励'],
     blindBoxSeparate: false,
     blindBoxProfitTracking: false,
   }
@@ -724,7 +724,7 @@ const TEMPLATE_VAR_HINT = {
   users: '{{join .users "、"}}',
   giftName: '{{.gift.name}}',
   count: '{{.count}}',
-  gifts: '{{gifts}}',
+  gifts: '{{join .gifts "、"}}',
 }
 
 /** 上舰答谢模板可用变量提示，同样要挪成变量，理由见上方 TEMPLATE_VAR_HINT 的注释。 */
@@ -1059,13 +1059,13 @@ function dismissPartialFailure() {
           <p class="hint">
             可用变量：<code>{{ TEMPLATE_VAR_HINT.users }}</code>
             （本轮参与的用户，需要用 join 拼接）、
+            <code>{{ TEMPLATE_VAR_HINT.gifts }}</code>
+            （本轮合并涉及的礼物名，去重后的列表，同样需要用 join 拼接）、
             <code>{{ TEMPLATE_VAR_HINT.giftName }}</code>
-            （本轮合并时只保留第一件礼物的名字）、
+            （只取第一件礼物的名字，合并多种礼物时更推荐用上面的
+            <code>gifts</code>）、
             <code>{{ TEMPLATE_VAR_HINT.count }}</code>
-            等。设计稿示例里的 <code>{{ TEMPLATE_VAR_HINT.gifts }}</code>
-            （多种礼物名合并成一个列表）目前后端没有对应变量——
-            <code>internal/rules/aggregate.go</code> 的 <code>mergeBuckets</code> 只收集了
-            <code>users</code> 列表， 没有收集礼物名列表，见下方悬空说明。
+            等。
           </p>
 
           <h4>盲盒</h4>

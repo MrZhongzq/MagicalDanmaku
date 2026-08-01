@@ -204,6 +204,16 @@ describe('Danmaku 纯函数：build/parse 往返（组装成 spec.Rule 与从中
     expect(rule.on).toEqual(['gift'])
   })
 
+  // 全批次终审项【3b】：默认模板应体现多礼物合并（用 gifts，而不是只取
+  // 第一件礼物名字的 .gift.name）。server/internal/rules/aggregate.go
+  // 的 mergeBuckets 早就在填 vars["gifts"]，join 函数也早就存在
+  // （server/internal/rules/template.go 的 funcMap），默认模板没跟上。
+  it('defaultGiftDraft 的默认模板用 join .gifts 体现多礼物合并，而不是只取第一件的 .gift.name', () => {
+    const template = defaultGiftDraft().templates[0]
+    expect(template).toContain('.gifts')
+    expect(template).not.toContain('.gift.name')
+  })
+
   describe('Pick/TemplateMulti：P4-3 接通的两个字段', () => {
     it('buildEnterRule：pickMode="sequential" 时 do[0].pick 是 "sequential"', () => {
       const draft = { ...defaultEnterDraft(), pickMode: 'sequential' as const }

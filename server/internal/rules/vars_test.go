@@ -206,10 +206,16 @@ func flattenVarPaths(v map[string]any) map[string]bool {
 
 // TestVariableCatalogCommonMatchesVarsFromEvent 校验公共变量组：
 // type/roomId/timestamp 是 VarsFromEvent 对任何事件都必产出的字段，
-// 必须出现在 VariableCatalog() 的公共分组里；count/users 只在合并
-// 之后才存在（见 aggregate.go），VarsFromEvent 本身不产出，必须标
-// 记为 Optional，否则这条对照测试会把它们误判为「清单声称存在但
+// 必须出现在 VariableCatalog() 的公共分组里；count/users/gifts 只在
+// 合并之后才存在（见 aggregate.go），VarsFromEvent 本身不产出，必须
+// 标记为 Optional，否则这条对照测试会把它们误判为「清单声称存在但
 // 实际没有」。
+//
+// 这三个是聚合期变量，TestVariableCatalogMatchesVarsFromEvent（跟
+// VarsFromEvent 的实际产出逐事件对照）天然看不到它们——全靠人工在
+// commonVariables 里标 Optional 混过去。新增聚合期变量时，这条测试
+// 的下方循环也要记得加一行，否则清单漏了字段不会有任何测试报红
+// （gifts 就是这么漏掉的，见 commonVariables 定义处的注释）。
 func TestVariableCatalogCommonMatchesVarsFromEvent(t *testing.T) {
 	common, _ := VariableCatalog()
 	commonPaths := make(map[string]bool, len(common))
@@ -230,12 +236,30 @@ func TestVariableCatalogCommonMatchesVarsFromEvent(t *testing.T) {
 			t.Errorf("VarsFromEvent 未产出公共字段 %q", p)
 		}
 	}
-	for _, p := range []string{"count", "users"} {
+	for _, p := range []string{"count", "users", "gifts"} {
 		if commonPaths[p] && !optional[p] {
 			t.Errorf("公共变量 %q 只在合并窗口聚合后才存在，VarsFromEvent 本身不产出，"+
 				"必须标记 Optional", p)
 		}
 	}
+}
+
+// TestVariableCatalogHasGifts 钉住 gifts 确实在公共变量清单里——它是
+// aggregate.go 的 mergeBuckets/PassthroughTrigger 早就在填的聚合期变量，
+// 但公共变量清单里漏了这一条，导致 /api/meta/variables 不下发它、
+// 条件构建器与模板变量提示的下拉里也没有，直到全批次终审才发现补上。
+func TestVariableCatalogHasGifts(t *testing.T) {
+	common, _ := VariableCatalog()
+	for _, v := range common {
+		if v.Path == "gifts" {
+			if !v.Optional {
+				t.Error("gifts 是聚合期变量，未合并触发时不存在，必须标记 Optional")
+			}
+			return
+		}
+	}
+	t.Error(`公共变量清单里没有 "gifts"——mergeBuckets/PassthroughTrigger 早就在填这个 ` +
+		`变量了，清单没跟上，导致 /api/meta/variables 不下发它`)
 }
 
 // TestVariableCatalogMatchesVarsFromEvent 是本任务真正的产出：用真实事件

@@ -130,16 +130,25 @@ type Variable struct {
 
 // commonVariables 是任意事件都会产出的公共字段。
 //
-// count/users 是例外：它们不是 VarsFromEvent 本身产出的，而是合并窗口
-// （见 aggregate.go）算完之后才补进 Vars 的，所以标 Optional——用真实
-// 事件跑 VarsFromEvent 永远看不到它们，但它们是配置聚合规则时用户真实
-// 用得到的路径。
+// count/users/gifts 是例外：它们不是 VarsFromEvent 本身产出的，而是
+// 合并窗口（见 aggregate.go 的 mergeBuckets/PassthroughTrigger）算完之后
+// 才补进 Vars 的，所以标 Optional——用真实事件跑 VarsFromEvent 永远看
+// 不到它们，但它们是配置聚合规则、写礼物答谢模板时用户真实用得到的路径。
+//
+// **这是 TestVariableCatalogMatchesVarsFromEvent 的天然盲区**：那条测试
+// 只跟 VarsFromEvent 的实际产出对照，而聚合期变量本来就不在那边产出，
+// 全靠这里人工标 Optional 混过去——加一个聚合期变量却忘了在这里补一条，
+// 测试不会报红，只会在 /api/meta/variables 和条件构建器下拉里悄悄
+// 少一项（gifts 就是这么漏掉的，直到全批次终审才补上）。新增聚合期
+// 变量时记得回来加一行，并检查 mergeBuckets/PassthroughTrigger 两处
+// 是否都填了它。
 var commonVariables = []Variable{
 	{Path: "type", Label: "事件类型"},
 	{Path: "roomId", Label: "直播间号"},
 	{Path: "timestamp", Label: "事件时间戳（Unix 秒）"},
 	{Path: "count", Label: "合并窗口内的事件数量（仅聚合规则触发时存在）", Optional: true},
 	{Path: "users", Label: "合并窗口内涉及的用户昵称列表（仅聚合规则触发时存在）", Optional: true},
+	{Path: "gifts", Label: "合并窗口内涉及的礼物名列表，去重（仅聚合规则触发时存在）", Optional: true},
 }
 
 // userVariables 是 userVars 展开产出的字段，路径不带前缀——
