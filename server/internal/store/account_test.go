@@ -328,3 +328,39 @@ func TestUpdateAccountLoginStateOnMissingAccount(t *testing.T) {
 		t.Errorf("账号已不存在不应视为错误，实际: %v", err)
 	}
 }
+
+// 换 Cookie 要把登录态重置为未知。
+//
+// 不重置的话，一个被标成「已失效」的账号重新扫码之后界面仍显示
+// 「已失效」直到下一轮检测（最长 10 分钟）——用户刚扫完码却看到
+// 「已失效」，会以为没成功又扫一遍。
+func TestUpdateAccountCookieResetsLoginState(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	owner := mustUser(t, s, "张三")
+	if _, err := s.CreateAccount(ctx, AccountInput{
+		Name: "小号", Cookie: "old", OwnerID: owner,
+	}); err != nil {
+		t.Fatalf("建账号报错: %v", err)
+	}
+	if err := s.UpdateAccountLoginState(ctx, "小号", LoginStateInvalid); err != nil {
+		t.Fatalf("写登录态报错: %v", err)
+	}
+
+	if err := s.UpdateAccountCookie(ctx, "小号", "SESSDATA=new", "10086"); err != nil {
+		t.Fatalf("换 Cookie 报错: %v", err)
+	}
+
+	acc, err := s.GetAccountByName(ctx, "小号")
+	if err != nil {
+		t.Fatalf("查账号报错: %v", err)
+	}
+	if acc.LoginState != LoginStateUnknown {
+		t.Errorf("换 Cookie 后 LoginState = %q, 期望 %q（新 Cookie 还没被探测过）",
+			acc.LoginState, LoginStateUnknown)
+	}
+	if acc.LoginCheckedAt != nil {
+		t.Errorf("换 Cookie 后 LoginCheckedAt 应为 nil，实际 %v", acc.LoginCheckedAt)
+	}
+}

@@ -212,8 +212,19 @@ func (s *Store) UpdateAccountCookie(ctx context.Context, name, cookie, uid strin
 	if cookie == "" {
 		return fmt.Errorf("store: Cookie 不能为空")
 	}
+	// 换了 Cookie 就把登录态重置为未知，并清掉上次检测时间。
+	//
+	// 不重置的话，一个被标成「已失效」的账号重新扫码之后，界面上仍然
+	// 显示「已失效」，直到下一轮检测（最长 10 分钟）才翻回来——而用户
+	// 刚扫完码，看到的却是「已失效」，会以为扫码没成功又扫一遍。
+	//
+	// 重置成 unknown 而不是直接标 valid：新 Cookie 还没被探测过，
+	// 声称它有效是在替检测下结论。
 	tag, err := s.pool.Exec(ctx, `
-		UPDATE accounts SET cookie = $1, uid = $2, updated_at = now() WHERE name = $3`,
+		UPDATE accounts
+		SET cookie = $1, uid = $2, login_state = 'unknown', login_checked_at = NULL,
+		    updated_at = now()
+		WHERE name = $3`,
 		encodeCookie(cookie), uid, name)
 	if err != nil {
 		return fmt.Errorf("store: 更新账号 %q 的 Cookie 失败: %w", name, err)
