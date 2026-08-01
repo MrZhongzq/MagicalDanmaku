@@ -106,42 +106,35 @@ func TestSchedulerConcurrentAdd(t *testing.T) {
 	wg.Wait()
 }
 
-// 同名任务重复注册，只应留下最后那一个。
+// 同名任务重复注册，cron 里只应留下一个条目。
 //
-// 热重载时同一条规则可能改了 cron 表达式。旧条目不移除的话，两个
-// 条目都指向新引擎，规则会在新旧两个时刻各触发一次——多发一条弹幕，
-// 而且不报任何错。
+// **直接查 cron 的条目表，不靠等它触发。** robfig/cron 的 @every 对
+// 小于 1 秒的间隔会静默取整到 1 秒并对齐整秒边界（见其
+// constantdelay.go），靠 sleep 判断「触发了几次」取决于测试启动那一刻
+// 的秒内相位，是不稳的。而要断言的性质本来就是「旧条目没了」——那是
+// 可以直接看的，不必绕道计时。
 func TestSchedulerAddReplacesSameName(t *testing.T) {
 	s := New(slog.New(slog.NewTextHandler(io.Discard, nil)))
 
-	var mu sync.Mutex
-	hits := map[string]int{}
-	record := func(which string) func() {
-		return func() {
-			mu.Lock()
-			hits[which]++
-			mu.Unlock()
-		}
-	}
-
-	if err := s.Add("@every 100ms", "甲/问候", record("旧")); err != nil {
+	if err := s.Add("0 0 * * * *", "甲@123/问候", func() {}); err != nil {
 		t.Fatalf("注册报错: %v", err)
 	}
-	if err := s.Add("@every 100ms", "甲/问候", record("新")); err != nil {
+	first := s.ids["甲@123/问候"]
+
+	// 同一条规则改了 cron 表达式——这正是热重载里会发生的事
+	if err := s.Add("0 30 * * * *", "甲@123/问候", func() {}); err != nil {
 		t.Fatalf("重复注册报错: %v", err)
 	}
 
-	s.Start()
-	defer s.Stop()
-	time.Sleep(350 * time.Millisecond)
-
-	mu.Lock()
-	defer mu.Unlock()
-	if hits["旧"] != 0 {
-		t.Errorf("旧条目仍在触发 %d 次，同名注册应当先移除它", hits["旧"])
+	if got := len(s.cron.Entries()); got != 1 {
+		t.Errorf("cron 条目数 = %d, 期望 1——留着旧条目的话，两个条目都指向"+
+			"新引擎，同一条规则会在新旧两个时刻各触发一次", got)
 	}
-	if hits["新"] == 0 {
-		t.Error("新条目一次都没触发")
+	if got := len(s.ids); got != 1 {
+		t.Errorf("ids 表大小 = %d, 期望 1", got)
+	}
+	if s.ids["甲@123/问候"] == first {
+		t.Error("EntryID 没变，说明第二次 Add 根本没有重新注册")
 	}
 }
 
@@ -149,48 +142,44 @@ func TestSchedulerAddReplacesSameName(t *testing.T) {
 func TestSchedulerRemoveByPrefix(t *testing.T) {
 	s := New(slog.New(slog.NewTextHandler(io.Discard, nil)))
 
-	var mu sync.Mutex
-	hits := map[string]int{}
-	record := func(which string) func() {
-		return func() {
-			mu.Lock()
-			hits[which]++
-			mu.Unlock()
+	// 「甲@1234/问候」是故意放的：前缀带尾斜杠才不会把它误伤，
+	// 少了那个斜杠就是一条静默删错别人任务的 bug
+	for _, name := range []string{
+		"甲@123/问候", "甲@123/答谢", "甲@1234/问候", "乙@456/问候",
+	} {
+		if err := s.Add("0 0 * * * *", name, func() {}); err != nil {
+			t.Fatalf("注册 %s 报错: %v", name, err)
 		}
 	}
 
-	if err := s.Add("@every 100ms", "甲@123/问候", record("甲")); err != nil {
-		t.Fatalf("注册报错: %v", err)
+	if n := s.RemoveByPrefix("甲@123/"); n != 2 {
+		t.Errorf("移除数 = %d, 期望 2", n)
 	}
-	if err := s.Add("@every 100ms", "乙@456/问候", record("乙")); err != nil {
-		t.Fatalf("注册报错: %v", err)
+	if got := len(s.cron.Entries()); got != 2 {
+		t.Errorf("cron 条目数 = %d, 期望 2", got)
 	}
-
-	if n := s.RemoveByPrefix("甲@123/"); n != 1 {
-		t.Errorf("移除数 = %d, 期望 1", n)
+	for _, name := range []string{"甲@123/问候", "甲@123/答谢"} {
+		if _, ok := s.ids[name]; ok {
+			t.Errorf("%s 应已被移除", name)
+		}
 	}
-
-	s.Start()
-	defer s.Stop()
-	time.Sleep(350 * time.Millisecond)
-
-	mu.Lock()
-	defer mu.Unlock()
-	if hits["甲"] != 0 {
-		t.Errorf("甲已被移除却触发了 %d 次", hits["甲"])
-	}
-	if hits["乙"] == 0 {
-		t.Error("乙不该被前缀「甲@123/」波及")
+	for _, name := range []string{"甲@1234/问候", "乙@456/问候"} {
+		if _, ok := s.ids[name]; !ok {
+			t.Errorf("%s 不该被前缀「甲@123/」波及", name)
+		}
 	}
 }
 
 // 移除不存在的前缀是空操作，不报错、不 panic
 func TestSchedulerRemoveByPrefixNoMatch(t *testing.T) {
 	s := New(slog.New(slog.NewTextHandler(io.Discard, nil)))
-	if err := s.Add("@every 1h", "甲/问候", func() {}); err != nil {
+	if err := s.Add("0 0 * * * *", "甲/问候", func() {}); err != nil {
 		t.Fatalf("注册报错: %v", err)
 	}
 	if n := s.RemoveByPrefix("没有这个绑定/"); n != 0 {
 		t.Errorf("移除数 = %d, 期望 0", n)
+	}
+	if got := len(s.cron.Entries()); got != 1 {
+		t.Errorf("cron 条目数 = %d, 期望 1（不该误删）", got)
 	}
 }
