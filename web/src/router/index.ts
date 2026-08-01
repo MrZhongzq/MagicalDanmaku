@@ -12,6 +12,11 @@ const router = createRouter({
       children: [
         { path: '', redirect: '/accounts' },
         { path: 'accounts', name: 'accounts', component: () => import('@/pages/Accounts.vue') },
+        {
+          path: 'moderation',
+          name: 'moderation',
+          component: () => import('@/pages/Moderation.vue'),
+        },
         // 其余页面在后续任务里逐个加进来
       ],
     },

@@ -32,8 +32,9 @@ describe('Shell', () => {
     localStorage.clear()
   })
 
-  // 菜单里的「房管」「弹幕姬」等七项还没接路由。router.push({ name: 'moderation' })
-  // 找不到这个 name 时 vue-router 是同步抛 MATCHER_NOT_FOUND——通配符
+  // 菜单里的「弹幕姬」等六项还没接路由（「房管」在 Task 6 接上了，
+  // 这里换一个还没接的 key）。router.push({ name: 'danmaku' }) 找不到
+  // 这个 name 时 vue-router 是同步抛 MATCHER_NOT_FOUND——通配符
   // /:pathMatch(.*)* 只兜未解析的 path，不兜未解析的 name。go() 是从
   // NMenu 的 @update:value 事件调的，Vue 在 dev 模式下会把这个同步异常
   // 重新抛出去，所以点一下就是一条真实的未捕获错误。
@@ -55,7 +56,7 @@ describe('Shell', () => {
     await flushPromises()
 
     const menu = wrapper.findComponent(NMenu)
-    expect(() => menu.vm.$emit('update:value', 'moderation')).not.toThrow()
+    expect(() => menu.vm.$emit('update:value', 'danmaku')).not.toThrow()
 
     await flushPromises()
     // 没有跳转：路由还停在 accounts
