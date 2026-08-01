@@ -613,10 +613,12 @@ import {
   useMessage,
 } from 'naive-ui'
 import { ApiError, request } from '@/api'
+import { useAuthStore } from '@/stores/auth'
 import { useBindingsStore } from '@/stores/bindings'
 import { useDraft } from '@/composables/useDraft'
 import SaveBar from '@/components/SaveBar.vue'
 import TemplateList from '@/components/TemplateList.vue'
+import PermissionWarning from '@/components/PermissionWarning.vue'
 import PkPanel, {
   buildPkRule,
   defaultPkDraft,
@@ -625,8 +627,19 @@ import PkPanel, {
   type PkDraft,
 } from '@/components/PkPanel.vue'
 
+const auth = useAuthStore()
 const bindings = useBindingsStore()
 const message = useMessage()
+
+/**
+ * 缺 rule:write 时的警告条。只有 rule:read 的成员能把整页规则配完，
+ * 直到点「保存并生效」才被后端 403 打回——白干一整轮配置。与
+ * Moderation.vue 缺 user:block 同一套约定：只警告，不锁面板。
+ */
+const missingWritePerm = computed(() => {
+  const b = bindings.current
+  return b !== null && !auth.hasPerm(b, 'rule:write')
+})
 
 /**
  * 礼物模板可用变量的提示文案，字面量含 `{{ }}`。
@@ -809,6 +822,11 @@ function dismissPartialFailure() {
     <NEmpty v-if="!bindings.current" description="请先在顶部选择一个直播间" />
 
     <template v-else>
+      <PermissionWarning
+        v-if="missingWritePerm"
+        text="你在这个直播间没有 rule:write 权限，保存会被拒绝"
+      />
+
       <NSpin :show="loading">
         <!-- ==================== 进房欢迎 ==================== -->
         <NCard title="进房欢迎" class="section-card">

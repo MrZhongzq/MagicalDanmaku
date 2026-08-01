@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
+import type { Permission } from '@/api'
 
 // Danmaku 页最核心的一条：进房欢迎/礼物答谢在后端各是一条固定 name 的
 // spec.Rule，前端靠 name 从 `GET /api/bindings/{id}/rules` 里「认领」
@@ -109,10 +110,11 @@ const 绑定 = {
   permissions: ['rule:read', 'rule:write'] as const,
 }
 
-function setupStores() {
+/** permissions 可覆盖默认的 ['rule:read', 'rule:write']——用于钉「缺 rule:write 时顶警告」的测试。 */
+function setupStores(permissions: Permission[] = [...绑定.permissions]) {
   setActivePinia(createPinia())
   const bindings = useBindingsStore()
-  bindings.list = [{ ...绑定, permissions: [...绑定.permissions] }]
+  bindings.list = [{ ...绑定, permissions }]
   bindings.select(1)
   return { bindings }
 }
@@ -382,6 +384,35 @@ describe('Danmaku 页面：四处悬空控件全部渲染，且都不 disabled',
       expect(checkbox, `复选框「${label}」应该存在`).toBeTruthy()
       expect(checkbox!.classes().join(' ')).not.toContain('n-checkbox--disabled')
     }
+  })
+})
+
+// ---- 全分支终审第 4 条：只有 rule:read 的成员应该被提前警告，而不是把整页配完才被后端 403 打回 ----
+describe('Danmaku 页面：rule:write 权限门禁（提示但不锁面板）', () => {
+  it('缺 rule:write 时顶部出现警告，但控件都不 disabled', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(() => Promise.resolve(ok([]))),
+    )
+    setupStores(['rule:read']) // 没有 rule:write
+    const wrapper = await mountDanmaku()
+
+    expect(wrapper.text()).toContain('你在这个直播间没有 rule:write 权限')
+
+    const enterSwitch = wrapper.find('input[placeholder="单人欢迎语模板"]')
+    expect(enterSwitch.exists()).toBe(true)
+    expect(enterSwitch.attributes('disabled')).toBeUndefined()
+  })
+
+  it('有 rule:write 权限时不显示警告条', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(() => Promise.resolve(ok([]))),
+    )
+    setupStores()
+    const wrapper = await mountDanmaku()
+
+    expect(wrapper.text()).not.toContain('没有 rule:write 权限')
   })
 })
 

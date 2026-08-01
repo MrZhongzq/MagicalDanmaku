@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { NSelect, NSwitch } from 'naive-ui'
+import type { Permission } from '@/api'
 
 // Custom 是「自定义弹幕姬」页，P4-2 最难的组件的落地场景。核心断言分三层：
 //   1. 纯函数：isCustomRule（排除内置七条）、buildCustomRule/parseCustomRuleDraft
@@ -53,10 +54,11 @@ const 绑定 = {
   permissions: ['rule:read', 'rule:write'] as const,
 }
 
-function setupStores() {
+/** permissions 可覆盖默认的 ['rule:read', 'rule:write']——用于钉「缺 rule:write 时顶警告」的测试。 */
+function setupStores(permissions: Permission[] = [...绑定.permissions]) {
   setActivePinia(createPinia())
   const bindings = useBindingsStore()
-  bindings.list = [{ ...绑定, permissions: [...绑定.permissions] }]
+  bindings.list = [{ ...绑定, permissions }]
   bindings.select(1)
   return { bindings }
 }
@@ -514,6 +516,29 @@ describe('Custom 页：排除通用规则——渲染出来但不参与组装（
 })
 
 // 未使用到的 defaultActionDraft 导出也在别处（Custom.vue 内部）用到，这里顺带确认默认值形状。
+// ---- 全分支终审第 4 条：只有 rule:read 的成员应该被提前警告，而不是把整页规则配完才被后端 403 打回 ----
+describe('Custom 页：rule:write 权限门禁（提示但不锁面板）', () => {
+  it('缺 rule:write 时顶部出现警告，但"新增自定义规则"按钮不 disabled', async () => {
+    setupStores(['rule:read']) // 没有 rule:write
+    stubFetch({ rules: [] })
+    const wrapper = await mountCustom()
+
+    expect(wrapper.text()).toContain('你在这个直播间没有 rule:write 权限')
+
+    const addBtn = wrapper.findAll('button').find((b) => b.text().includes('新增自定义规则'))
+    expect(addBtn, '「新增自定义规则」按钮应该存在').toBeTruthy()
+    expect(addBtn!.attributes('disabled')).toBeUndefined()
+  })
+
+  it('有 rule:write 权限时不显示警告条', async () => {
+    setupStores()
+    stubFetch({ rules: [] })
+    const wrapper = await mountCustom()
+
+    expect(wrapper.text()).not.toContain('没有 rule:write 权限')
+  })
+})
+
 describe('defaultActionDraft', () => {
   it('默认是 danmaku 类型，带一条模板', () => {
     const a = defaultActionDraft()

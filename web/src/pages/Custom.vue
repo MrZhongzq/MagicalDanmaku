@@ -338,7 +338,7 @@ export type { RuleView }
 </script>
 
 <script setup lang="ts">
-import { onMounted, reactive, ref, watch } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import {
   NAlert,
   NButton,
@@ -359,16 +359,29 @@ import {
   useMessage,
 } from 'naive-ui'
 import { ApiError, request } from '@/api'
+import { useAuthStore } from '@/stores/auth'
 import { useBindingsStore } from '@/stores/bindings'
 import { useDraft } from '@/composables/useDraft'
 import SaveBar from '@/components/SaveBar.vue'
 import TemplateList from '@/components/TemplateList.vue'
 import ConditionTree, { COMMON_FIELD_OPTIONS } from '@/components/ConditionTree.vue'
 import type { MetaItem } from '@/components/ConditionTree.vue'
+import PermissionWarning from '@/components/PermissionWarning.vue'
 
+const auth = useAuthStore()
 const bindings = useBindingsStore()
 const message = useMessage()
 const dialog = useDialog()
+
+/**
+ * 缺 rule:write 时的警告条。只有 rule:read 的成员能把整页自定义规则配完，
+ * 直到点「保存并生效」才被后端 403 打回——白干一整轮配置。与
+ * Moderation.vue 缺 user:block 同一套约定：只警告，不锁面板。
+ */
+const missingWritePerm = computed(() => {
+  const b = bindings.current
+  return b !== null && !auth.hasPerm(b, 'rule:write')
+})
 
 const loading = ref(false)
 
@@ -567,6 +580,11 @@ function dismissPartialFailure() {
     <NEmpty v-if="!bindings.current" description="请先在顶部选择一个直播间" />
 
     <template v-else>
+      <PermissionWarning
+        v-if="missingWritePerm"
+        text="你在这个直播间没有 rule:write 权限，保存会被拒绝"
+      />
+
       <NAlert type="info" :bordered="false" class="intro-alert">
         给主播完全的自由度：<strong>触发器 + 模板</strong>的组合。比如「指定 UID 进房 且
         大航海状态有效」→
