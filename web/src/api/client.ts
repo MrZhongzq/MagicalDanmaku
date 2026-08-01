@@ -42,8 +42,18 @@ export async function request<T = void>(method: Method, path: string, body?: unk
   }
 
   if (resp.status === 401) {
-    onUnauthorized?.()
-    throw new ApiError(401, '登录已过期，请重新登录')
+    // 401 有两种含义，不能一概而论：
+    //
+    //   - 登录接口的 401 是「用户名或密码错误」。一律当成会话过期的话，
+    //     输错密码的人会看到「登录已过期，请重新登录」——他还没登录过，
+    //     这句话完全不知所云，而且把真正的原因盖掉了。
+    //   - 其余接口的 401 才是会话真的过期了，要把人送回登录页。
+    //
+    // 所以只有副作用（跳回登录页）需要区分，错误消息一律用后端给的那句，
+    // 走下面 !resp.ok 的通用分支去读 {"error": "..."}。
+    if (path !== '/api/auth/login') {
+      onUnauthorized?.()
+    }
   }
 
   if (resp.status === 204 || resp.headers.get('Content-Length') === '0') {

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { ApiError, request } from './client'
+import { ApiError, request, setUnauthorizedHandler } from './client'
 
 function mockFetch(status: number, body: unknown, contentType = 'application/json') {
   return vi.fn().mockResolvedValue(
@@ -13,6 +13,9 @@ function mockFetch(status: number, body: unknown, contentType = 'application/jso
 describe('request', () => {
   beforeEach(() => {
     vi.unstubAllGlobals()
+    // setUnauthorizedHandler 是模块级单例：不重置的话，前一条测试注册的
+    // mock 会在下一条测试里被意外调用，断言互相干扰。
+    setUnauthorizedHandler(() => {})
   })
 
   it('成功时返回解析后的 JSON', async () => {
@@ -54,5 +57,31 @@ describe('request', () => {
   it('网络层失败时也抛 ApiError，status 为 0', async () => {
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('Failed to fetch')))
     await expect(request('GET', '/api/x')).rejects.toBeInstanceOf(ApiError)
+  })
+
+  // 登录失败的 401 必须保留后端的原话。
+  //
+  // 一律当成会话过期的话，输错密码的人会看到「登录已过期，请重新登录」
+  // ——他还没登录过，这句话完全不知所云，而且把真正的原因盖掉了。
+  it('登录接口的 401 保留后端的错误文案', async () => {
+    vi.stubGlobal('fetch', mockFetch(401, { error: '用户名或密码错误' }))
+    await expect(request('POST', '/api/auth/login', {})).rejects.toThrow('用户名或密码错误')
+  })
+
+  // 人就在登录页上，不该再被「送回登录页」
+  it('登录接口的 401 不触发跳回登录页的回调', async () => {
+    const onUnauth = vi.fn()
+    setUnauthorizedHandler(onUnauth)
+    vi.stubGlobal('fetch', mockFetch(401, { error: '用户名或密码错误' }))
+    await expect(request('POST', '/api/auth/login', {})).rejects.toThrow()
+    expect(onUnauth).not.toHaveBeenCalled()
+  })
+
+  it('其余接口的 401 仍然触发跳回登录页', async () => {
+    const onUnauth = vi.fn()
+    setUnauthorizedHandler(onUnauth)
+    vi.stubGlobal('fetch', mockFetch(401, { error: '未登录' }))
+    await expect(request('GET', '/api/bindings')).rejects.toThrow()
+    expect(onUnauth).toHaveBeenCalledOnce()
   })
 })
