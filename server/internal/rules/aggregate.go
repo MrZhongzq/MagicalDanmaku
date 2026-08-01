@@ -205,6 +205,8 @@ func mergeBuckets(bs []*bucket) Trigger {
 	events := make([]event.Event, 0, len(bs))
 	users := make([]string, 0, len(bs))
 	seenUser := make(map[string]bool, len(bs))
+	gifts := make([]string, 0, len(bs))
+	seenGift := make(map[string]bool, len(bs))
 
 	for _, b := range bs {
 		events = append(events, b.events...)
@@ -217,10 +219,17 @@ func mergeBuckets(bs []*bucket) Trigger {
 				users = append(users, s)
 			}
 		}
+		if name, ok := LookupPath(b.vars, "gift.name"); ok {
+			if s := toString(name); s != "" && !seenGift[s] {
+				seenGift[s] = true
+				gifts = append(gifts, s)
+			}
+		}
 	}
 
 	vars["count"] = len(bs)
 	vars["users"] = users
+	vars["gifts"] = gifts
 
 	return Trigger{Type: first.typ, Events: events, Vars: vars}
 }
@@ -294,6 +303,17 @@ func PassthroughTrigger(ev event.Event) Trigger {
 		}
 	}
 	vars["users"] = users
+
+	// 同样填上 gifts：非合并触发只有一个事件，若是礼物事件就是那一个
+	// 礼物名，否则（如弹幕）保持空数组——与 users 在无用户名时的处理一致，
+	// 使模板在合并与非合并场景下写法统一。
+	gifts := []string{}
+	if name, ok := LookupPath(vars, "gift.name"); ok {
+		if s := toString(name); s != "" {
+			gifts = append(gifts, s)
+		}
+	}
+	vars["gifts"] = gifts
 
 	return Trigger{Type: ev.Type, Events: []event.Event{ev}, Vars: vars}
 }

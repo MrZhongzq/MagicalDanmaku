@@ -350,6 +350,86 @@ func TestAggregateRollingWindowExtends(t *testing.T) {
 	}
 }
 
+func TestAggregateByTypeGiftsDeduplicatesAndKeepsOrder(t *testing.T) {
+	// 合并窗口里「小花花×3、人气票×1、小花花×2」（分属不同用户，
+	// 否则会在第一步合并进同一桶）→ gifts 应为 ["小花花","人气票"]，
+	// 既不是三条也不是按数量/字典序排列。
+	c := &collector{}
+	agg := NewAggregator(AggregateSpec{Window: time.Hour, By: AggregateByType}, c.add)
+	defer agg.Close()
+
+	agg.Add(giftEvent("1", "甲", "小花花", 3, 300))
+	agg.Add(giftEvent("2", "乙", "人气票", 1, 10))
+	agg.Add(giftEvent("3", "丙", "小花花", 2, 200))
+	agg.Flush()
+
+	got := c.all()
+	if len(got) != 1 {
+		t.Fatalf("按类型合并应产出 1 条 Trigger，实际 %d", len(got))
+	}
+	gifts, ok := got[0].Vars["gifts"].([]string)
+	if !ok {
+		t.Fatalf("gifts 类型错误: %T", got[0].Vars["gifts"])
+	}
+	if len(gifts) != 2 {
+		t.Fatalf("gifts = %v，期望去重后 2 条", gifts)
+	}
+	if gifts[0] != "小花花" || gifts[1] != "人气票" {
+		t.Errorf("gifts = %v，期望按首次出现顺序 [小花花 人气票]", gifts)
+	}
+}
+
+func TestAggregateByTypeGiftsSkipsNonGiftEvents(t *testing.T) {
+	// 合并窗口里混入非礼物事件（进场）时，gifts 不应 panic，
+	// 也不应把非礼物事件塞成空字符串条目。
+	c := &collector{}
+	agg := NewAggregator(AggregateSpec{Window: time.Hour, By: AggregateByType}, c.add)
+	defer agg.Close()
+
+	agg.Add(enterEvent("1", "甲", 0))
+	agg.Flush()
+
+	got := c.all()
+	if len(got) != 1 {
+		t.Fatalf("应产出 1 条 Trigger，实际 %d", len(got))
+	}
+	gifts, ok := got[0].Vars["gifts"].([]string)
+	if !ok {
+		t.Fatalf("gifts 类型错误: %T", got[0].Vars["gifts"])
+	}
+	if len(gifts) != 0 {
+		t.Errorf("非礼物事件不应产生 gifts 条目，实际 %v", gifts)
+	}
+}
+
+func TestPassthroughTriggerGifts(t *testing.T) {
+	// 非合并触发（PassthroughTrigger）也应填 gifts，让模板对合并
+	// 与非合并事件可以统一写法：单个礼物事件的 gifts 就是那一个礼物名。
+	tr := PassthroughTrigger(giftEvent("9", "土豪", "小花花", 1, 100))
+
+	gifts, ok := tr.Vars["gifts"].([]string)
+	if !ok {
+		t.Fatalf("gifts 类型错误: %T", tr.Vars["gifts"])
+	}
+	if len(gifts) != 1 || gifts[0] != "小花花" {
+		t.Errorf("gifts = %v，期望 [小花花]", gifts)
+	}
+}
+
+func TestPassthroughTriggerGiftsEmptyForNonGiftEvent(t *testing.T) {
+	// 非礼物事件（如进场）没有礼物名，gifts 应是空数组而非缺失该键
+	// 或塞入空字符串——与 users 在同样情况下的处理保持一致。
+	tr := PassthroughTrigger(enterEvent("1", "甲", 0))
+
+	gifts, ok := tr.Vars["gifts"].([]string)
+	if !ok {
+		t.Fatalf("gifts 类型错误: %T", tr.Vars["gifts"])
+	}
+	if len(gifts) != 0 {
+		t.Errorf("非礼物事件的 gifts 应为空数组，实际 %v", gifts)
+	}
+}
+
 func TestAggregateMaxWaitCapsRolling(t *testing.T) {
 	// 持续有人进场时，maxWait 兜底强制结算，避免永不触发
 	c := &collector{}
