@@ -70,22 +70,34 @@ func (ps *permissionSet) of(b *store.Binding) []string {
 	if ps.admin {
 		return perm.Strings(perm.All())
 	}
+
+	// 所有者与授权行是**并集**，不是二选一。store.Can 的 SQL 是三条
+	// OR，这里若命中 owned 就提前 return 会漏掉 byBinding——而
+	// 「所有者 + 显式授予 member:manage」正是 Task 8b 裁决之后的
+	// 标准配置。漏掉的表现是「列表说你没权限、请求却成了」。
+	set := make(map[string]bool)
 	if ps.owned[b.AccountName] {
 		// 与 store.Can 同一条规则（定义在 perm.OwnerBypass）：所有者
-		// 拿全部权限点减去 member:manage——把第三方拉进授权体系是
-		// 管理员级别的决定，不是账号所有权的附带品。
-		out := make([]string, 0, len(perm.All()))
+		// 凭所有权拿全部权限点减去 member:manage——把第三方拉进授权
+		// 体系是管理员级别的决定，不是账号所有权的附带品。
 		for _, p := range perm.All() {
 			if perm.OwnerBypass(p) {
-				out = append(out, string(p))
+				set[string(p)] = true
 			}
 		}
-		return out
 	}
-	if out, ok := ps.byBinding[b.ID]; ok && out != nil {
-		return out
+	for _, p := range ps.byBinding[b.ID] {
+		set[p] = true
 	}
-	return []string{}
+
+	// 按 perm.All() 的声明顺序输出，保证响应稳定、可测试
+	out := make([]string, 0, len(set))
+	for _, p := range perm.All() {
+		if set[string(p)] {
+			out = append(out, string(p))
+		}
+	}
+	return out
 }
 
 func (s *Server) handleListBindings(w http.ResponseWriter, r *http.Request) {

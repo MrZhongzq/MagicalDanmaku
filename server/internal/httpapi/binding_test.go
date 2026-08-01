@@ -108,6 +108,57 @@ func TestListBindingsGivesOwnerAllPermissionsExceptMemberManage(t *testing.T) {
 	}
 }
 
+// 所有者若被显式授予了 member:manage，列表必须体现出来——这是
+// Task 8b 裁决之后的标准配置：所有者与授权行是并集，不是二选一。
+//
+// permissionSet.of 若在命中 owned 分支后提前 return，就会漏掉
+// byBinding 里的 memberships，而 store.Can 的 SQL 是三条 OR，
+// memberships 分支仍会命中。表现是「列表说没权限、PUT 请求却成了」。
+func TestListBindingsUnionsOwnerAndExplicitGrant(t *testing.T) {
+	srv, st := newTestServer(t)
+	c := loginAs(t, srv, st, "张三", false)
+	bid := mustBindingFor(t, st, "张三", "小号", "123")
+
+	// 张三是所有者，同时被显式授予了 member:manage
+	if err := st.Grant(context.Background(), "张三", "小号", "123",
+		[]perm.Permission{perm.MemberManage}); err != nil {
+		t.Fatalf("授权报错: %v", err)
+	}
+
+	resp := jsonRequest(t, c, "GET", srv.URL+"/api/bindings", "")
+	defer resp.Body.Close()
+
+	var got []bindingView
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("解析报错: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("绑定数 = %d, 期望 1", len(got))
+	}
+	have := map[string]bool{}
+	for _, p := range got[0].Permissions {
+		have[p] = true
+	}
+	if !have[string(perm.MemberManage)] {
+		t.Errorf("所有者被显式授予 member:manage 后，列表应含它，实际 %v", got[0].Permissions)
+	}
+
+	zhang, err := st.GetUserByName(context.Background(), "张三")
+	if err != nil {
+		t.Fatalf("查用户报错: %v", err)
+	}
+	can, err := st.Can(context.Background(), zhang.ID, bid, perm.MemberManage)
+	if err != nil {
+		t.Fatalf("Can 报错: %v", err)
+	}
+	if !can {
+		t.Fatal("store.Can 应认为张三有 member:manage（前提假设错误，测试本身有问题）")
+	}
+	if have[string(perm.MemberManage)] != can {
+		t.Errorf("列表判定 = %v，store.Can 判定 = %v，二者必须一致", have[string(perm.MemberManage)], can)
+	}
+}
+
 func TestCreateBinding(t *testing.T) {
 	srv, st := newTestServer(t)
 	c := loginAs(t, srv, st, "张三", false)
