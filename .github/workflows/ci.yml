@@ -120,6 +120,42 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
         run: go build -trimpath -o /dev/null ./cmd/magicd
 
+  webui:
+    name: 前端检查
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: 安装依赖
+        working-directory: web
+        run: npm ci
+      - name: 类型检查
+        working-directory: web
+        run: npm run typecheck
+      - name: Lint
+        working-directory: web
+        run: npm run lint
+      - name: 测试
+        working-directory: web
+        run: npm run test
+      # 构建产物是提交进仓库的。CI 重新构建一次并比对，
+      # 防止有人改了前端源码却忘了提交重新构建的产物——
+      # 那种情况下线上跑的还是旧界面，而且不报任何错。
+      - name: 构建并检查产物是否与仓库一致
+        working-directory: web
+        run: npm run build
+      - name: 产物必须已提交
+        run: |
+          if ! git diff --quiet -- server/internal/webui/dist; then
+            echo "构建产物与仓库中的不一致——改了前端源码后请重新 npm run build 并提交 server/internal/webui/dist" >&2
+            git diff --stat -- server/internal/webui/dist >&2
+            exit 1
+          fi
+
   goreleaser-check:
     name: 校验发布配置
     runs-on: ubuntu-latest
