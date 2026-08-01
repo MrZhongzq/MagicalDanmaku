@@ -1,14 +1,33 @@
 <script lang="ts">
 /**
- * 弹幕姬页（上）：进房欢迎、礼物答谢。
+ * 弹幕姬页：进房欢迎、礼物答谢（Task 9）+ PK 播报、轮播消息、其他答谢（Task 10）。
  *
  * ## 这一页的本质
  *
- * 它是规则编辑器的「傻瓜模式」：进房欢迎、礼物答谢在后端各是一条
- * `spec.Rule`（规则名固定为 `内置/进房欢迎`/`内置/礼物答谢`），前端把它
- * 渲染成一组开关与输入框，用户点的每个控件最终都对应规则里的一个字段。
- * 加载时靠固定的 `name` 从 `GET /api/bindings/{id}/rules` 里认领这两条，
- * 认领不到就当作「还没配过」，用默认值起步——见 `claimRule`。
+ * 它是规则编辑器的「傻瓜模式」：每个功能块在后端各是一条
+ * `spec.Rule`，前端把它渲染成一组开关与输入框，用户点的每个控件最终都
+ * 对应规则里的一个字段。加载时靠固定的 `name` 从
+ * `GET /api/bindings/{id}/rules` 里认领已保存的配置，认领不到就当作
+ * 「还没配过」，用默认值起步——见 `claimRule`。
+ *
+ * ## Task 10 新增三块的功能虚实（重要，决定了每块该怎么读）
+ *
+ * - **PK 播报**：整体悬空，只画界面。`event.Battle` 只有一个
+ *   `SubCommand` 字段，对面数据（主播昵称/人数/大航海）协议层完全没解析。
+ *   这部分的组件与纯函数都挪到独立的 `PkPanel.vue`——见该文件顶部注释。
+ * - **轮播消息**：真功能。`spec.Rule.Schedule` 是 cron 驱动，与
+ *   `On` 二选一（`rules/rule.go` 第 61-68 行的 `Validate` 会拒绝二者同时
+ *   出现），组好的规则只给 `schedule`，绝不给 `on`。**多条模板目前只有
+ *   随机抽取没有轮询**（同悬空清单第 5 条的病根），所以这版「轮播」
+ *   实际是「随机播」，界面上要把这句话摆在明处，不能只塞进 tooltip。
+ * - **关注答谢 / 分享答谢 / 上舰答谢**：真功能。`event.UserFollow`/
+ *   `UserShare` 只有 `User` 一个字段，模板简单；`event.GuardBuy` 载荷
+ *   齐全（`GuardLevel`/`GuardName`/`Count`/`Price`/`IsRenew`），
+ *   新购与续费的区分**不需要拆成两条规则**——直接在模板里用
+ *   `text/template` 自带的 `{{if .guard.isRenew}}续费{{else}}开通{{end}}`
+ *   语法，一条规则、一套模板就够（`rules/template.go` 用的是标准库
+ *   `text/template`，天然支持条件分支，`rewriteFieldChains` 只改写字段
+ *   访问不碰 `if`/`else`/`end` 关键字）。
  *
  * ## 保存不在本任务范围内
  *
@@ -393,6 +412,179 @@ export function parseGiftDraft(rule: Rule | null): GiftDraft {
   return draft
 }
 
+// ---- 轮播消息草稿（真功能：spec.Rule.Schedule 由 cron 驱动） ----
+
+export type ScheduleMode = 'interval' | 'cron'
+
+export const SCHEDULE_MODE_OPTIONS: { label: string; value: ScheduleMode }[] = [
+  { label: '按固定间隔（分钟）', value: 'interval' },
+  { label: '自定义 cron 表达式', value: 'cron' },
+]
+
+// 按分钟间隔生成 6 段 cron（秒 分 时 日 月 周），如每 10 分钟一次写成
+// "0 " + "*/10" + " * * * *"。注意：这条注释故意不用 /** */ 块注释、
+// 不把 "*/N" 直接连着写出来——星号加斜杠会被 TS 解析成块注释的结束符，
+// 现网就因为这个把后面一大段代码解析成了字符串字面量。
+function intervalMinutesToCron(minutes: number): string {
+  const m = Math.max(1, Math.round(minutes))
+  return `0 */${m} * * * *`
+}
+
+/** 识别 intervalMinutesToCron 生成的形状，用于加载时反推 intervalMinutes。 */
+const INTERVAL_CRON_RE = /^0 \*\/(\d+) \* \* \* \*$/
+
+export const BROADCAST_RULE_NAME = '内置/轮播消息'
+
+export interface BroadcastDraft {
+  enabled: boolean
+  scheduleMode: ScheduleMode
+  intervalMinutes: number
+  cronExpr: string
+  pickMode: PickMode
+  templates: string[]
+}
+
+export function defaultBroadcastDraft(): BroadcastDraft {
+  return {
+    enabled: true,
+    scheduleMode: 'interval',
+    intervalMinutes: 10,
+    cronExpr: '0 */10 * * * *',
+    pickMode: 'random',
+    templates: ['感谢大家的观看，记得点关注不迷路~', '直播间有什么问题欢迎在弹幕里提出~'],
+  }
+}
+
+/** buildBroadcastSchedule 把两种模式统一折成一个 cron 字符串。 */
+export function buildBroadcastSchedule(draft: BroadcastDraft): string {
+  return draft.scheduleMode === 'interval'
+    ? intervalMinutesToCron(draft.intervalMinutes)
+    : draft.cronExpr.trim()
+}
+
+/**
+ * buildBroadcastRule 组装轮播规则。
+ *
+ * **只给 `schedule`，绝不给 `on`。** `rules.Rule.Validate()`
+ * （`server/internal/rules/rule.go` 第 61-68 行）把 on 与 schedule
+ * 定成互斥：两个都给会被后端直接拒收（422）。这里连 `on` 字段都不写
+ * 进返回的对象——不是留空字符串，是整个属性不存在——避免哪天不小心
+ * 在别处又给它塞了值。
+ */
+export function buildBroadcastRule(draft: BroadcastDraft): Rule {
+  return {
+    name: BROADCAST_RULE_NAME,
+    enabled: draft.enabled,
+    schedule: buildBroadcastSchedule(draft),
+    do: [{ type: 'danmaku', template: draft.templates.filter((t) => t.trim() !== '') }],
+  }
+}
+
+export function parseBroadcastDraft(rule: Rule | null): BroadcastDraft {
+  const draft = defaultBroadcastDraft()
+  if (!rule) return draft
+
+  draft.enabled = rule.enabled ?? true
+  if (rule.schedule) {
+    const m = INTERVAL_CRON_RE.exec(rule.schedule)
+    if (m) {
+      draft.scheduleMode = 'interval'
+      draft.intervalMinutes = Number(m[1])
+    } else {
+      draft.scheduleMode = 'cron'
+      draft.cronExpr = rule.schedule
+    }
+  }
+
+  const action = findDanmakuAction(rule.do)
+  if (action?.template && action.template.length > 0) {
+    draft.templates = action.template
+  }
+  // pickMode 同进房欢迎/礼物答谢，后端没有落地字段，维持默认值。
+  return draft
+}
+
+// ---- 关注答谢 / 分享答谢 / 上舰答谢：三者形状相同（开关 + 模板），共用一套草稿 ----
+
+export interface SimpleThanksDraft {
+  enabled: boolean
+  templates: string[]
+}
+
+function defaultSimpleThanksDraft(templates: string[]): SimpleThanksDraft {
+  return { enabled: true, templates }
+}
+
+function buildSimpleThanksRule(name: string, on: string, draft: SimpleThanksDraft): Rule {
+  return {
+    name,
+    enabled: draft.enabled,
+    on: [on],
+    do: [{ type: 'danmaku', template: draft.templates.filter((t) => t.trim() !== '') }],
+  }
+}
+
+function parseSimpleThanksDraft(rule: Rule | null, defaultTemplates: string[]): SimpleThanksDraft {
+  const draft = defaultSimpleThanksDraft(defaultTemplates)
+  if (!rule) return draft
+  draft.enabled = rule.enabled ?? true
+  const action = findDanmakuAction(rule.do)
+  if (action?.template && action.template.length > 0) {
+    draft.templates = action.template
+  }
+  return draft
+}
+
+export const FOLLOW_RULE_NAME = '内置/关注答谢'
+const FOLLOW_ON = 'user_follow'
+
+/** event.UserFollow 只有一个 User 字段（server/internal/event/payload.go 第 66-67 行），模板只需要 user.username。 */
+export function defaultFollowDraft(): SimpleThanksDraft {
+  return defaultSimpleThanksDraft(['感谢 {{.user.username}} 的关注，欢迎常来玩~'])
+}
+export function buildFollowRule(draft: SimpleThanksDraft): Rule {
+  return buildSimpleThanksRule(FOLLOW_RULE_NAME, FOLLOW_ON, draft)
+}
+export function parseFollowDraft(rule: Rule | null): SimpleThanksDraft {
+  return parseSimpleThanksDraft(rule, defaultFollowDraft().templates)
+}
+
+export const SHARE_RULE_NAME = '内置/分享答谢'
+const SHARE_ON = 'user_share'
+
+/** event.UserShare 同样只有一个 User 字段。 */
+export function defaultShareDraft(): SimpleThanksDraft {
+  return defaultSimpleThanksDraft(['感谢 {{.user.username}} 分享了直播间，谢谢支持~'])
+}
+export function buildShareRule(draft: SimpleThanksDraft): Rule {
+  return buildSimpleThanksRule(SHARE_RULE_NAME, SHARE_ON, draft)
+}
+export function parseShareDraft(rule: Rule | null): SimpleThanksDraft {
+  return parseSimpleThanksDraft(rule, defaultShareDraft().templates)
+}
+
+export const GUARD_RULE_NAME = '内置/上舰答谢'
+const GUARD_ON = 'guard_buy'
+
+/**
+ * event.GuardBuy 载荷齐全：GuardLevel/GuardName/Count/Price/IsRenew
+ * （server/internal/event/payload.go 第 40-47 行），rules/vars.go 第
+ * 50-55 行把它们展开成 guard.level/name/count/price/isRenew。
+ * 新购与续费的区分直接写进模板的 {{if}}，不需要拆成两条规则。
+ */
+export function defaultGuardDraft(): SimpleThanksDraft {
+  return defaultSimpleThanksDraft([
+    '感谢 {{.user.username}} {{if .guard.isRenew}}续费{{else}}开通{{end}} ' +
+      '{{.guard.count}} 个月{{.guard.name}}，感谢老板的支持！',
+  ])
+}
+export function buildGuardRule(draft: SimpleThanksDraft): Rule {
+  return buildSimpleThanksRule(GUARD_RULE_NAME, GUARD_ON, draft)
+}
+export function parseGuardDraft(rule: Rule | null): SimpleThanksDraft {
+  return parseSimpleThanksDraft(rule, defaultGuardDraft().templates)
+}
+
 export type { RuleView }
 </script>
 
@@ -404,6 +596,7 @@ import {
   NCollapse,
   NCollapseItem,
   NEmpty,
+  NInput,
   NInputNumber,
   NRadio,
   NRadioGroup,
@@ -418,6 +611,12 @@ import { ApiError, request } from '@/api'
 import { useBindingsStore } from '@/stores/bindings'
 import SaveBar from '@/components/SaveBar.vue'
 import TemplateList from '@/components/TemplateList.vue'
+import PkPanel, {
+  defaultPkDraft,
+  parsePkDraft,
+  PK_RULE_NAME,
+  type PkDraft,
+} from '@/components/PkPanel.vue'
 
 const bindings = useBindingsStore()
 const message = useMessage()
@@ -438,28 +637,60 @@ const TEMPLATE_VAR_HINT = {
   gifts: '{{gifts}}',
 }
 
+/** 上舰答谢模板可用变量提示，同样要挪成变量，理由见上方 TEMPLATE_VAR_HINT 的注释。 */
+const GUARD_TEMPLATE_VAR_HINT = {
+  username: '{{.user.username}}',
+  guardName: '{{.guard.name}}',
+  guardCount: '{{.guard.count}}',
+  renewCondition: '{{if .guard.isRenew}}续费{{else}}开通{{end}}',
+}
+
 const loading = ref(false)
 const saving = ref(false)
 
 const enterDraft = reactive<EnterDraft>(defaultEnterDraft())
 const giftDraft = reactive<GiftDraft>(defaultGiftDraft())
+const pkDraft = reactive<PkDraft>(defaultPkDraft())
+const broadcastDraft = reactive<BroadcastDraft>(defaultBroadcastDraft())
+const followDraft = reactive<SimpleThanksDraft>(defaultFollowDraft())
+const shareDraft = reactive<SimpleThanksDraft>(defaultShareDraft())
+const guardDraft = reactive<SimpleThanksDraft>(defaultGuardDraft())
 
 /**
  * 上一次加载完成时的草稿快照，用来算 dirty——比对内容而不是加监听器逐字段设标记。
  *
  * **初值必须是当前默认草稿的序列化结果，不能是空字符串。** 页面刚挂载、
- * 还没选中直播间（或 loadRules 还没跑完）时，enterDraft/giftDraft 已经是
- * 默认值，若 snapshot 初值是 ''，两者一比对就不相等，dirty 会在用户
- * 什么都没做的情况下先亮一次「有未保存的改动」。
+ * 还没选中直播间（或 loadRules 还没跑完）时，各草稿已经是默认值，
+ * 若 snapshot 初值是 ''，一比对就不相等，dirty 会在用户什么都没做的
+ * 情况下先亮一次「有未保存的改动」。
  */
-const snapshot = ref(JSON.stringify({ enter: enterDraft, gift: giftDraft }))
+function currentDraftsSnapshot() {
+  return JSON.stringify({
+    enter: enterDraft,
+    gift: giftDraft,
+    pk: pkDraft,
+    broadcast: broadcastDraft,
+    follow: followDraft,
+    share: shareDraft,
+    guard: guardDraft,
+  })
+}
 
-const dirty = computed(
-  () => JSON.stringify({ enter: enterDraft, gift: giftDraft }) !== snapshot.value,
-)
+const snapshot = ref(currentDraftsSnapshot())
+
+const dirty = computed(() => currentDraftsSnapshot() !== snapshot.value)
 
 const builtEnterRule = computed(() => buildEnterRule(enterDraft, bindings.current?.roomId ?? ''))
 const builtGiftRule = computed(() => buildGiftRule(giftDraft))
+const builtBroadcastRule = computed(() => buildBroadcastRule(broadcastDraft))
+const builtFollowRule = computed(() => buildFollowRule(followDraft))
+const builtShareRule = computed(() => buildShareRule(shareDraft))
+const builtGuardRule = computed(() => buildGuardRule(guardDraft))
+
+/** onPkDraftUpdate 接住 PkPanel emit 出的整份新草稿，写回本页持有的 reactive 对象。 */
+function onPkDraftUpdate(next: PkDraft) {
+  Object.assign(pkDraft, next)
+}
 
 async function loadRules() {
   const b = bindings.current
@@ -467,11 +698,14 @@ async function loadRules() {
   loading.value = true
   try {
     const rules = await request<RuleView[]>('GET', `/api/bindings/${b.id}/rules`)
-    const enterRule = claimRule(rules, ENTER_RULE_NAME)
-    const giftRule = claimRule(rules, GIFT_RULE_NAME)
-    Object.assign(enterDraft, parseEnterDraft(enterRule))
-    Object.assign(giftDraft, parseGiftDraft(giftRule))
-    snapshot.value = JSON.stringify({ enter: enterDraft, gift: giftDraft })
+    Object.assign(enterDraft, parseEnterDraft(claimRule(rules, ENTER_RULE_NAME)))
+    Object.assign(giftDraft, parseGiftDraft(claimRule(rules, GIFT_RULE_NAME)))
+    Object.assign(pkDraft, parsePkDraft(claimRule(rules, PK_RULE_NAME)))
+    Object.assign(broadcastDraft, parseBroadcastDraft(claimRule(rules, BROADCAST_RULE_NAME)))
+    Object.assign(followDraft, parseFollowDraft(claimRule(rules, FOLLOW_RULE_NAME)))
+    Object.assign(shareDraft, parseShareDraft(claimRule(rules, SHARE_RULE_NAME)))
+    Object.assign(guardDraft, parseGuardDraft(claimRule(rules, GUARD_RULE_NAME)))
+    snapshot.value = currentDraftsSnapshot()
   } catch (e) {
     message.error(e instanceof ApiError ? e.message : '加载规则失败')
   } finally {
@@ -732,6 +966,122 @@ function onSave() {
             </NCollapseItem>
           </NCollapse>
         </NCard>
+
+        <!-- ==================== PK 播报（整体悬空，见 PkPanel.vue 顶部注释） ==================== -->
+        <PkPanel :model-value="pkDraft" @update:model-value="onPkDraftUpdate" />
+
+        <!-- ==================== 轮播消息 ==================== -->
+        <NCard title="轮播消息" class="section-card">
+          <template #header-extra>
+            <NSwitch v-model:value="broadcastDraft.enabled" />
+          </template>
+
+          <p class="hint">
+            定时向直播间发送消息，与「进房欢迎」「礼物答谢」这类事件驱动不同——它由 cron
+            表达式周期性触发（对应 spec.Rule 的 <code>schedule</code> 字段），
+            不需要任何人进房或送礼。<code>on</code> 与 <code>schedule</code> 二选一，
+            两个同时给后端会直接拒收，下面组装出的规则只会带 schedule。
+          </p>
+
+          <h4>发送频率</h4>
+          <NRadioGroup v-model:value="broadcastDraft.scheduleMode">
+            <NRadio
+              v-for="opt in SCHEDULE_MODE_OPTIONS"
+              :key="opt.value"
+              :value="opt.value"
+              class="radio-item"
+            >
+              {{ opt.label }}
+            </NRadio>
+          </NRadioGroup>
+          <div v-if="broadcastDraft.scheduleMode === 'interval'" class="row">
+            <span class="label">每隔（分钟）</span>
+            <NInputNumber
+              v-model:value="broadcastDraft.intervalMinutes"
+              :min="1"
+              style="width: 140px"
+            />
+          </div>
+          <div v-else class="row">
+            <span class="label">cron 表达式（6 段：秒 分 时 日 月 周）</span>
+            <NInput
+              v-model:value="broadcastDraft.cronExpr"
+              placeholder="0 */10 * * * *"
+              style="width: 220px"
+            />
+          </div>
+
+          <h4>轮播内容</h4>
+          <div class="row">
+            <NRadioGroup v-model:value="broadcastDraft.pickMode">
+              <NRadio
+                v-for="opt in PICK_MODE_OPTIONS"
+                :key="opt.value"
+                :value="opt.value"
+                class="radio-item"
+              >
+                {{ opt.label }}
+              </NRadio>
+            </NRadioGroup>
+            <NTooltip>
+              <template #trigger>
+                <NTag type="warning" size="small">待后端支持</NTag>
+              </template>
+              同进房欢迎/礼物答谢：规则引擎目前只有随机抽取，选「轮询」暂不生效。
+            </NTooltip>
+          </div>
+          <p class="hint">
+            <strong>「轮播」这个词目前名不副实：</strong>
+            多条模板一律随机抽取一条播出，不是按顺序循环。想要严格按顺序轮询， 要等
+            <code>server/internal/rules/template.go</code> 的 <code>Renderer</code>
+            支持模板游标状态（同悬空清单第 5 条）。
+          </p>
+          <TemplateList v-model="broadcastDraft.templates" placeholder="轮播消息模板" />
+
+          <NCollapse class="preview-collapse">
+            <NCollapseItem title="预览将要生成的规则 JSON（本地草稿，尚未保存）" name="preview">
+              <pre class="json-preview">{{ JSON.stringify(builtBroadcastRule, null, 2) }}</pre>
+            </NCollapseItem>
+          </NCollapse>
+        </NCard>
+
+        <!-- ==================== 其他答谢：关注 / 分享 / 上舰 ==================== -->
+        <NCard title="其他答谢" class="section-card">
+          <div class="row">
+            <h4 class="inline-title">关注答谢</h4>
+            <NSwitch v-model:value="followDraft.enabled" />
+          </div>
+          <TemplateList v-model="followDraft.templates" placeholder="关注答谢模板" />
+
+          <div class="row">
+            <h4 class="inline-title">分享答谢</h4>
+            <NSwitch v-model:value="shareDraft.enabled" />
+          </div>
+          <TemplateList v-model="shareDraft.templates" placeholder="分享答谢模板" />
+
+          <div class="row">
+            <h4 class="inline-title">上舰答谢</h4>
+            <NSwitch v-model:value="guardDraft.enabled" />
+          </div>
+          <p class="hint">
+            可用变量：<code>{{ GUARD_TEMPLATE_VAR_HINT.username }}</code
+            >、<code>{{ GUARD_TEMPLATE_VAR_HINT.guardName }}</code> （舰长/提督/总督）、<code>{{
+              GUARD_TEMPLATE_VAR_HINT.guardCount
+            }}</code>
+            （购买月数）。新购与续费的区分直接写进模板：
+            <code>{{ GUARD_TEMPLATE_VAR_HINT.renewCondition }}</code>
+            （text/template 自带的条件语法，不需要拆成两条规则）。
+          </p>
+          <TemplateList v-model="guardDraft.templates" placeholder="上舰答谢模板" />
+
+          <NCollapse class="preview-collapse">
+            <NCollapseItem title="预览将要生成的三条规则 JSON（本地草稿，尚未保存）" name="preview">
+              <pre class="json-preview">{{
+                JSON.stringify([builtFollowRule, builtShareRule, builtGuardRule], null, 2)
+              }}</pre>
+            </NCollapseItem>
+          </NCollapse>
+        </NCard>
       </NSpin>
     </template>
   </div>
@@ -757,6 +1107,9 @@ function onSave() {
 .label {
   font-size: 13px;
   opacity: 0.8;
+}
+.inline-title {
+  margin: 0;
 }
 .radio-item {
   margin-right: 16px;

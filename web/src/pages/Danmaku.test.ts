@@ -30,7 +30,24 @@ const {
   secondsFromDuration,
   ENTER_RULE_NAME,
   GIFT_RULE_NAME,
+  buildBroadcastRule,
+  buildBroadcastSchedule,
+  parseBroadcastDraft,
+  defaultBroadcastDraft,
+  BROADCAST_RULE_NAME,
+  buildFollowRule,
+  parseFollowDraft,
+  defaultFollowDraft,
+  FOLLOW_RULE_NAME,
+  buildShareRule,
+  defaultShareDraft,
+  SHARE_RULE_NAME,
+  buildGuardRule,
+  parseGuardDraft,
+  defaultGuardDraft,
+  GUARD_RULE_NAME,
 } = Danmaku
+const { PK_RULE_NAME } = await import('@/components/PkPanel.vue')
 const { useBindingsStore } = await import('@/stores/bindings')
 
 type RuleView = import('@/api/rule-types').RuleView
@@ -291,7 +308,7 @@ describe('Danmaku 页面：认领已保存配置（核心场景）', () => {
 })
 
 describe('Danmaku 页面：四处悬空控件全部渲染，且都不 disabled', () => {
-  it('五处"待后端支持"标签都出现（轮询x2、多人模板、盲盒单列、盲盒盈亏）', async () => {
+  it('八处"待后端支持"标签都出现（Task9 五处 + Task10 新增：轮播轮询、PK匹配信息、PK串门欢迎）', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn().mockImplementation(() => Promise.resolve(ok([]))),
@@ -300,7 +317,9 @@ describe('Danmaku 页面：四处悬空控件全部渲染，且都不 disabled',
     const wrapper = await mountDanmaku()
 
     const tags = wrapper.findAll('.n-tag').filter((t) => t.text() === '待后端支持')
-    expect(tags.length).toBe(5)
+    // Task9：轮询x2（进房欢迎/礼物答谢）、多人模板、盲盒单列、盲盒盈亏 = 5
+    // Task10：轮播消息的轮询、PK匹配信息、PK串门欢迎（来自子组件 PkPanel）= 3
+    expect(tags.length).toBe(8)
   })
 
   it('轮询单选框、多人模板输入框、盲盒复选框都能正常交互（不是 disabled）', async () => {
@@ -348,5 +367,221 @@ describe('Danmaku 页面：dirty 与保存留白', () => {
     await flushPromises()
     // Task 13 才接后端保存，本任务点了保存也不该发出任何请求
     expect(f.mock.calls.length).toBe(callsBefore)
+  })
+})
+
+// ============================================================
+// Task 10：PK 播报、轮播消息、其他答谢（关注/分享/上舰）
+// ============================================================
+
+describe('Danmaku 纯函数：轮播消息（真功能，schedule 驱动）', () => {
+  it('buildBroadcastSchedule 在 interval 模式下生成 6 段 cron', () => {
+    const draft = {
+      ...defaultBroadcastDraft(),
+      scheduleMode: 'interval' as const,
+      intervalMinutes: 5,
+    }
+    expect(buildBroadcastSchedule(draft)).toBe('0 */5 * * * *')
+  })
+
+  it('buildBroadcastSchedule 在 cron 模式下原样使用用户填写的表达式', () => {
+    const draft = {
+      ...defaultBroadcastDraft(),
+      scheduleMode: 'cron' as const,
+      cronExpr: '0 0 */2 * * *',
+    }
+    expect(buildBroadcastSchedule(draft)).toBe('0 0 */2 * * *')
+  })
+
+  it(
+    '【关键：变异测试验证过的一条】buildBroadcastRule 只产出 schedule，绝不同时产出 on —— ' +
+      '否则后端 rules.Rule.Validate()（server/internal/rules/rule.go 第 61-68 行）会因 on/schedule 互斥拒收整条规则（422）',
+    () => {
+      const rule = buildBroadcastRule(defaultBroadcastDraft())
+      expect(rule.schedule).toBeTruthy()
+      expect(rule.on).toBeUndefined()
+      expect(rule.name).toBe(BROADCAST_RULE_NAME)
+    },
+  )
+
+  it('parseBroadcastDraft(null) 返回默认草稿', () => {
+    expect(parseBroadcastDraft(null)).toEqual(defaultBroadcastDraft())
+  })
+
+  it('parseBroadcastDraft 还原 interval 模式的分钟数与模板', () => {
+    const savedRule = {
+      name: BROADCAST_RULE_NAME,
+      enabled: false,
+      schedule: '0 */15 * * * *',
+      do: [{ type: 'danmaku', template: ['已保存的轮播模板'] }],
+    }
+    const draft = parseBroadcastDraft(savedRule)
+    expect(draft.enabled).toBe(false)
+    expect(draft.scheduleMode).toBe('interval')
+    expect(draft.intervalMinutes).toBe(15)
+    expect(draft.templates).toEqual(['已保存的轮播模板'])
+  })
+
+  it('parseBroadcastDraft 遇到非「按分钟间隔」形状的 cron 时落回 cron 自定义模式', () => {
+    const savedRule = { name: BROADCAST_RULE_NAME, schedule: '0 30 9 * * 1', do: [] }
+    const draft = parseBroadcastDraft(savedRule)
+    expect(draft.scheduleMode).toBe('cron')
+    expect(draft.cronExpr).toBe('0 30 9 * * 1')
+  })
+})
+
+describe('Danmaku 纯函数：关注答谢 / 分享答谢 / 上舰答谢（真功能）', () => {
+  it('buildFollowRule 用固定 name 与 on: ["user_follow"]', () => {
+    const rule = buildFollowRule(defaultFollowDraft())
+    expect(rule.name).toBe(FOLLOW_RULE_NAME)
+    expect(rule.on).toEqual(['user_follow'])
+  })
+
+  it('buildShareRule 用固定 name 与 on: ["user_share"]', () => {
+    const rule = buildShareRule(defaultShareDraft())
+    expect(rule.name).toBe(SHARE_RULE_NAME)
+    expect(rule.on).toEqual(['user_share'])
+  })
+
+  it('buildGuardRule 用固定 name 与 on: ["guard_buy"]，默认模板用 {{if .guard.isRenew}} 区分新购/续费', () => {
+    const rule = buildGuardRule(defaultGuardDraft())
+    expect(rule.name).toBe(GUARD_RULE_NAME)
+    expect(rule.on).toEqual(['guard_buy'])
+    expect(rule.do![0].template![0]).toContain('{{if .guard.isRenew}}')
+    expect(rule.do![0].template![0]).toContain('{{.guard.count}}')
+    expect(rule.do![0].template![0]).toContain('{{.guard.name}}')
+  })
+
+  it('parseGuardDraft 还原已保存的上舰答谢模板', () => {
+    const savedRule = {
+      name: GUARD_RULE_NAME,
+      on: ['guard_buy'],
+      do: [{ type: 'danmaku', template: ['已保存的上舰模板'] }],
+    }
+    expect(parseGuardDraft(savedRule).templates).toEqual(['已保存的上舰模板'])
+  })
+
+  it('parseFollowDraft(null) 与已保存规则的往返', () => {
+    expect(parseFollowDraft(null)).toEqual(defaultFollowDraft())
+    const savedRule = {
+      name: FOLLOW_RULE_NAME,
+      enabled: false,
+      on: ['user_follow'],
+      do: [{ type: 'danmaku', template: ['已保存的关注答谢模板'] }],
+    }
+    const draft = parseFollowDraft(savedRule)
+    expect(draft.enabled).toBe(false)
+    expect(draft.templates).toEqual(['已保存的关注答谢模板'])
+  })
+})
+
+describe('Danmaku 页面：轮播消息 / 其他答谢 认领与渲染', () => {
+  it('轮播消息、关注答谢、分享答谢、上舰答谢四个模板输入框都用默认值渲染', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(() => Promise.resolve(ok([]))),
+    )
+    setupStores()
+    const wrapper = await mountDanmaku()
+
+    const placeholders = ['轮播消息模板', '关注答谢模板', '分享答谢模板', '上舰答谢模板']
+    for (const placeholder of placeholders) {
+      const inputs = wrapper.findAll(`input[placeholder="${placeholder}"]`)
+      expect(inputs.length, `「${placeholder}」应至少渲染一个输入框`).toBeGreaterThan(0)
+    }
+  })
+
+  it('认领已保存的四条规则（轮播/关注/分享/上舰），模板输入框显示已保存内容', async () => {
+    const savedRules = [
+      {
+        position: 0,
+        name: BROADCAST_RULE_NAME,
+        enabled: true,
+        schedule: '0 */20 * * * *',
+        do: [{ type: 'danmaku', template: ['房间专属轮播文案'] }],
+      },
+      {
+        position: 1,
+        name: FOLLOW_RULE_NAME,
+        enabled: true,
+        on: ['user_follow'],
+        do: [{ type: 'danmaku', template: ['房间专属关注答谢'] }],
+      },
+      {
+        position: 2,
+        name: SHARE_RULE_NAME,
+        enabled: true,
+        on: ['user_share'],
+        do: [{ type: 'danmaku', template: ['房间专属分享答谢'] }],
+      },
+      {
+        position: 3,
+        name: GUARD_RULE_NAME,
+        enabled: true,
+        on: ['guard_buy'],
+        do: [{ type: 'danmaku', template: ['房间专属上舰答谢'] }],
+      },
+    ]
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(() => Promise.resolve(ok(savedRules))),
+    )
+    setupStores()
+    const wrapper = await mountDanmaku()
+
+    const valueOf = (placeholder: string) =>
+      (wrapper.find(`input[placeholder="${placeholder}"]`).element as HTMLInputElement).value
+
+    expect(valueOf('轮播消息模板')).toBe('房间专属轮播文案')
+    expect(valueOf('关注答谢模板')).toBe('房间专属关注答谢')
+    expect(valueOf('分享答谢模板')).toBe('房间专属分享答谢')
+    expect(valueOf('上舰答谢模板')).toBe('房间专属上舰答谢')
+  })
+
+  it('「轮播」实际是随机播放这句话在界面上明确出现，不藏在 tooltip 里', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(() => Promise.resolve(ok([]))),
+    )
+    setupStores()
+    const wrapper = await mountDanmaku()
+    expect(wrapper.text()).toContain('这个词目前名不副实')
+  })
+})
+
+describe('Danmaku 页面：PK 播报子组件正确挂载并纳入 claimRule/dirty', () => {
+  it('claimRule 能用 PK_RULE_NAME 从规则列表里认领到 PK 播报规则', () => {
+    const rules = [{ name: PK_RULE_NAME, on: ['battle'], enabled: false }]
+    expect(claimRule(rules, PK_RULE_NAME)).toEqual(rules[0])
+  })
+
+  it('PkPanel 的"待后端支持"标签在整页里可见（PK匹配信息 + PK串门欢迎）', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(() => Promise.resolve(ok([]))),
+    )
+    setupStores()
+    const wrapper = await mountDanmaku()
+    expect(wrapper.text()).toContain('PK 播报')
+    expect(wrapper.text()).toContain('PK 匹配信息')
+    expect(wrapper.text()).toContain('PK 串门欢迎')
+  })
+
+  it('改动 PK 播报的匹配模板会让整页 dirty 变真（PkPanel 的改动会同步进页面草稿）', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(() => Promise.resolve(ok([]))),
+    )
+    setupStores()
+    const wrapper = await mountDanmaku()
+
+    const saveBtn = () => wrapper.findAll('button').find((b) => b.text() === '保存并生效')
+    expect(saveBtn()!.attributes('disabled')).toBeDefined()
+
+    const pkInput = wrapper.find('input[placeholder="PK播报语模板"]')
+    await pkInput.setValue('改过的PK模板')
+    await flushPromises()
+
+    expect(saveBtn()!.attributes('disabled')).toBeUndefined()
   })
 })
