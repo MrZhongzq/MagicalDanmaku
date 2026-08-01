@@ -229,7 +229,6 @@ func (s *Store) LoadRunConfig(ctx context.Context) ([]RunConfig, error)
 | `rule:write` | 增删改规则、启停规则 |
 | `danmaku:send` | 手动发送弹幕 |
 | `user:block` | 禁言与解禁，含维护禁言名单 |
-| `account:manage` | 修改 Cookie 与账号参数（限流、字数上限） |
 | `member:manage` | 授权他人、撤销授权 |
 | `event:read` | 查看实时事件流与历史业务日志 |
 
@@ -237,7 +236,7 @@ func (s *Store) LoadRunConfig(ctx context.Context) ([]RunConfig, error)
 
 ### 5.3 预设不进存储层
 
-P4 的 WebUI 会提供「运营」「房管」这类一键按钮，展开成一组权限点。**展开在 UI 层完成，数据库里永远只有权限点。** 这样既不牺牲灵活性，也不让普通用户面对七个勾选框。P3 只在 `internal/perm` 里定义权限点常量与校验，预设留给 P4。
+P4 的 WebUI 会提供「运营」「房管」这类一键按钮，展开成一组权限点。**展开在 UI 层完成，数据库里永远只有权限点。** 这样既不牺牲灵活性，也不让普通用户面对一排勾选框。P3 只在 `internal/perm` 里定义权限点常量与校验，预设留给 P4。
 
 ### 5.4 检查入口
 
@@ -249,7 +248,6 @@ const (
     RuleWrite     Permission = "rule:write"
     DanmakuSend   Permission = "danmaku:send"
     UserBlock     Permission = "user:block"
-    AccountManage Permission = "account:manage"
     MemberManage  Permission = "member:manage"
     EventRead     Permission = "event:read"
 )

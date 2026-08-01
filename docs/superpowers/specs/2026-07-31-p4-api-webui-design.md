@@ -14,7 +14,7 @@ P4 结束时：
 - 浏览器里能完成日常运维的全部操作：扫码登录 B 站账号、增删直播间、编辑规则、看实时弹幕、手动发言与禁言、授权他人
 - 后端不依赖任何窗口，`magicd run` 一条命令同时跑机器人与 Web 服务
 - 前端与后端彻底分离：浏览器只通过 HTTP/JSON 与后端交互，没有服务端模板渲染
-- 权限在 API 层强制执行，P3 定义的七个权限点每一个都有对应的守卫
+- 权限在 API 层强制执行，六个权限点每一个都有对应的守卫
 
 ## 2. 进程模型：机器人与 API 同进程
 
@@ -26,7 +26,7 @@ P4 结束时：
 2. **用户的原始需求是「前后端分离」，指的是浏览器与服务端分离，不是机器人与 API 分离。** 后者是实现细节。
 3. **部署简单。** 一个二进制、一个容器、一个进程要看护。
 
-代价：改规则要重启才生效（见 §9 热重载）。这个代价明确接受。
+同进程也让配置热重载成为可能：改完规则在网页上点「重载」即可生效，不必重启主程序（见 §9）。
 
 HTTP 监听地址由 `MAGICD_HTTP_ADDR` 控制，**默认 `127.0.0.1:8080`**——默认只监听本机，不因为用户忘了配防火墙就把管理界面暴露到公网。Docker 部署需显式设为 `0.0.0.0:8080`，这一点写进部署文档。设为空字符串则完全不起 HTTP 服务，退化成纯机器人。
 
@@ -97,7 +97,6 @@ func (s *Server) requirePerm(p perm.Permission, h http.HandlerFunc) http.Handler
 | `rule:write` | 增删改规则、启停规则、改冷却组 |
 | `danmaku:send` | 手动发弹幕 |
 | `user:block` | 禁言/解禁、维护禁言名单 |
-| `account:manage` | 改账号的 Cookie 与限流参数 |
 | `member:manage` | 授权他人、撤销授权 |
 | `event:read` | 实时事件流、历史业务日志 |
 
@@ -113,6 +112,8 @@ func (s *Server) requirePerm(p perm.Permission, h http.HandlerFunc) http.Handler
 这条规则只在 `perm.OwnerBypass(p)` 一处定义，`store.Can` 与绑定列表的 `permissionSet` 都引它。各写一遍必然漂。
 
 **判定顺序在三处必须一致**：`store.Can`、`guard.go` 的 `canSeeBinding`、以及绑定列表用来填 `permissions` 字段的 `permissionSet`。三者都是「管理员 → 账号所有者 → 授权行」。漂掉一处就会出现「列表说你没权限、请求却成了」，比直接报错更难查。
+
+**曾经有过第七个权限点 `account:manage`（「改账号的 Cookie 与限流参数」），已删除。** 它是绑定级的，而账号设置是账号级的——在绑定 A 上授予它，持有者就能改到同账号下绑定 B 的行为，这是越界。账号级操作因此一律走「账号所有者或管理员」，判定在 `guard.go` 的 `isAccountOwner`，不进权限点体系。
 
 ### 4.3 不属于绑定的资源
 
@@ -153,7 +154,7 @@ B 站账号
   GET    /api/accounts                按可见范围过滤
   POST   /api/accounts/qrcode         开始扫码 → {key, url}
   POST   /api/accounts/qrcode/{key}   轮询一次 → {status} ；成功时按 name 建号或换 Cookie
-  PATCH  /api/accounts/{name}         {rateLimitMs, maxLength}      account:manage
+  PATCH  /api/accounts/{name}         {rateLimitMs, maxLength}      所有者或管理员
   DELETE /api/accounts/{name}         所有者或管理员
 
 绑定
@@ -195,7 +196,7 @@ B 站账号
   DELETE /api/bindings/{id}/members/{username}                      member:manage
 
 元数据（给前端渲染用，只需登录）
-  GET    /api/meta/permissions        七个权限点及中文说明
+  GET    /api/meta/permissions        六个权限点及中文说明
   GET    /api/meta/event-types        事件类型清单及中文说明
   GET    /api/meta/action-types       动作类型清单
   GET    /api/meta/template-funcs     模板函数清单及签名

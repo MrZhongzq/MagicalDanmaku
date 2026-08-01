@@ -355,18 +355,39 @@ func TestQRCodePollUnknownKey(t *testing.T) {
 	}
 }
 
-func TestPatchAccountRequiresAccountManage(t *testing.T) {
+// 改账号参数要求账号所有权，不存在能授出去的权限点。
+//
+// 曾经有过一个 account:manage 权限点，已删除：它是绑定级的，而账号
+// 设置是账号级的，在绑定 A 上授予就能改到同账号下绑定 B 的行为。
+// 所以这条路径只认 isAccountOwner（所有者或管理员）。
+func TestPatchAccountRequiresOwnership(t *testing.T) {
 	srv, st := newTestServer(t)
 	loginAs(t, srv, st, "张三", false)
 	mustBindingFor(t, st, "张三", "小号", "123")
 
 	li := loginAs(t, srv, st, "李四", false)
+	// 先给李四一条该绑定上的授权，证明「有绑定级权限也改不了账号」——
+	// 不给的话这条测试和「李四什么都没有」区分不开
+	if err := st.Grant(context.Background(), "李四", "小号", "123",
+		[]perm.Permission{perm.RuleWrite, perm.MemberManage}); err != nil {
+		t.Fatalf("授权报错: %v", err)
+	}
+
 	resp := jsonRequest(t, li, "PATCH", srv.URL+"/api/accounts/小号", `{"rateLimitMs":2000}`)
 	defer resp.Body.Close()
 	// handlePatchAccount 里 !isAccountOwner(u, acc) 时无条件回 404
 	// （「不是所有者就当作不存在」），不存在 403 分支。
 	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("无权限状态码 = %d, 期望 404", resp.StatusCode)
+		t.Errorf("非所有者状态码 = %d, 期望 404", resp.StatusCode)
+	}
+
+	// 参数一个字节都不该变
+	acc, err := st.GetAccountByName(context.Background(), "小号")
+	if err != nil {
+		t.Fatalf("查账号报错: %v", err)
+	}
+	if acc.RateLimit == 2000*time.Millisecond {
+		t.Error("非所有者不该改得动限流参数")
 	}
 }
 

@@ -8,7 +8,7 @@ P3 多租户数据层已完成并通过全分支终审。本文记录**终审后
 
 19 个任务，34 个提交（含终审修复波次的 6 个）。
 
-- `internal/perm` —— 七个权限点
+- `internal/perm` —— 六个权限点（P4-1 删掉了 `account:manage`，见 P4 设计文档 §4.2）
 - `internal/rules/spec` —— 规则的唯一序列化表示（YAML / JSONB / 未来的 API 共用）
 - `internal/store` —— PostgreSQL 存储层：用户、账号、绑定、规则、授权、脚本 KV、
   禁言名单、业务日志、运行配置载入、YAML 导入

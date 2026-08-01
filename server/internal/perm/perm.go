@@ -15,20 +15,25 @@ type Permission string
 
 // 全部权限点。授权单位是「账号-直播间」绑定，即持有者能对某个账号在
 // 某个直播间做什么。
+//
+// 曾经有过第七个 account:manage（「修改 Cookie 与账号参数」），已删除。
+// 它是绑定级的，而账号设置（Cookie、限流、字数上限）是账号级的——在
+// 绑定 A 上授予它，持有者就能改到同账号下绑定 B 的行为，这是越界。
+// 账号级操作因此一律走「账号所有者或管理员」，判定在 guard.go 的
+// isAccountOwner，不在这个权限点体系里。
 const (
-	RuleRead      Permission = "rule:read"      // 查看规则
-	RuleWrite     Permission = "rule:write"     // 增删改规则、启停规则
-	DanmakuSend   Permission = "danmaku:send"   // 手动发送弹幕
-	UserBlock     Permission = "user:block"     // 禁言与解禁，含维护禁言名单
-	AccountManage Permission = "account:manage" // 修改 Cookie 与账号参数
-	MemberManage  Permission = "member:manage"  // 授权他人、撤销授权
-	EventRead     Permission = "event:read"     // 查看事件流与历史业务日志
+	RuleRead     Permission = "rule:read"     // 查看规则
+	RuleWrite    Permission = "rule:write"    // 增删改规则、启停规则
+	DanmakuSend  Permission = "danmaku:send"  // 手动发送弹幕
+	UserBlock    Permission = "user:block"    // 禁言与解禁，含维护禁言名单
+	MemberManage Permission = "member:manage" // 授权他人、撤销授权
+	EventRead    Permission = "event:read"    // 查看事件流与历史业务日志
 )
 
 // all 按声明顺序排列，All 与错误提示都依赖这个顺序。
 var all = []Permission{
 	RuleRead, RuleWrite, DanmakuSend,
-	UserBlock, AccountManage, MemberManage, EventRead,
+	UserBlock, MemberManage, EventRead,
 }
 
 // known 用于 Parse 的查表。

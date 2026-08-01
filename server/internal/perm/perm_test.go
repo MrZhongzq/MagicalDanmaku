@@ -7,10 +7,12 @@ import (
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/perm"
 )
 
-func TestAllContainsSevenPermissions(t *testing.T) {
+// 六个权限点。曾经有第七个 account:manage，已删除——它是绑定级的，
+// 而账号设置是账号级的，在绑定 A 上授予就能改到同账号下绑定 B 的行为。
+func TestAllContainsSixPermissions(t *testing.T) {
 	all := perm.All()
-	if len(all) != 7 {
-		t.Fatalf("权限点数量 = %d, 期望 7: %v", len(all), all)
+	if len(all) != 6 {
+		t.Fatalf("权限点数量 = %d, 期望 6: %v", len(all), all)
 	}
 	seen := make(map[perm.Permission]bool, len(all))
 	for _, p := range all {
@@ -21,7 +23,7 @@ func TestAllContainsSevenPermissions(t *testing.T) {
 	}
 	for _, want := range []perm.Permission{
 		perm.RuleRead, perm.RuleWrite, perm.DanmakuSend,
-		perm.UserBlock, perm.AccountManage, perm.MemberManage, perm.EventRead,
+		perm.UserBlock, perm.MemberManage, perm.EventRead,
 	} {
 		if !seen[want] {
 			t.Errorf("All() 缺少 %q", want)

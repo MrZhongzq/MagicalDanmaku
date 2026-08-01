@@ -22,13 +22,12 @@ type metaItem struct {
 // 与 perm.All() 一起使用：说明缺失时用值本身兜底，
 // 这样新增权限点忘了加说明也不会让前端渲染不出那一项。
 var permissionLabels = map[perm.Permission]string{
-	perm.RuleRead:      "查看规则",
-	perm.RuleWrite:     "增删改规则、启停规则",
-	perm.DanmakuSend:   "手动发送弹幕",
-	perm.UserBlock:     "禁言与解禁，含维护禁言名单",
-	perm.AccountManage: "修改 Cookie 与账号参数",
-	perm.MemberManage:  "授权他人、撤销授权",
-	perm.EventRead:     "查看事件流与历史业务日志",
+	perm.RuleRead:     "查看规则",
+	perm.RuleWrite:    "增删改规则、启停规则",
+	perm.DanmakuSend:  "手动发送弹幕",
+	perm.UserBlock:    "禁言与解禁，含维护禁言名单",
+	perm.MemberManage: "授权他人、撤销授权",
+	perm.EventRead:    "查看事件流与历史业务日志",
 }
 
 // eventTypeLabels 是事件类型的中文说明，顺序即前端下拉框的顺序：
