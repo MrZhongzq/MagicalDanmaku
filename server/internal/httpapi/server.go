@@ -174,6 +174,12 @@ func (s *Server) routes() {
 	// 实时事件流：SSE 推送，权限与业务日志一致，同走 event:read。
 	s.mux.HandleFunc("GET /api/bindings/{binding}/stream",
 		s.requirePerm(perm.EventRead, s.handleStream))
+
+	// 授权管理：把别人拉进某个绑定、给他权限点、撤销。全部走 member:manage。
+	members := "/api/bindings/{binding}/members"
+	s.mux.HandleFunc("GET "+members, s.requirePerm(perm.MemberManage, s.handleListMembers))
+	s.mux.HandleFunc("PUT "+members+"/{username}", s.requirePerm(perm.MemberManage, s.handleGrantMember))
+	s.mux.HandleFunc("DELETE "+members+"/{username}", s.requirePerm(perm.MemberManage, s.handleRevokeMember))
 }
 
 // testRoutes 注册仅供测试用的路由（/api/test/*）。
