@@ -168,6 +168,67 @@ describe('Stats 页', () => {
     expect(wrapper.text()).toContain('这不是统计数字')
   })
 
+  // ---- 全分支终审第 1 条：切绑定要清空预览，不能把甲房间的行带到乙房间 ----
+  it('展开预览后切换绑定，旧绑定的预览行被清空，且已展开状态下自动为新绑定重新请求', async () => {
+    setActivePinia(createPinia())
+    const bindings = useBindingsStore()
+    const 绑定乙 = { ...绑定, id: 2, roomId: '456' }
+    bindings.list = [绑定, 绑定乙]
+    bindings.select(1)
+
+    const rowsFor甲 = [
+      {
+        id: 1,
+        kind: 'event' as const,
+        eventType: 'danmaku',
+        actionType: '',
+        ruleName: '',
+        userUid: '1',
+        userName: '甲房间观众',
+        detail: { text: '你好' },
+        occurredAt: '2026-08-01T12:00:00Z',
+      },
+    ]
+    const rowsFor乙 = [
+      {
+        id: 2,
+        kind: 'event' as const,
+        eventType: 'danmaku',
+        actionType: '',
+        ruleName: '',
+        userUid: '2',
+        userName: '乙房间观众',
+        detail: { text: '嗨' },
+        occurredAt: '2026-08-01T12:05:00Z',
+      },
+    ]
+
+    const f = vi.fn().mockImplementation((url: string) => {
+      if (url.startsWith('/api/bindings/1/activity')) return Promise.resolve(ok(rowsFor甲))
+      if (url.startsWith('/api/bindings/2/activity')) return Promise.resolve(ok(rowsFor乙))
+      return Promise.resolve(ok({ status: 'ok' }))
+    })
+    vi.stubGlobal('fetch', f)
+
+    const wrapper = mount(Stats)
+    await flushPromises()
+
+    const expandBtn = wrapper.findAll('button').find((b) => b.text() === '展开')
+    expect(expandBtn).toBeTruthy()
+    await expandBtn!.trigger('click')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('甲房间观众')
+
+    bindings.select(2)
+    await flushPromises()
+
+    // 旧绑定（甲）的预览行必须被清空，不能残留展示成乙房间的数据
+    expect(wrapper.text()).not.toContain('甲房间观众')
+    // 之前是展开状态，切绑定后应当自动为新绑定重新请求并显示新数据
+    expect(wrapper.text()).toContain('乙房间观众')
+  })
+
   it('维度切换（按场次/按日）可以点击，且不触发任何网络请求', async () => {
     setupStore()
     const f = stubFetch([])

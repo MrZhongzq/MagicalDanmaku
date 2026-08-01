@@ -29,7 +29,7 @@
  * 的盲盒字段（悬空清单第 7 条）。即使补上聚合接口，没有盲盒字段也算不出
  * 盈亏——两层缺口分别登记，见悬空清单第 14、15 条。
  */
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import {
   NAlert,
   NButton,
@@ -125,6 +125,20 @@ async function togglePreview() {
     await loadPreview()
   }
 }
+
+// 换房间要把预览清空并允许重新加载。
+//
+// 不清的话：在甲房间展开预览后切到乙房间，previewRows 还是甲房间的行，
+// 而 previewLoaded 为真会让 togglePreview 永远不再请求——收起再展开也
+// 不刷新。表头写着「最近活动预览」，用户没有任何线索知道这是别的房间的数据。
+watch(
+  () => bindings.currentId,
+  () => {
+    previewLoaded.value = false
+    previewRows.value = []
+    if (previewVisible.value) void loadPreview()
+  },
+)
 
 interface PreviewRow {
   key: string
