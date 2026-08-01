@@ -328,14 +328,20 @@ func TestDeleteActivityRejectsInvertedRange(t *testing.T) {
 	}
 }
 
-func TestDeleteActivityRequiresEventRead(t *testing.T) {
+// 全批次终审项【5】：DELETE 走"账号所有者或管理员"这条轴，不是
+// event:read——即便显式给了 event:read（能看到全部日志的权限点），
+// 也不该能删掉它们。删历史与删绑定是同一量级的破坏性操作。
+func TestDeleteActivityRequiresAccountOwnerOrAdminNotJustEventRead(t *testing.T) {
 	srv, st := newTestServer(t)
 	loginAs(t, srv, st, "张三", false)
 	bid := mustBindingFor(t, st, "张三", "小号", "123")
 
 	li := loginAs(t, srv, st, "李四", false)
+	// 特意只给 event:read——这正是 review 里点名的"有完整成员授权
+	// 子系统，把某人拉进绑定只给 event:read 是设计上支持的用法"，
+	// 这个人不该因此附带拿到删光历史的能力。
 	if err := st.Grant(context.Background(), "李四", "小号", "123",
-		[]perm.Permission{perm.RuleWrite}); err != nil {
+		[]perm.Permission{perm.EventRead}); err != nil {
 		t.Fatalf("授权报错: %v", err)
 	}
 
@@ -343,7 +349,51 @@ func TestDeleteActivityRequiresEventRead(t *testing.T) {
 		srv.URL+"/api/bindings/"+itoa(bid)+"/activity?all=1", "")
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusForbidden {
-		t.Errorf("状态码 = %d, 期望 403", resp.StatusCode)
+		t.Errorf("状态码 = %d, 期望 403——即便有 event:read，也不该能删除业务日志", resp.StatusCode)
+	}
+
+	// 403 之后库里的数据必须真的没被动——不能是"报了 403 但其实还是删了"
+	remain := jsonRequest(t, li, "GET", srv.URL+"/api/bindings/"+itoa(bid)+"/activity", "")
+	defer remain.Body.Close()
+	if remain.StatusCode != http.StatusOK {
+		t.Fatalf("GET 状态码 = %d", remain.StatusCode)
+	}
+}
+
+// 完全不可见的调用者（连这个绑定存在都不该知道）删除时应该收到 404，
+// 与"绑定不存在"不可区分——语义照抄 handleDeleteBinding，用绑定 ID
+// 递增探测不出部署里有哪些绑定。
+func TestDeleteActivityNotVisibleReturnsNotFound(t *testing.T) {
+	srv, st := newTestServer(t)
+	loginAs(t, srv, st, "张三", false)
+	bid := mustBindingFor(t, st, "张三", "小号", "123")
+
+	li := loginAs(t, srv, st, "李四", false) // 没有任何授权，对这个绑定完全不可见
+
+	resp := jsonRequest(t, li, "DELETE",
+		srv.URL+"/api/bindings/"+itoa(bid)+"/activity?all=1", "")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("状态码 = %d, 期望 404（不可区分于「绑定不存在」）", resp.StatusCode)
+	}
+}
+
+// 管理员即便不是账号所有者也能删——与 handleDeleteBinding 的授权语义
+// 一致，管理员一律放行。
+func TestDeleteActivityAllowsAdminEvenWithoutOwnership(t *testing.T) {
+	srv, st := newTestServer(t)
+	loginAs(t, srv, st, "张三", false)
+	bid := mustBindingFor(t, st, "张三", "小号", "123")
+	admin := loginAs(t, srv, st, "管理员", true)
+
+	seedActivity(t, st, bid,
+		store.ActivityRow{Kind: store.ActivityEvent, EventType: "danmaku", OccurredAt: seedTime})
+
+	resp := jsonRequest(t, admin, "DELETE",
+		srv.URL+"/api/bindings/"+itoa(bid)+"/activity?all=1", "")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("状态码 = %d, 期望 200——管理员应当能删，即便不是账号所有者", resp.StatusCode)
 	}
 }
 

@@ -133,9 +133,21 @@ func parseActivityTimeRange(w http.ResponseWriter, params url.Values) (since, un
 
 // handleDeleteActivity 清除该绑定名下的业务日志，返回删了多少行。
 //
-// 权限用 event:read，与查询日志一致：能看到全部日志的人删掉它们
-// 不构成额外的信息泄漏，这是个自托管单人工具，没必要为这一个操作
-// 再发明一个权限点。
+// 授权：账号所有者或管理员——**不是** event:read。event:read 的文档
+// 说的是「查看事件流与历史业务日志」，把「能一次 ?all=1 抹掉整个房间
+// 历史」这种不可恢复的破坏性操作也挂在它下面，是把「多看到点东西不
+// 算额外泄漏」这个理由用错了地方：问题从来不是泄漏，是破坏。这个
+// 项目有完整的成员授权子系统，把某人拉进绑定只给 event:read 是设计
+// 上支持的用法（比如只想让协管看日志），那个人不该因此附带拿到删光
+// 历史的能力。删历史与删绑定是同一量级的破坏性操作（删绑定会带走
+// 全部规则与授权），所以判定收在同一条轴上：账号所有者或管理员。
+//
+// 走 requireAuth 而不是 requirePerm：这条路径没有守卫替它做可见性
+// 判断，必须自己做——判定顺序照抄 handleDeleteBinding 的「不可见 →
+// 404、可见但非所有者 → 403」，二者语义必须一致，否则会出现「一个
+// 接口 404、另一个接口 403」这种比报错更难查的不一致，也会让「不
+// 存在」与「不归你」变得可区分，被用绑定 ID 递增探测出部署里有哪些
+// 绑定。
 //
 // 不带 since/until 时必须显式传 all=1，否则 422：一次手滑的
 // DELETE .../activity 不该清空整个房间的历史。带了时间范围就不需要
@@ -143,7 +155,39 @@ func parseActivityTimeRange(w http.ResponseWriter, params url.Values) (since, un
 // 有范围时它没有意义（同时传范围与 all=1 不会报错，也不会删得比
 // 范围更多）。
 func (s *Server) handleDeleteActivity(w http.ResponseWriter, r *http.Request) {
-	b := bindingFrom(r.Context())
+	u := userFrom(r.Context())
+
+	id, err := parseBindingID(r)
+	if err != nil {
+		respondError(w, http.StatusNotFound, "绑定不存在")
+		return
+	}
+	b, err := s.bindingByID(r.Context(), id)
+	if err != nil {
+		respondStoreError(w, err, "绑定不存在")
+		return
+	}
+
+	acc, err := s.store.GetAccountByName(r.Context(), b.AccountName)
+	if err != nil {
+		respondStoreError(w, err, "账号不存在")
+		return
+	}
+	if !s.isAccountOwner(u, acc) {
+		visible, err := s.canSeeBinding(r.Context(), u, b)
+		if err != nil {
+			respondStoreError(w, err, "")
+			return
+		}
+		if !visible {
+			respondError(w, http.StatusNotFound, "绑定不存在")
+			return
+		}
+		// 可见但不是所有者 → 403：对方已经知道这个绑定存在，不算泄漏
+		respondError(w, http.StatusForbidden, "只有账号所有者能清除业务日志")
+		return
+	}
+
 	params := r.URL.Query()
 
 	since, until, ok := parseActivityTimeRange(w, params)
