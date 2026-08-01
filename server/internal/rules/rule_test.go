@@ -61,6 +61,53 @@ func TestRuleValidateRejectsEmptyName(t *testing.T) {
 	}
 }
 
+// 只配 TemplateMulti、规则又没有 Aggregate 的组合必然失败：没有
+// Aggregate 时走 PassthroughTrigger，count 恒为 1，永远选不中
+// TemplateMulti，而 Template 是空的——每次触发都会报「模板列表为空」。
+// 这种配置错误应当在 Validate 阶段就拦下，而不是留到运行期每次触发
+// 都报一条查不出原因的错误。
+func TestRuleValidateRejectsTemplateMultiOnlyWithoutAggregate(t *testing.T) {
+	r := Rule{
+		Name: "只配多人模板",
+		On:   []event.Type{event.TypeUserEnter},
+		Do:   []Action{{Type: ActionDanmaku, TemplateMulti: []string{"欢迎 {{join .users \"、\"}} 回家"}}},
+	}
+	err := r.Validate()
+	if err == nil {
+		t.Fatal("只配 TemplateMulti 且无 Aggregate 应当报错")
+	}
+	if !strings.Contains(err.Error(), "aggregate") {
+		t.Errorf("错误信息应提及 aggregate，实际: %v", err)
+	}
+}
+
+// 同样只配 TemplateMulti，但规则配了 Aggregate 时是合法的——用户就是
+// 只要多人合并欢迎，单人不发言。Aggregate 存在时可能配了
+// MinCount > 1，届时根本不会有单人触发，不该被拦。
+func TestRuleValidateAcceptsTemplateMultiOnlyWithAggregate(t *testing.T) {
+	r := Rule{
+		Name:      "只配多人模板带合并",
+		On:        []event.Type{event.TypeUserEnter},
+		Aggregate: &AggregateSpec{Window: 3 * time.Second, By: AggregateByType},
+		Do:        []Action{{Type: ActionDanmaku, TemplateMulti: []string{"欢迎 {{join .users \"、\"}} 回家"}}},
+	}
+	if err := r.Validate(); err != nil {
+		t.Errorf("只配 TemplateMulti 但有 Aggregate 不应报错: %v", err)
+	}
+}
+
+// 最常见的配置：只配 Template、没有 Aggregate，必须继续放行。
+func TestRuleValidateAcceptsTemplateOnlyWithoutAggregate(t *testing.T) {
+	r := Rule{
+		Name: "只配单人模板",
+		On:   []event.Type{event.TypeUserEnter},
+		Do:   []Action{{Type: ActionDanmaku, Template: []string{"欢迎 {{.user.username}}"}}},
+	}
+	if err := r.Validate(); err != nil {
+		t.Errorf("只配 Template 且无 Aggregate 不应报错: %v", err)
+	}
+}
+
 func TestRuleValidateRejectsNoAction(t *testing.T) {
 	r := Rule{Name: "无动作", On: []event.Type{event.TypeDanmaku}}
 	if err := r.Validate(); err == nil {

@@ -83,6 +83,26 @@ func (r Rule) Validate() error {
 		if err := a.Validate(); err != nil {
 			return fmt.Errorf("rules: 规则 %q 的第 %d 个动作非法: %w", r.Name, i+1, err)
 		}
+
+		// 只配 TemplateMulti 而没有 Aggregate 的组合必然失败，在这里拦住。
+		//
+		// 没有 Aggregate 的规则走 PassthroughTrigger，count 恒为 1
+		// （aggregate.go），永远选不中 TemplateMulti；而 Template 是空的，
+		// 每次触发都会报「模板列表为空」。
+		//
+		// 不拦的话用户看到的是「规则不生效」，日志里每次触发一条错误，
+		// 查不到为什么——把一个配置错误推迟到了运行期。
+		//
+		// 反过来，只配 TemplateMulti 且*有* Aggregate 时不拦：规则可能
+		// 配了 MinCount > 1，那样根本不会有单人触发，此时是合法配置
+		// （用户就是只要多人合并欢迎，单人不发言），拦了会挡住它。
+		if a.Type == ActionDanmaku && len(a.Template) == 0 &&
+			len(a.TemplateMulti) > 0 && r.Aggregate == nil {
+			return fmt.Errorf("rules: 规则 %q 的第 %d 个动作只配了 templateMulti，"+
+				"但这条规则没有配 aggregate——不合并的触发永远只有一个人，"+
+				"templateMulti 用不上。请改用 template，或给规则加上 aggregate",
+				r.Name, i+1)
+		}
 	}
 
 	if r.When != nil {
