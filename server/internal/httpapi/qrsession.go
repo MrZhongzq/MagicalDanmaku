@@ -9,7 +9,9 @@ import (
 type qrPending struct {
 	AccountName string // 扫码成功后要建或要更新的账号名
 	UserID      int64  // 发起扫码的系统用户，新账号归属他
-	ExpiresAt   time.Time
+	IsAdmin     bool   // 发起时是否为管理员，落库前重查归属要用
+
+	ExpiresAt time.Time
 }
 
 // qrSessions 是待确认扫码的内存表。

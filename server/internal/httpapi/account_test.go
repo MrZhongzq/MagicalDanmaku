@@ -10,6 +10,7 @@ import (
 
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/connector/bilibili/auth"
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/perm"
+	"github.com/MrZhongzq/MagicalDanmaku/server/internal/store"
 )
 
 // fakeQR 是可控的扫码实现，避免测试打真实 B 站接口。
@@ -279,6 +280,64 @@ func TestQRCodePollRejectsOtherUsersKey(t *testing.T) {
 	}
 	if _, err := st.GetAccountByName(context.Background(), "小号"); err == nil {
 		t.Error("不该替别人把账号建出来")
+	}
+}
+
+// 扫码发起后、落库前，账号被别人抢先建出来——不能把 Cookie 写进去。
+//
+// handleQRCodeStart 看到的是至多 3 分钟前的状态。张三发起扫码时「小号」
+// 还不存在，Start 检查放行；但 3 分钟内王五抢先建出了同名账号（现实中
+// 是撞了一个可猜的名字）。若 saveScannedAccount 落库前不重查归属，
+// 张三完成扫码就会把自己的 B 站 Cookie 换进王五的账号行——owner_id
+// 不变，王五的机器人从此以张三的身份发言。
+func TestQRCodePollRefusesAccountCreatedByOthersMeanwhile(t *testing.T) {
+	srv, st, api := newTestServerWithAPI(t)
+	attackerCookie := "SESSDATA=attacker; bili_jct=x; DedeUserID=666"
+	api.SetQRLogin(&fakeQR{key: "K", url: "u",
+		result: auth.PollResult{Status: auth.PollSuccess, Cookie: attackerCookie}})
+
+	// 张三对尚不存在的账号名「小号」发起扫码——Start 检查放行
+	zhang := loginAs(t, srv, st, "张三", false)
+	start := jsonRequest(t, zhang, "POST", srv.URL+"/api/accounts/qrcode", `{"name":"小号"}`)
+	start.Body.Close()
+
+	// 王五在这期间抢先把「小号」建了出来
+	loginAs(t, srv, st, "王五", false)
+	wangwu, err := st.GetUserByName(context.Background(), "王五")
+	if err != nil {
+		t.Fatalf("查用户报错: %v", err)
+	}
+	victimCookie := "SESSDATA=victim; bili_jct=y; DedeUserID=999"
+	if _, err := st.CreateAccount(context.Background(), store.AccountInput{
+		Name: "小号", UID: "999", Cookie: victimCookie, OwnerID: wangwu.ID,
+		RateLimit: time.Second, MaxLength: 40,
+	}); err != nil {
+		t.Fatalf("建账号报错: %v", err)
+	}
+
+	// 张三完成扫码——必须失败，且响应体不能泄漏「这个账号归王五」
+	resp := jsonRequest(t, zhang, "POST", srv.URL+"/api/accounts/qrcode/K", "")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("状态码 = %d, 期望 404（与 handleQRCodeStart 的 404 文案一致）", resp.StatusCode)
+	}
+	var body map[string]string
+	_ = json.NewDecoder(resp.Body).Decode(&body)
+	if strings.Contains(body["error"], "不属于") || strings.Contains(body["error"], "王五") {
+		t.Errorf("错误文案泄漏了归属信息: %q", body["error"])
+	}
+
+	acc, err := st.GetAccountByName(context.Background(), "小号")
+	if err != nil {
+		t.Fatalf("账号应仍存在: %v", err)
+	}
+	if acc.OwnerID != wangwu.ID {
+		t.Errorf("账号归属被改动: OwnerID = %d, 期望 %d（王五）", acc.OwnerID, wangwu.ID)
+	}
+	// 核心断言：Cookie 一个字节都不该变——这是唯一能钉住
+	// 「Cookie 没被换掉」的断言，只查 OwnerID 不够。
+	if acc.Cookie != victimCookie {
+		t.Errorf("Cookie 被换成了攻击者的: %q, 期望仍是王五的原值 %q", acc.Cookie, victimCookie)
 	}
 }
 

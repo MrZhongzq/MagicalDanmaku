@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -96,8 +97,9 @@ func (s *Server) handleQRCodeStart(w http.ResponseWriter, r *http.Request) {
 			// 这个账号名被别人占用了，任何登录用户拿任意名字试一次就能探测。
 			// 与 handlePatchAccount / handleDeleteAccount 保持一致。
 			//
-			// 这道拦截本身不能删：saveScannedAccount 在落库时不做归属校验，
-			// 只看账号名是否存在就直接换 Cookie，这里是唯一的关口。
+			// 这道拦截挡的是「发起扫码那一刻」的状态，是 TOCTOU 的前半段；
+			// 落库前 saveScannedAccount 还会重查一次——发起扫码时账号还
+			// 不存在，等扫完它可能已经被别人建出来了，这道检查看不到那个。
 			respondError(w, http.StatusNotFound, "账号 %s 不存在", name)
 			return
 		}
@@ -114,7 +116,7 @@ func (s *Server) handleQRCodeStart(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.qrs.purgeExpired()
-	s.qrs.put(qr.Key, qrPending{AccountName: name, UserID: u.ID})
+	s.qrs.put(qr.Key, qrPending{AccountName: name, UserID: u.ID, IsAdmin: u.IsAdmin})
 
 	respondJSON(w, http.StatusOK, map[string]string{
 		"key": qr.Key,
@@ -151,7 +153,9 @@ func (s *Server) handleQRCodePoll(w http.ResponseWriter, r *http.Request) {
 	case auth.PollSuccess:
 		// Cookie 在服务端落库，绝不回传给浏览器
 		if err := s.saveScannedAccount(r.Context(), pending, res.Cookie); err != nil {
-			respondStoreError(w, err, "")
+			// 文案与 handleQRCodeStart 的 404 一致：二者是同一件事的
+			// TOCTOU 两端，调用者不该看出区别。
+			respondStoreError(w, err, "账号 "+pending.AccountName+" 不存在")
 			return
 		}
 		s.qrs.delete(key)
@@ -174,7 +178,15 @@ func (s *Server) saveScannedAccount(ctx context.Context, p qrPending, cookie str
 		return err
 	}
 
-	if _, err := s.store.GetAccountByName(ctx, p.AccountName); err == nil {
+	if acc, err := s.store.GetAccountByName(ctx, p.AccountName); err == nil {
+		// 必须在落库前重查一次归属。handleQRCodeStart 那道检查看到的是
+		// 至多 qrTTL(3 分钟) 之前的状态：发起扫码时账号还不存在，等扫完
+		// 它可能已经被别人建出来了。不重查的话，攻击者对一个可猜的账号名
+		// 发起扫码就能把自己的 Cookie 写进受害者的账号行——owner_id 不变，
+		// 受害者的机器人从此以攻击者的 B 站身份发言。
+		if !p.IsAdmin && acc.OwnerID != p.UserID {
+			return fmt.Errorf("账号 %s 不存在: %w", p.AccountName, store.ErrNotFound)
+		}
 		return s.store.UpdateAccountCookie(ctx, p.AccountName, cookie, sess.UID)
 	} else if !errors.Is(err, store.ErrNotFound) {
 		return err
