@@ -14,6 +14,13 @@ import (
 // 排行榜（ONLINE_RANK_UPDATE）与房间统计（ROOM_STATS_UPDATE）每 8 秒
 // 一条且没有分析价值，不记；未知事件同理——它们的用途是补映射，
 // 那由 magicd dump 覆盖。
+//
+// live_start/live_stop 反过来必须记：二者频率极低（一天几次），但是
+// 统计聚合接口（GET /api/bindings/{id}/stats）划分开播场次、计算直播
+// 时长的唯一依据——没有它们，by=session 无从配对，日维度的 liveSeconds
+// 也无从算起。历史数据里没有这两类事件（此前一直被排除在白名单外），
+// 补上白名单不会回填过去——直播时长只能从这次改动生效之后的数据算起，
+// 这一点在 stats.go 与统计接口的注释里也写了一遍。
 var loggedEventTypes = map[event.Type]bool{
 	event.TypeDanmaku:     true,
 	event.TypeSuperChat:   true,
@@ -25,6 +32,8 @@ var loggedEventTypes = map[event.Type]bool{
 	event.TypeUserShare:   true,
 	event.TypeUserLike:    true,
 	event.TypeUserBlocked: true,
+	event.TypeLiveStart:   true,
+	event.TypeLiveStop:    true,
 }
 
 // DefaultLoggedEventTypes 返回默认入库的事件类型集合的副本。

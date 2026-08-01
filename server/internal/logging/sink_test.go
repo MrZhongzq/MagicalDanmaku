@@ -67,6 +67,27 @@ func TestSinkRecordsDanmakuEvent(t *testing.T) {
 	}
 }
 
+// live_start/live_stop 是统计接口划分开播场次、计算直播时长的唯一依据，
+// 必须记——这是 P4-3 任务 5 订正的根因：此前它们没在白名单里，
+// 直播时长从没进过 activity_logs。
+func TestSinkRecordsLiveStartAndStop(t *testing.T) {
+	c := newCollector()
+	w := newTestWriter(c)
+	s := w.Sink(3, 7, "123")
+
+	s.RecordEvent(event.Event{Type: event.TypeLiveStart, Payload: event.LiveStart{}})
+	s.RecordEvent(event.Event{Type: event.TypeLiveStop, Payload: event.LiveStop{}})
+	w.Close()
+
+	rows, _ := c.snapshot()
+	if len(rows) != 2 {
+		t.Fatalf("应写出 2 条，实际 %d 条", len(rows))
+	}
+	if rows[0].EventType != "live_start" || rows[1].EventType != "live_stop" {
+		t.Errorf("事件类型 = %s / %s", rows[0].EventType, rows[1].EventType)
+	}
+}
+
 // 排行榜每 8 秒一条且没有分析价值，不记
 func TestSinkSkipsNoiseEvents(t *testing.T) {
 	c := newCollector()
@@ -89,6 +110,7 @@ func TestSinkRecordsAllBusinessEventTypes(t *testing.T) {
 		event.TypeDanmaku, event.TypeSuperChat, event.TypeGift, event.TypeGiftCombo,
 		event.TypeGuardBuy, event.TypeUserEnter, event.TypeUserFollow,
 		event.TypeUserShare, event.TypeUserLike, event.TypeUserBlocked,
+		event.TypeLiveStart, event.TypeLiveStop,
 	}
 	logged := logging.DefaultLoggedEventTypes()
 	for _, tp := range want {

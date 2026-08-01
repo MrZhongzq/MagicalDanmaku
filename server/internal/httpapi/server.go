@@ -200,6 +200,11 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/bindings/{binding}/activity",
 		s.requirePerm(perm.EventRead, s.handleQueryActivity))
 
+	// 统计聚合：WebUI 统计页的卡片数据，SQL 侧 GROUP BY，权限与业务
+	// 日志一致，同走 event:read（这是查看事件统计，不是新的权限点）。
+	s.mux.HandleFunc("GET /api/bindings/{binding}/stats",
+		s.requirePerm(perm.EventRead, s.handleQueryStats))
+
 	// 实时事件流：SSE 推送，权限与业务日志一致，同走 event:read。
 	s.mux.HandleFunc("GET /api/bindings/{binding}/stream",
 		s.requirePerm(perm.EventRead, s.handleStream))

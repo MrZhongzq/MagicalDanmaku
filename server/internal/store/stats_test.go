@@ -1,0 +1,392 @@
+package store
+
+import (
+	"context"
+	"testing"
+	"time"
+)
+
+// statsFixedTime 是统计测试用的固定时刻，避免跨天/跨秒时断言随机失败。
+var statsFixedTime = time.Date(2026, 7, 31, 10, 0, 0, 0, time.UTC)
+
+func statsBucketFor(t *testing.T, buckets []StatsBucket, bucket string) StatsBucket {
+	t.Helper()
+	for _, b := range buckets {
+		if b.Bucket == bucket {
+			return b
+		}
+	}
+	t.Fatalf("没有找到 bucket %q，实际 %+v", bucket, buckets)
+	return StatsBucket{}
+}
+
+func TestQueryStatsByDayCountsBusinessEvents(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	accID := mustAccount(t, s, "小号")
+
+	if err := s.InsertActivity(ctx, []ActivityRow{
+		{AccountID: accID, Kind: ActivityEvent, EventType: "danmaku", OccurredAt: statsFixedTime},
+		{AccountID: accID, Kind: ActivityEvent, EventType: "danmaku", OccurredAt: statsFixedTime.Add(time.Minute)},
+		{AccountID: accID, Kind: ActivityEvent, EventType: "user_enter", OccurredAt: statsFixedTime},
+		{AccountID: accID, Kind: ActivityEvent, EventType: "guard_buy", OccurredAt: statsFixedTime},
+		{AccountID: accID, Kind: ActivityEvent, EventType: "gift",
+			Detail: []byte(`{"GiftName":"小心心"}`), OccurredAt: statsFixedTime},
+	}); err != nil {
+		t.Fatalf("写入报错: %v", err)
+	}
+
+	got, err := s.QueryStatsByDay(ctx, StatsQuery{AccountID: accID})
+	if err != nil {
+		t.Fatalf("按天聚合报错: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("bucket 数 = %d, 期望 1: %+v", len(got), got)
+	}
+	b := got[0]
+	if b.Bucket != "2026-07-31" {
+		t.Errorf("bucket = %q, 期望 2026-07-31", b.Bucket)
+	}
+	if b.DanmakuCount != 2 || b.EnterCount != 1 || b.GiftCount != 1 || b.GuardCount != 1 {
+		t.Errorf("计数不对: %+v", b)
+	}
+}
+
+// giftKinds 是去重计数，不是礼物总数
+func TestQueryStatsByDayGiftKindsIsDistinct(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	accID := mustAccount(t, s, "小号")
+
+	if err := s.InsertActivity(ctx, []ActivityRow{
+		{AccountID: accID, Kind: ActivityEvent, EventType: "gift",
+			Detail: []byte(`{"GiftName":"小心心"}`), OccurredAt: statsFixedTime},
+		{AccountID: accID, Kind: ActivityEvent, EventType: "gift",
+			Detail: []byte(`{"GiftName":"小心心"}`), OccurredAt: statsFixedTime.Add(time.Minute)},
+		{AccountID: accID, Kind: ActivityEvent, EventType: "gift",
+			Detail: []byte(`{"GiftName":"辣条"}`), OccurredAt: statsFixedTime.Add(2 * time.Minute)},
+	}); err != nil {
+		t.Fatalf("写入报错: %v", err)
+	}
+
+	got, err := s.QueryStatsByDay(ctx, StatsQuery{AccountID: accID})
+	if err != nil {
+		t.Fatalf("按天聚合报错: %v", err)
+	}
+	b := statsBucketFor(t, got, "2026-07-31")
+	if b.GiftCount != 3 {
+		t.Errorf("GiftCount = %d, 期望 3（总条数）", b.GiftCount)
+	}
+	if b.GiftKinds != 2 {
+		t.Errorf("GiftKinds = %d, 期望 2（去重后的礼物种类）", b.GiftKinds)
+	}
+}
+
+// COMBO_SEND 与其对应的多条 SEND_GIFT 是重复计数关系（见 cmdmap/gift.go），
+// GiftCount 只数 event_type=gift，不把 gift_combo 也加进去，否则同一波
+// 礼物会被数两遍。
+func TestQueryStatsByDayExcludesGiftCombo(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	accID := mustAccount(t, s, "小号")
+
+	if err := s.InsertActivity(ctx, []ActivityRow{
+		{AccountID: accID, Kind: ActivityEvent, EventType: "gift",
+			Detail: []byte(`{"GiftName":"辣条"}`), OccurredAt: statsFixedTime},
+		{AccountID: accID, Kind: ActivityEvent, EventType: "gift_combo",
+			Detail: []byte(`{"GiftName":"辣条"}`), OccurredAt: statsFixedTime.Add(time.Second)},
+	}); err != nil {
+		t.Fatalf("写入报错: %v", err)
+	}
+
+	got, err := s.QueryStatsByDay(ctx, StatsQuery{AccountID: accID})
+	if err != nil {
+		t.Fatalf("按天聚合报错: %v", err)
+	}
+	b := statsBucketFor(t, got, "2026-07-31")
+	if b.GiftCount != 1 {
+		t.Errorf("GiftCount = %d, 期望 1（gift_combo 不应计入）", b.GiftCount)
+	}
+}
+
+// RecordAction 把触发它的事件类型也写进 event_type 列（同一条时间线上
+// 看因果），统计不能把这类 kind=action 的行当成业务事件数进去。
+func TestQueryStatsByDayExcludesActionRows(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	accID := mustAccount(t, s, "小号")
+
+	if err := s.InsertActivity(ctx, []ActivityRow{
+		{AccountID: accID, Kind: ActivityEvent, EventType: "danmaku", OccurredAt: statsFixedTime},
+		{AccountID: accID, Kind: ActivityAction, EventType: "danmaku",
+			ActionType: "danmaku", RuleName: "关键词回复", OccurredAt: statsFixedTime.Add(time.Second)},
+	}); err != nil {
+		t.Fatalf("写入报错: %v", err)
+	}
+
+	got, err := s.QueryStatsByDay(ctx, StatsQuery{AccountID: accID})
+	if err != nil {
+		t.Fatalf("按天聚合报错: %v", err)
+	}
+	b := statsBucketFor(t, got, "2026-07-31")
+	if b.DanmakuCount != 1 {
+		t.Errorf("DanmakuCount = %d, 期望 1（action 行不该被算进去）", b.DanmakuCount)
+	}
+}
+
+func TestQueryStatsByDayGroupsAcrossMultipleDays(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	accID := mustAccount(t, s, "小号")
+
+	if err := s.InsertActivity(ctx, []ActivityRow{
+		{AccountID: accID, Kind: ActivityEvent, EventType: "danmaku", OccurredAt: statsFixedTime},
+		{AccountID: accID, Kind: ActivityEvent, EventType: "danmaku",
+			OccurredAt: statsFixedTime.Add(24 * time.Hour)},
+		{AccountID: accID, Kind: ActivityEvent, EventType: "danmaku",
+			OccurredAt: statsFixedTime.Add(24 * time.Hour)},
+	}); err != nil {
+		t.Fatalf("写入报错: %v", err)
+	}
+
+	got, err := s.QueryStatsByDay(ctx, StatsQuery{AccountID: accID})
+	if err != nil {
+		t.Fatalf("按天聚合报错: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("bucket 数 = %d, 期望 2: %+v", len(got), got)
+	}
+	if statsBucketFor(t, got, "2026-07-31").DanmakuCount != 1 {
+		t.Errorf("7-31 计数不对: %+v", got)
+	}
+	if statsBucketFor(t, got, "2026-08-01").DanmakuCount != 2 {
+		t.Errorf("8-1 计数不对: %+v", got)
+	}
+}
+
+// 这是本任务最重要的一条测试：证明聚合真的发生在 SQL 侧。
+//
+// QueryActivity 有 500 条硬上限（防止一天几万行的全表扫），如果统计
+// 接口的实现不小心复用了它再在 Go 里累加，620 条弹幕会被截断成 500 条，
+// 断言就会失败。真正的 SQL 侧 GROUP BY 没有这个上限。
+func TestQueryStatsByDayCountsBeyondActivityQueryLimit(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	accID := mustAccount(t, s, "小号")
+
+	const n = 620
+	rows := make([]ActivityRow, n)
+	for i := range rows {
+		rows[i] = ActivityRow{
+			AccountID: accID, Kind: ActivityEvent, EventType: "danmaku",
+			OccurredAt: statsFixedTime.Add(time.Duration(i) * time.Second),
+		}
+	}
+	if err := s.InsertActivity(ctx, rows); err != nil {
+		t.Fatalf("写入报错: %v", err)
+	}
+
+	got, err := s.QueryStatsByDay(ctx, StatsQuery{AccountID: accID})
+	if err != nil {
+		t.Fatalf("按天聚合报错: %v", err)
+	}
+	b := statsBucketFor(t, got, "2026-07-31")
+	if b.DanmakuCount != n {
+		t.Errorf("DanmakuCount = %d, 期望恰好 %d（不是 500 或其他截断值）", b.DanmakuCount, n)
+	}
+}
+
+// by=session：正常配对的一场直播，场次内的事件计数与时长都要对
+func TestQueryStatsBySessionPairsStartAndStop(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	accID := mustAccount(t, s, "小号")
+	b, err := s.UpsertBinding(ctx, accID, "123")
+	if err != nil {
+		t.Fatalf("创建绑定报错: %v", err)
+	}
+
+	start := statsFixedTime
+	stop := start.Add(2 * time.Hour)
+	if err := s.InsertActivity(ctx, []ActivityRow{
+		{AccountID: accID, BindingID: &b.ID, Kind: ActivityEvent, EventType: "live_start", OccurredAt: start},
+		{AccountID: accID, BindingID: &b.ID, Kind: ActivityEvent, EventType: "danmaku",
+			OccurredAt: start.Add(time.Minute)},
+		{AccountID: accID, BindingID: &b.ID, Kind: ActivityEvent, EventType: "danmaku",
+			OccurredAt: start.Add(2 * time.Minute)},
+		{AccountID: accID, BindingID: &b.ID, Kind: ActivityEvent, EventType: "live_stop", OccurredAt: stop},
+	}); err != nil {
+		t.Fatalf("写入报错: %v", err)
+	}
+
+	got, err := s.QueryStatsBySession(ctx, StatsQuery{AccountID: accID, BindingID: b.ID})
+	if err != nil {
+		t.Fatalf("按场次聚合报错: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("场次数 = %d, 期望 1: %+v", len(got), got)
+	}
+	sess := got[0]
+	if sess.Bucket != start.Format(time.RFC3339) {
+		t.Errorf("bucket = %q, 期望场次开始时刻 %q", sess.Bucket, start.Format(time.RFC3339))
+	}
+	if sess.DanmakuCount != 2 {
+		t.Errorf("DanmakuCount = %d, 期望 2", sess.DanmakuCount)
+	}
+	if sess.LiveSeconds != int64(2*time.Hour/time.Second) {
+		t.Errorf("LiveSeconds = %d, 期望 %d", sess.LiveSeconds, int64(2*time.Hour/time.Second))
+	}
+}
+
+// 边界 1：只有 live_start 没有 live_stop——还在直播中，或漏了下播事件。
+// 场次的结束时间取查询窗口的 until（没给 until 时代码会退化到 now()，
+// 但那样测试会因为跑测试的耗时而不确定，所以这里显式传 until）。
+func TestQueryStatsBySessionOngoingWithoutStopUsesUntil(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	accID := mustAccount(t, s, "小号")
+	b, err := s.UpsertBinding(ctx, accID, "123")
+	if err != nil {
+		t.Fatalf("创建绑定报错: %v", err)
+	}
+
+	start := statsFixedTime
+	until := start.Add(90 * time.Minute)
+	if err := s.InsertActivity(ctx, []ActivityRow{
+		{AccountID: accID, BindingID: &b.ID, Kind: ActivityEvent, EventType: "live_start", OccurredAt: start},
+		{AccountID: accID, BindingID: &b.ID, Kind: ActivityEvent, EventType: "danmaku",
+			OccurredAt: start.Add(time.Minute)},
+	}); err != nil {
+		t.Fatalf("写入报错: %v", err)
+	}
+
+	got, err := s.QueryStatsBySession(ctx, StatsQuery{AccountID: accID, BindingID: b.ID, Until: until})
+	if err != nil {
+		t.Fatalf("按场次聚合报错: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("场次数 = %d, 期望 1（不能因为没有 stop 就被丢弃）: %+v", len(got), got)
+	}
+	sess := got[0]
+	wantSeconds := int64(until.Sub(start) / time.Second)
+	if sess.LiveSeconds != wantSeconds {
+		t.Errorf("LiveSeconds = %d, 期望 %d（用 until 兜底结束时间）", sess.LiveSeconds, wantSeconds)
+	}
+	if sess.DanmakuCount != 1 {
+		t.Errorf("DanmakuCount = %d, 期望 1", sess.DanmakuCount)
+	}
+}
+
+// 边界 2：只有 live_stop 没有 live_start——查询区间从这场直播中间切开。
+// 场次的开始时间取查询窗口的 since。
+func TestQueryStatsBySessionStopWithoutStartUsesSince(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	accID := mustAccount(t, s, "小号")
+	b, err := s.UpsertBinding(ctx, accID, "123")
+	if err != nil {
+		t.Fatalf("创建绑定报错: %v", err)
+	}
+
+	since := statsFixedTime
+	stop := since.Add(45 * time.Minute)
+	if err := s.InsertActivity(ctx, []ActivityRow{
+		{AccountID: accID, BindingID: &b.ID, Kind: ActivityEvent, EventType: "danmaku",
+			OccurredAt: since.Add(10 * time.Minute)},
+		{AccountID: accID, BindingID: &b.ID, Kind: ActivityEvent, EventType: "live_stop", OccurredAt: stop},
+	}); err != nil {
+		t.Fatalf("写入报错: %v", err)
+	}
+
+	got, err := s.QueryStatsBySession(ctx, StatsQuery{AccountID: accID, BindingID: b.ID, Since: since})
+	if err != nil {
+		t.Fatalf("按场次聚合报错: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("场次数 = %d, 期望 1（不能因为没有 start 就被丢弃）: %+v", len(got), got)
+	}
+	sess := got[0]
+	if sess.Bucket != since.Format(time.RFC3339) {
+		t.Errorf("bucket = %q, 期望用 since 兜底的开始时刻 %q", sess.Bucket, since.Format(time.RFC3339))
+	}
+	wantSeconds := int64(stop.Sub(since) / time.Second)
+	if sess.LiveSeconds != wantSeconds {
+		t.Errorf("LiveSeconds = %d, 期望 %d（用 since 兜底开始时间）", sess.LiveSeconds, wantSeconds)
+	}
+	if sess.DanmakuCount != 1 {
+		t.Errorf("DanmakuCount = %d, 期望 1", sess.DanmakuCount)
+	}
+}
+
+// 多场直播要各自成一行，不能被揉在一起
+func TestQueryStatsBySessionMultipleSessions(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	accID := mustAccount(t, s, "小号")
+	b, err := s.UpsertBinding(ctx, accID, "123")
+	if err != nil {
+		t.Fatalf("创建绑定报错: %v", err)
+	}
+
+	s1start := statsFixedTime
+	s1stop := s1start.Add(time.Hour)
+	s2start := s1start.Add(24 * time.Hour)
+	s2stop := s2start.Add(3 * time.Hour)
+
+	if err := s.InsertActivity(ctx, []ActivityRow{
+		{AccountID: accID, BindingID: &b.ID, Kind: ActivityEvent, EventType: "live_start", OccurredAt: s1start},
+		{AccountID: accID, BindingID: &b.ID, Kind: ActivityEvent, EventType: "live_stop", OccurredAt: s1stop},
+		{AccountID: accID, BindingID: &b.ID, Kind: ActivityEvent, EventType: "live_start", OccurredAt: s2start},
+		{AccountID: accID, BindingID: &b.ID, Kind: ActivityEvent, EventType: "live_stop", OccurredAt: s2stop},
+	}); err != nil {
+		t.Fatalf("写入报错: %v", err)
+	}
+
+	got, err := s.QueryStatsBySession(ctx, StatsQuery{AccountID: accID, BindingID: b.ID})
+	if err != nil {
+		t.Fatalf("按场次聚合报错: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("场次数 = %d, 期望 2: %+v", len(got), got)
+	}
+	if got[0].LiveSeconds != int64(time.Hour/time.Second) {
+		t.Errorf("第一场 LiveSeconds = %d, 期望 %d", got[0].LiveSeconds, int64(time.Hour/time.Second))
+	}
+	if got[1].LiveSeconds != int64(3*time.Hour/time.Second) {
+		t.Errorf("第二场 LiveSeconds = %d, 期望 %d", got[1].LiveSeconds, int64(3*time.Hour/time.Second))
+	}
+}
+
+// 按绑定隔离：不同绑定的开播事件不能串场
+func TestQueryStatsBySessionIsolatedPerBinding(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	accID := mustAccount(t, s, "小号")
+	b1, err := s.UpsertBinding(ctx, accID, "111")
+	if err != nil {
+		t.Fatalf("创建绑定报错: %v", err)
+	}
+	b2, err := s.UpsertBinding(ctx, accID, "222")
+	if err != nil {
+		t.Fatalf("创建绑定报错: %v", err)
+	}
+
+	if err := s.InsertActivity(ctx, []ActivityRow{
+		{AccountID: accID, BindingID: &b1.ID, Kind: ActivityEvent, EventType: "live_start", OccurredAt: statsFixedTime},
+		{AccountID: accID, BindingID: &b1.ID, Kind: ActivityEvent, EventType: "live_stop",
+			OccurredAt: statsFixedTime.Add(time.Hour)},
+		{AccountID: accID, BindingID: &b2.ID, Kind: ActivityEvent, EventType: "live_start", OccurredAt: statsFixedTime},
+		{AccountID: accID, BindingID: &b2.ID, Kind: ActivityEvent, EventType: "live_stop",
+			OccurredAt: statsFixedTime.Add(5 * time.Hour)},
+	}); err != nil {
+		t.Fatalf("写入报错: %v", err)
+	}
+
+	got, err := s.QueryStatsBySession(ctx, StatsQuery{AccountID: accID, BindingID: b1.ID})
+	if err != nil {
+		t.Fatalf("按场次聚合报错: %v", err)
+	}
+	if len(got) != 1 || got[0].LiveSeconds != int64(time.Hour/time.Second) {
+		t.Errorf("绑定隔离失败: %+v", got)
+	}
+}
