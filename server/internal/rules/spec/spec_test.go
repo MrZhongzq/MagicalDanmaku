@@ -327,6 +327,24 @@ func TestToRuleCarriesActionPick(t *testing.T) {
 	}
 }
 
+// TemplateMulti 要原样带到领域模型，否则单人/多人两套模板在数据库
+// 路径下形同虚设。
+func TestToRuleCarriesTemplateMulti(t *testing.T) {
+	r, err := spec.Rule{
+		Name: "x",
+		On:   []string{"user_enter"},
+		Do: []spec.Action{
+			{Type: "danmaku", Template: []string{"欢迎 甲"}, TemplateMulti: []string{"欢迎 甲、乙 回家"}},
+		},
+	}.ToRule()
+	if err != nil {
+		t.Fatalf("ToRule 报错: %v", err)
+	}
+	if len(r.Do) != 1 || len(r.Do[0].TemplateMulti) != 1 || r.Do[0].TemplateMulti[0] != "欢迎 甲、乙 回家" {
+		t.Errorf("TemplateMulti 未正确转换: %+v", r.Do)
+	}
+}
+
 func TestToRuleRejectsUnknownPick(t *testing.T) {
 	_, err := spec.Rule{
 		Name: "x",

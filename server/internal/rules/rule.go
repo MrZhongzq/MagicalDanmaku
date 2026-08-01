@@ -165,11 +165,20 @@ func (c Condition) Validate() error {
 type Action struct {
 	Type ActionType
 
-	// Type == ActionDanmaku 时使用，多条则按 Pick 指定的方式挑一条
+	// Type == ActionDanmaku 时使用，多条则按 Pick 指定的方式挑一条。
+	// count == 1（单人触发）时用这套。
 	Template []string
 
-	// Type == ActionDanmaku 时使用，控制 Template 有多条时怎么挑，
-	// 见 PickRandom / PickSequential。空串等同 PickRandom，
+	// TemplateMulti 是合并触发（count > 1）时用的模板。
+	//
+	// 为什么要两套：「欢迎 张三 回家」与「欢迎 张三、李四、王五 回家」
+	// 句式本就不同，共用一套必然有一边别扭。
+	//
+	// 留空则不论单人多人都用 Template——保持与历史配置兼容。
+	TemplateMulti []string
+
+	// Type == ActionDanmaku 时使用，控制 Template/TemplateMulti 有多条时
+	// 怎么挑，见 PickRandom / PickSequential。空串等同 PickRandom，
 	// 与引入本字段之前的历史配置兼容。
 	Pick string
 
@@ -184,8 +193,10 @@ type Action struct {
 func (a Action) Validate() error {
 	switch a.Type {
 	case ActionDanmaku:
-		if len(a.Template) == 0 {
-			return fmt.Errorf("danmaku 动作必须提供至少一条模板")
+		// Template 与 TemplateMulti 二选一提供即可：只配 TemplateMulti
+		// 也是合法的（比如一条只处理合并欢迎、单人不发言的规则）。
+		if len(a.Template) == 0 && len(a.TemplateMulti) == 0 {
+			return fmt.Errorf("danmaku 动作必须提供 template 或 templateMulti 之一")
 		}
 		switch a.Pick {
 		case "", PickRandom, PickSequential:

@@ -121,6 +121,23 @@ func TestActionValidateRejectsDanmakuWithoutTemplate(t *testing.T) {
 	}
 }
 
+// Template 与 TemplateMulti 二选一提供即可，只配 TemplateMulti 也合法——
+// 比如一条只处理合并欢迎、单人不发言的规则。
+func TestActionValidateAcceptsTemplateMultiOnly(t *testing.T) {
+	a := Action{Type: ActionDanmaku, TemplateMulti: []string{"欢迎 {{join .users \"、\"}} 回家"}}
+	if err := a.Validate(); err != nil {
+		t.Errorf("只有 TemplateMulti 不应报错: %v", err)
+	}
+}
+
+// Template 与 TemplateMulti 都为空才该被拒绝。
+func TestActionValidateRejectsWhenBothTemplatesEmpty(t *testing.T) {
+	a := Action{Type: ActionDanmaku, Template: nil, TemplateMulti: nil}
+	if err := a.Validate(); err == nil {
+		t.Error("Template 与 TemplateMulti 都为空应当报错")
+	}
+}
+
 func TestActionValidateRejectsScriptWithoutCode(t *testing.T) {
 	if err := (Action{Type: ActionScript}).Validate(); err == nil {
 		t.Error("script 动作缺少代码应当报错")

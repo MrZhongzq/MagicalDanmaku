@@ -69,6 +69,15 @@ func enterTrigger(uid, name string) Trigger {
 	})
 }
 
+// multiTrigger 构造一个合并触发的 Trigger，模拟 Aggregator.mergeBuckets
+// 产出的 count（实际类型是 int，见 aggregate.go）。
+func multiTrigger(count int, users ...string) Trigger {
+	tr := enterTrigger("1", users[0])
+	tr.Vars["count"] = count
+	tr.Vars["users"] = users
+	return tr
+}
+
 func TestExecuteDanmakuAction(t *testing.T) {
 	bot := &failingBot{}
 	ex := newTestExecutor(bot)
@@ -102,6 +111,153 @@ func TestExecuteDanmakuUsesMergedUsers(t *testing.T) {
 	}
 	if got := bot.sent(); len(got) != 1 || got[0] != "欢迎 甲、乙、丙 回家" {
 		t.Errorf("= %v", got)
+	}
+}
+
+// 行为 1：count == 1 用 Template。
+func TestSendDanmakuUsesTemplateForSingleCount(t *testing.T) {
+	bot := &failingBot{}
+	ex := newTestExecutor(bot)
+
+	r := Rule{Name: "欢迎", Do: []Action{
+		{Type: ActionDanmaku,
+			Template:      []string{"欢迎 {{.user.username}} 回家"},
+			TemplateMulti: []string{"欢迎 {{join .users \"、\"}} 回家"}},
+	}}
+	tr := multiTrigger(1, "甲")
+	if err := ex.Execute(context.Background(), r, tr); err != nil {
+		t.Fatalf("Execute 失败: %v", err)
+	}
+	if got := bot.sent(); len(got) != 1 || got[0] != "欢迎 甲 回家" {
+		t.Errorf("count=1 应使用 Template，实际 = %v", got)
+	}
+}
+
+// 行为 2：count > 1 且 TemplateMulti 非空，用 TemplateMulti。
+func TestSendDanmakuUsesTemplateMultiForMultiCount(t *testing.T) {
+	bot := &failingBot{}
+	ex := newTestExecutor(bot)
+
+	r := Rule{Name: "欢迎", Do: []Action{
+		{Type: ActionDanmaku,
+			Template:      []string{"欢迎 {{.user.username}} 回家"},
+			TemplateMulti: []string{"欢迎 {{join .users \"、\"}} 回家"}},
+	}}
+	tr := multiTrigger(3, "甲", "乙", "丙")
+	if err := ex.Execute(context.Background(), r, tr); err != nil {
+		t.Fatalf("Execute 失败: %v", err)
+	}
+	if got := bot.sent(); len(got) != 1 || got[0] != "欢迎 甲、乙、丙 回家" {
+		t.Errorf("count>1 且 TemplateMulti 非空应使用 TemplateMulti，实际 = %v", got)
+	}
+}
+
+// 行为 3：count > 1 但 TemplateMulti 为空，回落到 Template（兼容旧配置，
+// 不是报错）。
+func TestSendDanmakuFallsBackToTemplateWhenMultiEmpty(t *testing.T) {
+	bot := &failingBot{}
+	ex := newTestExecutor(bot)
+
+	r := Rule{Name: "欢迎", Do: []Action{
+		{Type: ActionDanmaku, Template: []string{"欢迎 {{join .users \"、\"}} 回家"}},
+	}}
+	tr := multiTrigger(3, "甲", "乙", "丙")
+	if err := ex.Execute(context.Background(), r, tr); err != nil {
+		t.Fatalf("Execute 失败: %v", err)
+	}
+	if got := bot.sent(); len(got) != 1 || got[0] != "欢迎 甲、乙、丙 回家" {
+		t.Errorf("TemplateMulti 为空时应回落到 Template，实际 = %v", got)
+	}
+}
+
+// 行为 4：count 缺失或类型不对时当 1 处理（走单人模板），不能 panic。
+func TestSendDanmakuTreatsMissingOrBadCountAsSingle(t *testing.T) {
+	r := Rule{Name: "欢迎", Do: []Action{
+		{Type: ActionDanmaku,
+			Template:      []string{"单人模板"},
+			TemplateMulti: []string{"多人模板"}},
+	}}
+
+	t.Run("缺失", func(t *testing.T) {
+		bot := &failingBot{}
+		ex := newTestExecutor(bot)
+		tr := enterTrigger("1", "甲")
+		delete(tr.Vars, "count")
+		if err := ex.Execute(context.Background(), r, tr); err != nil {
+			t.Fatalf("Execute 失败: %v", err)
+		}
+		if got := bot.sent(); len(got) != 1 || got[0] != "单人模板" {
+			t.Errorf("count 缺失应当 1 处理，实际 = %v", got)
+		}
+	})
+
+	t.Run("类型不对_字符串", func(t *testing.T) {
+		bot := &failingBot{}
+		ex := newTestExecutor(bot)
+		tr := enterTrigger("1", "甲")
+		tr.Vars["count"] = "很多个"
+		if err := ex.Execute(context.Background(), r, tr); err != nil {
+			t.Fatalf("Execute 失败: %v", err)
+		}
+		if got := bot.sent(); len(got) != 1 || got[0] != "单人模板" {
+			t.Errorf("count 类型不对应当 1 处理，实际 = %v", got)
+		}
+	})
+
+	t.Run("类型不对_float64", func(t *testing.T) {
+		// 例如经过一趟 JSON 反序列化后数字可能变成 float64
+		bot := &failingBot{}
+		ex := newTestExecutor(bot)
+		tr := enterTrigger("1", "甲")
+		tr.Vars["count"] = float64(5)
+		if err := ex.Execute(context.Background(), r, tr); err != nil {
+			t.Fatalf("Execute 失败: %v", err)
+		}
+		if got := bot.sent(); len(got) != 1 || got[0] != "单人模板" {
+			t.Errorf("count 类型不对应当 1 处理，实际 = %v", got)
+		}
+	})
+}
+
+// 行为 5：TemplateMulti 与 Pick 组合时，轮询游标对两套模板是分开的。
+//
+// 共用一个游标的话，单人触发推进的游标会让多人模板跳着走（反之亦然）：
+// 交替发生单人/多人触发，若游标共用，第二次多人触发本该拿 TemplateMulti
+// 的第 1 条，却会被中间插入的单人触发偷偷推进到第 2 条。
+func TestSequentialCursorSeparatesTemplateAndTemplateMulti(t *testing.T) {
+	bot := &failingBot{}
+	ex := newTestExecutor(bot)
+
+	r := Rule{Name: "轮询欢迎", Do: []Action{
+		{Type: ActionDanmaku, Pick: PickSequential,
+			Template:      []string{"单1", "单2", "单3"},
+			TemplateMulti: []string{"多1", "多2", "多3"}},
+	}}
+
+	// 交替：单、多、单、多、单、多
+	seq := []Trigger{
+		multiTrigger(1, "甲"),
+		multiTrigger(2, "甲", "乙"),
+		multiTrigger(1, "甲"),
+		multiTrigger(2, "甲", "乙"),
+		multiTrigger(1, "甲"),
+		multiTrigger(2, "甲", "乙"),
+	}
+	for i, tr := range seq {
+		if err := ex.Execute(context.Background(), r, tr); err != nil {
+			t.Fatalf("第 %d 次 Execute 失败: %v", i, err)
+		}
+	}
+
+	got := bot.sent()
+	want := []string{"单1", "多1", "单2", "多2", "单3", "多3"}
+	if len(got) != len(want) {
+		t.Fatalf("发送次数 = %d, 期望 %d, 实际 %v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("第 %d 条 = %q, 期望 %q（全部: %v）", i, got[i], want[i], got)
+		}
 	}
 }
 

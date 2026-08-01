@@ -70,7 +70,15 @@ type Aggregate struct {
 type Action struct {
 	Type     string   `yaml:"type"     json:"type"`
 	Template []string `yaml:"template" json:"template,omitempty"`
-	// Pick 控制 Template 有多条时怎么挑："random"（默认）或 "sequential"。
+	// TemplateMulti 是合并触发（count > 1）时用的模板。
+	//
+	// 为什么要两套：「欢迎 张三 回家」与「欢迎 张三、李四、王五 回家」
+	// 句式本就不同，共用一套必然有一边别扭。
+	//
+	// 留空则不论单人多人都用 Template——保持与历史配置兼容。
+	TemplateMulti []string `yaml:"templateMulti" json:"templateMulti,omitempty"`
+	// Pick 控制 Template/TemplateMulti 有多条时怎么挑："random"（默认）
+	// 或 "sequential"。
 	Pick   string `yaml:"pick"     json:"pick,omitempty"`
 	Hours  int    `yaml:"hours"    json:"hours,omitempty"`
 	Script string `yaml:"script"   json:"script,omitempty"`

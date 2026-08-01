@@ -33,10 +33,15 @@ type Executor struct {
 
 	// pickCursor 记住每个 danmaku 动作（PickSequential 模式）轮询到第几条。
 	//
-	// 键是「规则名#动作下标」——一条规则可以有多个 danmaku 动作，
+	// 键是「规则名#动作下标#模板集」——一条规则可以有多个 danmaku 动作，
 	// 各自的模板列表独立，共用一个游标会让两个动作交替推进它，
 	// 结果比随机还糟（详见 executor_test.go 的
 	// TestSequentialCursorIsPerAction）。
+	//
+	// 模板集这一段（"single"/"multi"）是同样的道理往下再切一层：
+	// 一个动作若同时配了 Template 与 TemplateMulti，两份名单各自
+	// 独立轮询，单人触发推进游标不该让多人模板跳着走，反之亦然
+	// （详见 TestSequentialCursorSeparatesTemplateAndTemplateMulti）。
 	//
 	// 热重载会重置它：Executor 属于 Engine，换引擎就是新的一份。
 	// 这是可接受的——轮询是为了「文案别老重复」，重载后从头开始
@@ -127,13 +132,15 @@ func (e *Executor) sendDanmaku(ctx context.Context, ruleName string, actionIdx i
 		return errors.New("rules: 未配置机器人接口")
 	}
 
+	templates, kind := selectTemplates(a, tr)
+
 	var text string
 	var err error
 	if a.Pick == PickSequential {
-		idx := e.nextCursor(ruleName, actionIdx)
-		text, err = e.renderer.RenderAt(a.Template, idx, tr.Vars)
+		idx := e.nextCursor(ruleName, actionIdx, kind)
+		text, err = e.renderer.RenderAt(templates, idx, tr.Vars)
 	} else {
-		text, err = e.renderer.Render(a.Template, tr.Vars)
+		text, err = e.renderer.Render(templates, tr.Vars)
 	}
 	if err != nil {
 		return err
@@ -153,18 +160,51 @@ func (e *Executor) sendDanmaku(ctx context.Context, ruleName string, actionIdx i
 	return nil
 }
 
-// nextCursor 取出「规则名#动作下标」对应游标的当前值并推进到下一个。
+// nextCursor 取出「规则名#动作下标#模板集」对应游标的当前值并推进到
+// 下一个。
 //
 // 返回值直接喂给 Renderer.RenderAt，越界由它取模处理，这里不需要
 // 关心 len(templates)——游标只管单调递增，不管模板列表有多长。
-func (e *Executor) nextCursor(ruleName string, actionIdx int) int {
-	key := fmt.Sprintf("%s#%d", ruleName, actionIdx)
+func (e *Executor) nextCursor(ruleName string, actionIdx int, kind string) int {
+	key := fmt.Sprintf("%s#%d#%s", ruleName, actionIdx, kind)
 
 	e.cursorMu.Lock()
 	defer e.cursorMu.Unlock()
 	idx := e.cursor[key]
 	e.cursor[key] = idx + 1
 	return idx
+}
+
+// selectTemplates 根据 tr 的合并计数选出该用哪套模板，并返回一个用于
+// 区分轮询游标的标记。
+//
+// kind 反映的是「实际用的是哪份名单」，不是「是否多人」：count > 1
+// 但 TemplateMulti 为空时会回落到 Template，这种情况下轮询的仍然是
+// Template 那份名单，理应与真正的单人触发共用同一个游标——它们轮询
+// 的是同一份列表，分开计数才是错的。
+func selectTemplates(a Action, tr Trigger) (templates []string, kind string) {
+	if isMultiTrigger(tr) && len(a.TemplateMulti) > 0 {
+		return a.TemplateMulti, "multi"
+	}
+	return a.Template, "single"
+}
+
+// isMultiTrigger 判断 tr 是否为合并触发（count > 1）。
+//
+// count 由 Aggregator.mergeBuckets 或 PassthroughTrigger 写入 Vars，
+// 见 aggregate.go，实际类型是 int。取不到或类型不对一律当作单人
+// （即返回 false），不 panic——奇怪的配置或未来改动导致的类型漂移
+// 不该让弹幕发不出去。
+func isMultiTrigger(tr Trigger) bool {
+	v, ok := tr.Vars["count"]
+	if !ok {
+		return false
+	}
+	n, ok := v.(int)
+	if !ok {
+		return false
+	}
+	return n > 1
 }
 
 // blockUsers 禁言 Trigger 涉及的全部用户。

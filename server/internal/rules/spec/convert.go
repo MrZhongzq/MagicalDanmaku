@@ -89,11 +89,12 @@ func (r Rule) ToRule() (rules.Rule, error) {
 
 	for _, a := range r.Do {
 		out.Do = append(out.Do, rules.Action{
-			Type:     rules.ActionType(a.Type),
-			Template: a.Template,
-			Pick:     a.Pick,
-			Hours:    a.Hours,
-			Script:   a.Script,
+			Type:          rules.ActionType(a.Type),
+			Template:      a.Template,
+			TemplateMulti: a.TemplateMulti,
+			Pick:          a.Pick,
+			Hours:         a.Hours,
+			Script:        a.Script,
 		})
 	}
 
