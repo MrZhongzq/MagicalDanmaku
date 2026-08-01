@@ -75,6 +75,7 @@
  * 便利性优化，不是功能缺口，因此没有计入悬空清单。
  */
 import type { Action, Aggregate, Condition, Rule, RuleView } from '@/api/rule-types'
+import { PK_RULE_NAME } from '@/components/PkPanel.vue'
 
 /** 进房欢迎规则的固定名字，前端靠它从规则列表里认领已保存的配置。 */
 export const ENTER_RULE_NAME = '内置/进房欢迎'
@@ -593,6 +594,23 @@ export function parseGuardDraft(rule: Rule | null): SimpleThanksDraft {
   return parseSimpleThanksDraft(rule, defaultGuardDraft().templates)
 }
 
+/**
+ * 本页管的七条内置规则名——合并保存时用来从「现有全部规则」里挑出该被
+ * 本页替换的那些。**必须与 `Custom.vue` 的 `BUILTIN_RULE_NAMES` 保持
+ * 恰好相等**（钉在 `Custom.test.ts` 里）：不相等的话，将来加第八条内置
+ * 规则若只改了这一侧，`Custom.vue` 会把它当自定义规则加载进草稿、并在
+ * 保存时用草稿版本覆盖它——静默的数据错误，不报任何错。
+ */
+export const OWNED_RULE_NAMES = [
+  ENTER_RULE_NAME,
+  GIFT_RULE_NAME,
+  PK_RULE_NAME,
+  BROADCAST_RULE_NAME,
+  FOLLOW_RULE_NAME,
+  SHARE_RULE_NAME,
+  GUARD_RULE_NAME,
+]
+
 export type { RuleView }
 </script>
 
@@ -627,7 +645,6 @@ import PkPanel, {
   buildPkRule,
   defaultPkDraft,
   parsePkDraft,
-  PK_RULE_NAME,
   type PkDraft,
 } from '@/components/PkPanel.vue'
 
@@ -711,16 +728,9 @@ function onPkDraftUpdate(next: PkDraft) {
   Object.assign(pkDraft, next)
 }
 
-/** 本页管的七条内置规则名——合并保存时用来从「现有全部规则」里挑出该被本页替换的那些。 */
-const OWNED_RULE_NAMES = [
-  ENTER_RULE_NAME,
-  GIFT_RULE_NAME,
-  PK_RULE_NAME,
-  BROADCAST_RULE_NAME,
-  FOLLOW_RULE_NAME,
-  SHARE_RULE_NAME,
-  GUARD_RULE_NAME,
-]
+// OWNED_RULE_NAMES 现在定义在上面的 <script lang="ts"> 块里并导出（供
+// Custom.test.ts 钉住与 BUILTIN_RULE_NAMES 的相等性），<script setup>
+// 与它共享模块作用域，直接用即可，不需要再 import 或重新声明。
 
 /** buildAllRules 组装本页管的全部七条规则，保存时整批送去跟其余页面的规则合并。 */
 function buildAllRules(): Rule[] {

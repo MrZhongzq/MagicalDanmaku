@@ -33,6 +33,7 @@ const {
   defaultActionDraft,
   parseCustomRuleDraft,
 } = Custom
+const { OWNED_RULE_NAMES } = await import('./Danmaku.vue')
 const { useBindingsStore } = await import('@/stores/bindings')
 
 type RuleView = import('@/api/rule-types').RuleView
@@ -158,6 +159,16 @@ describe('isCustomRule：排除 Task 9/10 建立的七个内置规则名', () =>
   it('恰好七个内置名字（覆盖 Task 9/10 全部固定名）', () => {
     expect(BUILTIN_RULE_NAMES).toHaveLength(7)
     expect(new Set(BUILTIN_RULE_NAMES).size).toBe(7) // 互不相同
+  })
+
+  // ---- 全分支终审第 6 条：钉住两份规则名列表的相等性 ----
+  //
+  // Danmaku.vue 的 OWNED_RULE_NAMES 与 Custom.vue 的 BUILTIN_RULE_NAMES
+  // 今天完全一致，但没有任何测试钉住。将来加第八条内置规则时若只改
+  // Danmaku 一侧，Custom.vue 会把它当自定义规则加载进草稿、并在保存时
+  // 用草稿版本覆盖它——静默的数据错误，不报任何错。
+  it('Danmaku.vue 的 OWNED_RULE_NAMES 与本页 BUILTIN_RULE_NAMES 必须恰好构成对全体内置规则的一个划分', () => {
+    expect(new Set(OWNED_RULE_NAMES)).toEqual(new Set(BUILTIN_RULE_NAMES))
   })
 })
 
