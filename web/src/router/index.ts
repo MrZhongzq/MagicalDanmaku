@@ -17,6 +17,7 @@ const router = createRouter({
           name: 'moderation',
           component: () => import('@/pages/Moderation.vue'),
         },
+        { path: 'danmaku', name: 'danmaku', component: () => import('@/pages/Danmaku.vue') },
         { path: 'logs', name: 'logs', component: () => import('@/pages/Logs.vue') },
         { path: 'admin', name: 'admin', component: () => import('@/pages/Admin.vue') },
         // 其余页面在后续任务里逐个加进来

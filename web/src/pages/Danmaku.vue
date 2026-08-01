@@ -1,0 +1,789 @@
+<script lang="ts">
+/**
+ * 弹幕姬页（上）：进房欢迎、礼物答谢。
+ *
+ * ## 这一页的本质
+ *
+ * 它是规则编辑器的「傻瓜模式」：进房欢迎、礼物答谢在后端各是一条
+ * `spec.Rule`（规则名固定为 `内置/进房欢迎`/`内置/礼物答谢`），前端把它
+ * 渲染成一组开关与输入框，用户点的每个控件最终都对应规则里的一个字段。
+ * 加载时靠固定的 `name` 从 `GET /api/bindings/{id}/rules` 里认领这两条，
+ * 认领不到就当作「还没配过」，用默认值起步——见 `claimRule`。
+ *
+ * ## 保存不在本任务范围内
+ *
+ * 改动只进内存草稿，`dirty` 变真即可；右上角 `SaveBar` 的 `save` 事件先
+ * 留空，注释说明「Task 13 接」——统一的保存（写库）与 reload（让规则引擎
+ * 拿到新配置）交互是那个任务的事，这里自己先做一套，之后要拆着改。
+ *
+ * ## 四处悬空（设计文档 §7.2 页面 4 / §13）
+ *
+ * 1. **模板轮询模式**（§13.3）：规则引擎的 `Renderer.Render` 目前只会
+ *    从多条模板里 `rand.Intn` 随机挑一条，没有「轮询」需要的游标状态
+ *    （`server/internal/rules/template.go` 第 29-39 行）。界面上的
+ *    单选框照常渲染，选「轮询」暂不生效。
+ * 2. **单人/多人两套模板**（§13.3）：`spec.Action` 只有一个 `Template`
+ *    字段（`server/internal/rules/spec/spec.go`），保存时只有单人模板
+ *    进了 `do[].template`，多人模板整栏渲染但不参与组装。
+ * 3. **盲盒单列**（§13.4）：`event.Gift` 没有任何盲盒字段
+ *    （`server/internal/event/payload.go` 第 19-27 行），开关渲染但不生效。
+ *    **需要用户在真实直播间刷一次盲盒、抓包确认报文形状**，
+ *    这一步控制器代劳不了。
+ *
+ * ## 一处「以为悬空、实测已通」的纠正
+ *
+ * 简报原话是「`user_enter` 事件 Payload 没有粉丝牌字段」，但去读
+ * `server/internal/event/user.go`（`User.Medal *Medal`，含
+ * `IsLighted`/`RoomID`/`Level`）、`cmdmap/interactv2.go`
+ * （`mapInteractWordV2` 确实会解析 `medal_info` 填进 `Medal`）、
+ * `rules/vars.go`（`userVars` 把它们展开成
+ * `user.medal.isLighted`/`user.medal.roomId`/`user.medal.level`）、
+ * `rules/condition.go`（`eq`/`gte`/`in` 都支持这些字段）——**数据从解析
+ * 到条件求值全链路都已经打通**，与设计文档 §13.2 标题「已具备，需写成
+ * 规则」一致。所以「佩戴粉丝牌」筛选在本页是**真实可用**的功能，不是
+ * 悬空占位：`buildEnterCondition` 直接拼出
+ * `{isLighted:true, roomId:本房间} + {level>=N} + {guardLevel in 档位}`
+ * 三选一/组合的 `when` 条件，不需要后端补丁。§13.2 里唯一还欠缺的是一个
+ * 「现成谓词」（如 `user.medal.wearing`）省得前端自己拼三条件，这是
+ * 便利性优化，不是功能缺口，因此没有计入悬空清单。
+ */
+import type { Action, Aggregate, Condition, Rule, RuleView } from '@/api/rule-types'
+
+/** 进房欢迎规则的固定名字，前端靠它从规则列表里认领已保存的配置。 */
+export const ENTER_RULE_NAME = '内置/进房欢迎'
+/** 礼物答谢规则的固定名字。 */
+export const GIFT_RULE_NAME = '内置/礼物答谢'
+
+const ENTER_ON = 'user_enter'
+const GIFT_ON = 'gift'
+
+/**
+ * claimRule 按规则名从列表里认领一条规则。
+ *
+ * 这是本页加载逻辑的核心：认领不到就是「还没配过」，返回 null 让调用方
+ * 落回默认值，而不是报错——一个全新的绑定本来就不该有这两条规则。
+ */
+export function claimRule(rules: Rule[], name: string): Rule | null {
+  return rules.find((r) => r.name === name) ?? null
+}
+
+// ---- 大航海档位：event.GuardGovernor=1 / GuardAdmiral=2 / GuardCaptain=3。
+// 数值越小档位越高（总督最贵、数值最小），"及以上" 因此要用 in 一组数值
+// 而不是简单的 gte——gte 在这种反向编号下语义会反过来。 ----
+
+export type GuardTier = 'captain' | 'admiral' | 'governor'
+
+/** 每个档位对应「这个档位及以上」包含的 guardLevel 数值集合。 */
+const GUARD_TIER_VALUES: Record<GuardTier, number[]> = {
+  captain: [1, 2, 3], // 舰长即可：三档都算
+  admiral: [1, 2], // 提督及以上
+  governor: [1], // 仅总督
+}
+
+export const GUARD_TIER_OPTIONS: { label: string; value: GuardTier }[] = [
+  { label: '舰长即可（不限档位）', value: 'captain' },
+  { label: '提督及以上', value: 'admiral' },
+  { label: '仅总督', value: 'governor' },
+]
+
+function arraysEqualUnordered(a: number[], b: unknown): boolean {
+  if (!Array.isArray(b)) return false
+  if (a.length !== b.length) return false
+  const sortedA = [...a].sort()
+  const sortedB = [...b].sort()
+  return sortedA.every((v, i) => v === sortedB[i])
+}
+
+// ---- 进房欢迎 ----
+
+export interface EnterFilter {
+  /** 只欢迎佩戴粉丝牌的用户（口径见 §13.2：已点亮 && 是本房间的牌子）。 */
+  wearMedalOnly: boolean
+  /** 粉丝牌等级下限，null 表示不限。 */
+  minMedalLevel: number | null
+  /** 只欢迎大航海用户。 */
+  guardOnly: boolean
+  /** 大航海档位下限，仅 guardOnly 为真时生效。 */
+  guardTier: GuardTier
+}
+
+export function defaultEnterFilter(): EnterFilter {
+  return { wearMedalOnly: false, minMedalLevel: null, guardOnly: false, guardTier: 'captain' }
+}
+
+/**
+ * buildEnterCondition 把筛选草稿拼成一棵 `when` 条件树。
+ *
+ * roomId 用于粉丝牌的「本房间」判定——§13.2 的口径要求牌子必须是本房间
+ * 主播的，否则「别家的牌子也算」，与用户原话不符。
+ */
+export function buildEnterCondition(f: EnterFilter, roomId: string): Condition | undefined {
+  const leaves: Condition[] = []
+
+  if (f.wearMedalOnly) {
+    leaves.push({ field: 'user.medal.isLighted', op: 'eq', value: true })
+    if (roomId) {
+      leaves.push({ field: 'user.medal.roomId', op: 'eq', value: roomId })
+    }
+  }
+  if (f.minMedalLevel !== null && f.minMedalLevel > 0) {
+    leaves.push({ field: 'user.medal.level', op: 'gte', value: f.minMedalLevel })
+  }
+  if (f.guardOnly) {
+    leaves.push({ field: 'user.guardLevel', op: 'in', value: GUARD_TIER_VALUES[f.guardTier] })
+  }
+
+  if (leaves.length === 0) return undefined
+  if (leaves.length === 1) return leaves[0]
+  return { all: leaves }
+}
+
+/** parseEnterFilter 是 buildEnterCondition 的逆过程，供加载已保存配置用。 */
+export function parseEnterFilter(condition: Condition | undefined): EnterFilter {
+  const filter = defaultEnterFilter()
+  if (!condition) return filter
+
+  const leaves = condition.all ?? (condition.field ? [condition] : [])
+  for (const leaf of leaves) {
+    if (leaf.field === 'user.medal.isLighted' && leaf.op === 'eq' && leaf.value === true) {
+      filter.wearMedalOnly = true
+    }
+    if (leaf.field === 'user.medal.level' && leaf.op === 'gte' && typeof leaf.value === 'number') {
+      filter.minMedalLevel = leaf.value
+    }
+    if (leaf.field === 'user.guardLevel' && leaf.op === 'in') {
+      const tier = (Object.keys(GUARD_TIER_VALUES) as GuardTier[]).find((k) =>
+        arraysEqualUnordered(GUARD_TIER_VALUES[k], leaf.value),
+      )
+      if (tier) {
+        filter.guardOnly = true
+        filter.guardTier = tier
+      }
+    }
+  }
+  return filter
+}
+
+// ---- 合并/去重窗口，进房与礼物共用同一套草稿形状 ----
+
+export type PickMode = 'random' | 'roundrobin'
+
+export const PICK_MODE_OPTIONS: { label: string; value: PickMode }[] = [
+  { label: '随机抽取', value: 'random' },
+  { label: '轮询（按顺序循环）', value: 'roundrobin' },
+]
+
+/** 把秒数转成 spec.Duration 要求的字符串形式，如 "180s"。 */
+function secondsToDuration(seconds: number): string {
+  return `${seconds}s`
+}
+
+const DURATION_UNIT_SECONDS: Record<string, number> = {
+  ns: 1e-9,
+  us: 1e-6,
+  µs: 1e-6,
+  ms: 1e-3,
+  s: 1,
+  m: 60,
+  h: 3600,
+}
+
+/**
+ * secondsFromDuration 解析 "1m30s" 这类复合时长字符串，返回总秒数。
+ * 解析不出任何单位时回落到 fallback——例如遇到未来才会出现的写法。
+ */
+export function secondsFromDuration(d: string | undefined, fallback: number): number {
+  if (!d) return fallback
+  const re = /(\d+(?:\.\d+)?)(ns|us|µs|ms|s|m|h)/g
+  let total = 0
+  let matched = false
+  let match: RegExpExecArray | null
+  while ((match = re.exec(d)) !== null) {
+    matched = true
+    total += Number(match[1]) * (DURATION_UNIT_SECONDS[match[2]] ?? 0)
+  }
+  return matched ? total : fallback
+}
+
+// ---- 进房欢迎草稿 ----
+
+export type EnterGroupMode = 'merge' | 'dedupe'
+
+/** merge → 按类型合并（多人合并为一条）；dedupe → 按用户去重（仅频次限制，不合并多人）。 */
+const ENTER_GROUP_MODE_BY: Record<EnterGroupMode, string> = { merge: 'type', dedupe: 'user' }
+const ENTER_BY_TO_GROUP_MODE: Record<string, EnterGroupMode> = { type: 'merge', user: 'dedupe' }
+
+export const ENTER_GROUP_MODE_OPTIONS: { label: string; value: EnterGroupMode }[] = [
+  { label: '窗口内多人合并为一条欢迎', value: 'merge' },
+  { label: '仅按用户去重（不合并，用于频次限制）', value: 'dedupe' },
+]
+
+export interface EnterDraft {
+  enabled: boolean
+  filter: EnterFilter
+  groupMode: EnterGroupMode
+  windowSeconds: number
+  maxWaitSeconds: number | null
+  minCount: number
+  pickMode: PickMode
+  singleTemplates: string[]
+  multiTemplates: string[]
+}
+
+export function defaultEnterDraft(): EnterDraft {
+  return {
+    enabled: true,
+    filter: defaultEnterFilter(),
+    groupMode: 'merge',
+    windowSeconds: 180,
+    maxWaitSeconds: 600,
+    minCount: 2,
+    pickMode: 'random',
+    singleTemplates: ['欢迎 {{.user.username}} 来到直播间~'],
+    multiTemplates: ['欢迎 {{join .users "、"}} 等 {{.count}} 位朋友来到直播间~'],
+  }
+}
+
+function buildAggregateCommon(a: {
+  by: string
+  windowSeconds: number
+  maxWaitSeconds: number | null
+  minCount: number
+  applyMinCount: boolean
+}): Aggregate {
+  const agg: Aggregate = { window: secondsToDuration(a.windowSeconds), by: a.by }
+  if (a.maxWaitSeconds !== null && a.maxWaitSeconds > 0) {
+    agg.maxWait = secondsToDuration(a.maxWaitSeconds)
+  }
+  if (a.applyMinCount && a.minCount > 1) {
+    agg.minCount = a.minCount
+  }
+  return agg
+}
+
+/** buildEnterRule 把草稿组装成 spec.Rule。多人模板与轮询模式不写进去——见文件头悬空说明。 */
+export function buildEnterRule(draft: EnterDraft, roomId: string): Rule {
+  const rule: Rule = {
+    name: ENTER_RULE_NAME,
+    enabled: draft.enabled,
+    on: [ENTER_ON],
+    aggregate: buildAggregateCommon({
+      by: ENTER_GROUP_MODE_BY[draft.groupMode],
+      windowSeconds: draft.windowSeconds,
+      maxWaitSeconds: draft.maxWaitSeconds,
+      minCount: draft.minCount,
+      applyMinCount: draft.groupMode === 'merge',
+    }),
+    do: [{ type: 'danmaku', template: draft.singleTemplates.filter((t) => t.trim() !== '') }],
+  }
+  const when = buildEnterCondition(draft.filter, roomId)
+  if (when) rule.when = when
+  return rule
+}
+
+/** parseEnterDraft 是 buildEnterRule 的逆过程，供「认领」到已保存规则时用。 */
+export function parseEnterDraft(rule: Rule | null): EnterDraft {
+  const draft = defaultEnterDraft()
+  if (!rule) return draft
+
+  draft.enabled = rule.enabled ?? true
+  draft.filter = parseEnterFilter(rule.when)
+
+  const agg = rule.aggregate
+  if (agg) {
+    draft.groupMode = ENTER_BY_TO_GROUP_MODE[agg.by] ?? 'merge'
+    draft.windowSeconds = secondsFromDuration(agg.window, draft.windowSeconds)
+    draft.maxWaitSeconds = agg.maxWait
+      ? secondsFromDuration(agg.maxWait, draft.maxWaitSeconds ?? 0)
+      : null
+    if (agg.minCount !== undefined) draft.minCount = agg.minCount
+  }
+
+  const action = findDanmakuAction(rule.do)
+  if (action?.template && action.template.length > 0) {
+    draft.singleTemplates = action.template
+  }
+  // pickMode 与 multiTemplates 在后端没有落地字段（见悬空说明），
+  // 加载已保存规则时无从恢复，维持默认值。
+  return draft
+}
+
+function findDanmakuAction(actions: Action[] | undefined): Action | undefined {
+  return actions?.find((a) => a.type === 'danmaku')
+}
+
+// ---- 礼物答谢草稿 ----
+
+export type GiftGroupMode = 'merge' | 'dedupeGift'
+
+/** merge → 按类型合并（多人多礼物合并为一条）；dedupeGift → 同用户同礼物计数累加。 */
+const GIFT_GROUP_MODE_BY: Record<GiftGroupMode, string> = { merge: 'type', dedupeGift: 'gift' }
+const GIFT_BY_TO_GROUP_MODE: Record<string, GiftGroupMode> = { type: 'merge', gift: 'dedupeGift' }
+
+export const GIFT_GROUP_MODE_OPTIONS: { label: string; value: GiftGroupMode }[] = [
+  { label: '窗口内全部合并为一条答谢（可多人多礼物）', value: 'merge' },
+  { label: '同一用户同一礼物计数累加（不跨礼物合并）', value: 'dedupeGift' },
+]
+
+export interface GiftDraft {
+  enabled: boolean
+  groupMode: GiftGroupMode
+  windowSeconds: number
+  maxWaitSeconds: number | null
+  minCount: number
+  pickMode: PickMode
+  templates: string[]
+  /** 盲盒礼物单列一类，不并入常规——悬空项，event.Gift 无盲盒字段。 */
+  blindBoxSeparate: boolean
+  /** 盲盒盈亏统计——同样悬空，且依赖前一项。 */
+  blindBoxProfitTracking: boolean
+}
+
+export function defaultGiftDraft(): GiftDraft {
+  return {
+    enabled: true,
+    groupMode: 'merge',
+    windowSeconds: 20,
+    maxWaitSeconds: 60,
+    minCount: 2,
+    pickMode: 'random',
+    templates: ['感谢 {{join .users "、"}} 的 {{.gift.name}} 等，您的支持就是对主播最大的鼓励'],
+    blindBoxSeparate: false,
+    blindBoxProfitTracking: false,
+  }
+}
+
+export function buildGiftRule(draft: GiftDraft): Rule {
+  return {
+    name: GIFT_RULE_NAME,
+    enabled: draft.enabled,
+    on: [GIFT_ON],
+    aggregate: buildAggregateCommon({
+      by: GIFT_GROUP_MODE_BY[draft.groupMode],
+      windowSeconds: draft.windowSeconds,
+      maxWaitSeconds: draft.maxWaitSeconds,
+      minCount: draft.minCount,
+      applyMinCount: draft.groupMode === 'merge',
+    }),
+    do: [{ type: 'danmaku', template: draft.templates.filter((t) => t.trim() !== '') }],
+  }
+}
+
+export function parseGiftDraft(rule: Rule | null): GiftDraft {
+  const draft = defaultGiftDraft()
+  if (!rule) return draft
+
+  draft.enabled = rule.enabled ?? true
+
+  const agg = rule.aggregate
+  if (agg) {
+    draft.groupMode = GIFT_BY_TO_GROUP_MODE[agg.by] ?? 'merge'
+    draft.windowSeconds = secondsFromDuration(agg.window, draft.windowSeconds)
+    draft.maxWaitSeconds = agg.maxWait
+      ? secondsFromDuration(agg.maxWait, draft.maxWaitSeconds ?? 0)
+      : null
+    if (agg.minCount !== undefined) draft.minCount = agg.minCount
+  }
+
+  const action = findDanmakuAction(rule.do)
+  if (action?.template && action.template.length > 0) {
+    draft.templates = action.template
+  }
+  // 盲盒两个开关、pickMode 同样没有后端字段承接，维持默认值。
+  return draft
+}
+
+export type { RuleView }
+</script>
+
+<script setup lang="ts">
+import { computed, reactive, ref, watch } from 'vue'
+import {
+  NCard,
+  NCheckbox,
+  NCollapse,
+  NCollapseItem,
+  NEmpty,
+  NInputNumber,
+  NRadio,
+  NRadioGroup,
+  NSelect,
+  NSpin,
+  NSwitch,
+  NTag,
+  NTooltip,
+  useMessage,
+} from 'naive-ui'
+import { ApiError, request } from '@/api'
+import { useBindingsStore } from '@/stores/bindings'
+import SaveBar from '@/components/SaveBar.vue'
+import TemplateList from '@/components/TemplateList.vue'
+
+const bindings = useBindingsStore()
+const message = useMessage()
+
+/**
+ * 礼物模板可用变量的提示文案，字面量含 `{{ }}`。
+ *
+ * **不能直接把它们当字符串字面量写进 `<template>` 的插值里**——如
+ * `{{ '{{join .users "、"}}' }}`——Vue 的插值解析对 `{{`/`}}` 是非贪婪
+ * 匹配，会在字符串字面量内部的 `}}` 处提前收口，导致模板编译失败。
+ * 挪到这里作为普通变量，模板里只留一层 `{{ TEMPLATE_VAR_HINT.xxx }}`，
+ * 源码里就不会出现裸的 `{{`/`}}` 字符对。
+ */
+const TEMPLATE_VAR_HINT = {
+  users: '{{join .users "、"}}',
+  giftName: '{{.gift.name}}',
+  count: '{{.count}}',
+  gifts: '{{gifts}}',
+}
+
+const loading = ref(false)
+const saving = ref(false)
+
+const enterDraft = reactive<EnterDraft>(defaultEnterDraft())
+const giftDraft = reactive<GiftDraft>(defaultGiftDraft())
+
+/**
+ * 上一次加载完成时的草稿快照，用来算 dirty——比对内容而不是加监听器逐字段设标记。
+ *
+ * **初值必须是当前默认草稿的序列化结果，不能是空字符串。** 页面刚挂载、
+ * 还没选中直播间（或 loadRules 还没跑完）时，enterDraft/giftDraft 已经是
+ * 默认值，若 snapshot 初值是 ''，两者一比对就不相等，dirty 会在用户
+ * 什么都没做的情况下先亮一次「有未保存的改动」。
+ */
+const snapshot = ref(JSON.stringify({ enter: enterDraft, gift: giftDraft }))
+
+const dirty = computed(
+  () => JSON.stringify({ enter: enterDraft, gift: giftDraft }) !== snapshot.value,
+)
+
+const builtEnterRule = computed(() => buildEnterRule(enterDraft, bindings.current?.roomId ?? ''))
+const builtGiftRule = computed(() => buildGiftRule(giftDraft))
+
+async function loadRules() {
+  const b = bindings.current
+  if (!b) return
+  loading.value = true
+  try {
+    const rules = await request<RuleView[]>('GET', `/api/bindings/${b.id}/rules`)
+    const enterRule = claimRule(rules, ENTER_RULE_NAME)
+    const giftRule = claimRule(rules, GIFT_RULE_NAME)
+    Object.assign(enterDraft, parseEnterDraft(enterRule))
+    Object.assign(giftDraft, parseGiftDraft(giftRule))
+    snapshot.value = JSON.stringify({ enter: enterDraft, gift: giftDraft })
+  } catch (e) {
+    message.error(e instanceof ApiError ? e.message : '加载规则失败')
+  } finally {
+    loading.value = false
+  }
+}
+
+// 切换直播间要重新认领——上一个直播间的草稿不该带到下一个直播间去。
+watch(
+  () => bindings.currentId,
+  () => void loadRules(),
+  { immediate: true },
+)
+
+/**
+ * onSave 先留空。
+ *
+ * Task 13 接：统一的「写库（PUT /api/bindings/{id}/rules/{name} 或整组
+ * 替换）→ 触发规则引擎 reload」交互在那里实现。本任务只负责把草稿状态
+ * 做对，不自己调用后端保存接口。
+ */
+function onSave() {
+  // 有意留空，见上方注释。
+}
+</script>
+
+<template>
+  <div class="danmaku-page">
+    <div class="page-header">
+      <h2>弹幕姬</h2>
+      <SaveBar :dirty="dirty" :saving="saving" @save="onSave" />
+    </div>
+
+    <NEmpty v-if="!bindings.current" description="请先在顶部选择一个直播间" />
+
+    <template v-else>
+      <NSpin :show="loading">
+        <!-- ==================== 进房欢迎 ==================== -->
+        <NCard title="进房欢迎" class="section-card">
+          <template #header-extra>
+            <NSwitch v-model:value="enterDraft.enabled" />
+          </template>
+
+          <h4>欢迎筛选</h4>
+          <div class="row">
+            <NCheckbox v-model:checked="enterDraft.filter.wearMedalOnly">
+              只欢迎佩戴粉丝牌的用户
+            </NCheckbox>
+            <NTooltip>
+              <template #trigger>
+                <NTag type="info" size="small">自动拼条件</NTag>
+              </template>
+              口径（设计文档 §13.2）：粉丝牌已点亮 且 是本房间主播的牌子——
+              两条都满足才算「佩戴」，保存时会自动拼成 user.medal.isLighted=true 且
+              user.medal.roomId=本房间号， 不需要你自己拼条件，也不需要后端补丁。
+            </NTooltip>
+          </div>
+
+          <div class="row">
+            <span class="label">粉丝牌等级下限</span>
+            <NInputNumber
+              v-model:value="enterDraft.filter.minMedalLevel"
+              :min="0"
+              clearable
+              placeholder="不限"
+              style="width: 140px"
+            />
+          </div>
+
+          <div class="row">
+            <NCheckbox v-model:checked="enterDraft.filter.guardOnly">只欢迎大航海用户</NCheckbox>
+            <NSelect
+              v-model:value="enterDraft.filter.guardTier"
+              :options="GUARD_TIER_OPTIONS"
+              :disabled="!enterDraft.filter.guardOnly"
+              style="width: 200px"
+            />
+          </div>
+
+          <h4>频次 / 合并</h4>
+          <NRadioGroup v-model:value="enterDraft.groupMode">
+            <NRadio
+              v-for="opt in ENTER_GROUP_MODE_OPTIONS"
+              :key="opt.value"
+              :value="opt.value"
+              class="radio-item"
+            >
+              {{ opt.label }}
+            </NRadio>
+          </NRadioGroup>
+          <div class="row">
+            <span class="label">
+              {{ enterDraft.groupMode === 'merge' ? '合并窗口（秒）' : '去重窗口（秒）' }}
+            </span>
+            <NInputNumber v-model:value="enterDraft.windowSeconds" :min="1" style="width: 140px" />
+            <span class="label">最长等待（秒，可选）</span>
+            <NInputNumber
+              v-model:value="enterDraft.maxWaitSeconds"
+              :min="0"
+              clearable
+              placeholder="不设上限"
+              style="width: 140px"
+            />
+            <span class="label">最少合并人数</span>
+            <NInputNumber
+              v-model:value="enterDraft.minCount"
+              :min="1"
+              :disabled="enterDraft.groupMode !== 'merge'"
+              style="width: 100px"
+            />
+          </div>
+
+          <h4>欢迎语模板</h4>
+          <div class="row">
+            <NRadioGroup v-model:value="enterDraft.pickMode">
+              <NRadio
+                v-for="opt in PICK_MODE_OPTIONS"
+                :key="opt.value"
+                :value="opt.value"
+                class="radio-item"
+              >
+                {{ opt.label }}
+              </NRadio>
+            </NRadioGroup>
+            <NTooltip>
+              <template #trigger>
+                <NTag type="warning" size="small">待后端支持</NTag>
+              </template>
+              规则引擎目前只实现了随机抽取（server/internal/rules/template.go 的 Renderer.Render 用
+              rand.Intn），轮询需要引擎侧记住这条规则
+              上次用到第几条模板的游标状态，选中「轮询」暂不生效。
+            </NTooltip>
+          </div>
+
+          <div class="template-block">
+            <span class="label">单人欢迎语</span>
+            <TemplateList v-model="enterDraft.singleTemplates" placeholder="单人欢迎语模板" />
+          </div>
+          <div class="template-block">
+            <span class="label">多人合并欢迎语</span>
+            <NTooltip>
+              <template #trigger>
+                <NTag type="warning" size="small">待后端支持</NTag>
+              </template>
+              spec.Action 目前只有一个 Template 字段，一条规则装不下两套模板。
+              这一栏会正常渲染、可以编辑，但保存时只有上面「单人欢迎语」进入
+              规则体，这一栏暂不生效——需要引擎侧支持按合并条数（count==1 vs count>1）选模板集。
+            </NTooltip>
+            <TemplateList v-model="enterDraft.multiTemplates" placeholder="多人合并欢迎语模板" />
+          </div>
+
+          <NCollapse class="preview-collapse">
+            <NCollapseItem title="预览将要生成的规则 JSON（本地草稿，尚未保存）" name="preview">
+              <pre class="json-preview">{{ JSON.stringify(builtEnterRule, null, 2) }}</pre>
+            </NCollapseItem>
+          </NCollapse>
+        </NCard>
+
+        <!-- ==================== 礼物答谢 ==================== -->
+        <NCard title="礼物答谢" class="section-card">
+          <template #header-extra>
+            <NSwitch v-model:value="giftDraft.enabled" />
+          </template>
+
+          <h4>归类阈值</h4>
+          <NRadioGroup v-model:value="giftDraft.groupMode">
+            <NRadio
+              v-for="opt in GIFT_GROUP_MODE_OPTIONS"
+              :key="opt.value"
+              :value="opt.value"
+              class="radio-item"
+            >
+              {{ opt.label }}
+            </NRadio>
+          </NRadioGroup>
+          <div class="row">
+            <span class="label">
+              {{ giftDraft.groupMode === 'merge' ? '合并窗口（秒）' : '累加窗口（秒）' }}
+            </span>
+            <NInputNumber v-model:value="giftDraft.windowSeconds" :min="1" style="width: 140px" />
+            <span class="label">最长等待（秒，可选）</span>
+            <NInputNumber
+              v-model:value="giftDraft.maxWaitSeconds"
+              :min="0"
+              clearable
+              placeholder="不设上限"
+              style="width: 140px"
+            />
+            <span class="label">最少合并人数</span>
+            <NInputNumber
+              v-model:value="giftDraft.minCount"
+              :min="1"
+              :disabled="giftDraft.groupMode !== 'merge'"
+              style="width: 100px"
+            />
+          </div>
+
+          <h4>答谢语模板</h4>
+          <div class="row">
+            <NRadioGroup v-model:value="giftDraft.pickMode">
+              <NRadio
+                v-for="opt in PICK_MODE_OPTIONS"
+                :key="opt.value"
+                :value="opt.value"
+                class="radio-item"
+              >
+                {{ opt.label }}
+              </NRadio>
+            </NRadioGroup>
+            <NTooltip>
+              <template #trigger>
+                <NTag type="warning" size="small">待后端支持</NTag>
+              </template>
+              同进房欢迎：规则引擎目前只有随机抽取，轮询需要引擎侧记游标状态。
+            </NTooltip>
+          </div>
+          <TemplateList v-model="giftDraft.templates" placeholder="答谢语模板" />
+          <p class="hint">
+            可用变量：<code>{{ TEMPLATE_VAR_HINT.users }}</code>
+            （本轮参与的用户，需要用 join 拼接）、
+            <code>{{ TEMPLATE_VAR_HINT.giftName }}</code>
+            （本轮合并时只保留第一件礼物的名字）、
+            <code>{{ TEMPLATE_VAR_HINT.count }}</code>
+            等。设计稿示例里的 <code>{{ TEMPLATE_VAR_HINT.gifts }}</code>
+            （多种礼物名合并成一个列表）目前后端没有对应变量——
+            <code>internal/rules/aggregate.go</code> 的 <code>mergeBuckets</code> 只收集了
+            <code>users</code> 列表， 没有收集礼物名列表，见下方悬空说明。
+          </p>
+
+          <h4>盲盒</h4>
+          <div class="row">
+            <NCheckbox v-model:checked="giftDraft.blindBoxSeparate">
+              盲盒礼物单独一类，不并入常规答谢
+            </NCheckbox>
+            <NTooltip>
+              <template #trigger>
+                <NTag type="warning" size="small">待后端支持</NTag>
+              </template>
+              event.Gift（server/internal/event/payload.go）完全没有盲盒字段， B 站 SEND_GIFT
+              报文里的 blind_gift 对象还没解析。
+              需要用户真刷一次盲盒抓样本才能确定报文形状，这一步不是 纯写代码能解决的。
+            </NTooltip>
+          </div>
+          <div class="row">
+            <NCheckbox v-model:checked="giftDraft.blindBoxProfitTracking">盲盒盈亏统计</NCheckbox>
+            <NTooltip>
+              <template #trigger>
+                <NTag type="warning" size="small">待后端支持</NTag>
+              </template>
+              依赖上一项的协议层补丁，同样需要真实样本；且盈亏必须按电池
+              数量统计而非礼物名，滚动合并时盈亏要跟着重算。
+            </NTooltip>
+          </div>
+
+          <NCollapse class="preview-collapse">
+            <NCollapseItem title="预览将要生成的规则 JSON（本地草稿，尚未保存）" name="preview">
+              <pre class="json-preview">{{ JSON.stringify(builtGiftRule, null, 2) }}</pre>
+            </NCollapseItem>
+          </NCollapse>
+        </NCard>
+      </NSpin>
+    </template>
+  </div>
+</template>
+
+<style scoped>
+.page-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+}
+.section-card {
+  margin-bottom: 16px;
+}
+.row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+.label {
+  font-size: 13px;
+  opacity: 0.8;
+}
+.radio-item {
+  margin-right: 16px;
+}
+.template-block {
+  margin-bottom: 12px;
+}
+.template-block .label {
+  display: block;
+  margin-bottom: 4px;
+}
+.hint {
+  font-size: 12px;
+  opacity: 0.7;
+  margin: 8px 0;
+}
+.hint code {
+  background: rgba(128, 128, 128, 0.15);
+  padding: 0 4px;
+  border-radius: 3px;
+}
+.preview-collapse {
+  margin-top: 8px;
+}
+.json-preview {
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+</style>
