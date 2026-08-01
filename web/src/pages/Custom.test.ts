@@ -81,10 +81,24 @@ const FULL_AGGREGATE_BY = [
   { value: 'user', label: '按类型 + 用户：仅去重不聚合' },
 ]
 
-/** 每次都返回新 Response 实例——Response.body 只能读一次。 */
+function err(status: number, message: string) {
+  return new Response(JSON.stringify({ error: message }), {
+    status,
+    headers: { 'Content-Type': 'application/json' },
+  })
+}
+
+/**
+ * 每次都返回新 Response 实例——Response.body 只能读一次。
+ *
+ * `putResponse`/`reloadResponse` 默认成功，Task 13 的失败路径测试用它们
+ * 覆盖成 422，演练"第 1 步失败"“第 2 步失败”两种场景。
+ */
 function stubFetch(opts: {
   rules?: RuleView[]
   onWrite?: (url: string, init: RequestInit) => void
+  putResponse?: () => Response
+  reloadResponse?: () => Response
 }) {
   const rules = opts.rules ?? []
   const f = vi.fn().mockImplementation((url: string, init?: RequestInit) => {
@@ -96,6 +110,12 @@ function stubFetch(opts: {
       return Promise.resolve(ok(rules))
     }
     if (init) opts.onWrite?.(url, init)
+    if (url === '/api/bindings/1/rules' && init?.method === 'PUT' && opts.putResponse) {
+      return Promise.resolve(opts.putResponse())
+    }
+    if (url === '/api/bindings/1/reload' && init?.method === 'POST' && opts.reloadResponse) {
+      return Promise.resolve(opts.reloadResponse())
+    }
     return Promise.resolve(ok({ status: 'ok' }))
   })
   vi.stubGlobal('fetch', f)
@@ -497,4 +517,128 @@ describe('defaultActionDraft', () => {
     expect(a.type).toBe('danmaku')
     expect(a.templates.length).toBeGreaterThan(0)
   })
+})
+
+// ============================================================
+// Task 13：保存与热重载的统一交互
+// ============================================================
+
+async function addRuleWithName(wrapper: Awaited<ReturnType<typeof mountCustom>>, name: string) {
+  const addBtn = wrapper.findAll('button').find((b) => b.text().includes('新增自定义规则'))
+  await addBtn!.trigger('click')
+  await flushPromises()
+  const nameInput = wrapper.find('input[placeholder="规则名（如：舰长专属欢迎）"]')
+  await nameInput.setValue(name)
+  await flushPromises()
+}
+
+describe('Custom 页：保存（Task 13 接上 useDraft）', () => {
+  it('点击「保存并生效」依次 GET → PUT → POST reload，成功后 dirty 归假、弹出成功提示', async () => {
+    setupStores()
+    const f = stubFetch({ rules: [] })
+    const wrapper = await mountCustom()
+
+    await addRuleWithName(wrapper, '新规则')
+
+    const saveBtn = () => wrapper.findAll('button').find((b) => b.text() === '保存并生效')!
+    const callsBefore = f.mock.calls.length
+    await saveBtn().trigger('click')
+    await flushPromises()
+
+    const writeCalls = f.mock.calls.slice(callsBefore).map((call) => {
+      const [url, init] = call as [string, RequestInit?]
+      return `${init?.method ?? 'GET'} ${url}`
+    })
+    expect(writeCalls).toEqual([
+      'GET /api/bindings/1/rules',
+      'PUT /api/bindings/1/rules',
+      'POST /api/bindings/1/reload',
+    ])
+    expect(wrapper.text()).not.toContain('有未保存的改动')
+    expect(messageMock.success).toHaveBeenCalledWith('已保存并生效')
+  })
+
+  it(
+    '【关键：钉死"整组替换不误删别的页面的规则"，反过来的方向】库里已有一条弹幕姬页管的内置规则时，' +
+      '从自定义弹幕姬页保存，PUT 请求体里那条内置规则必须还在、且内容原样不变',
+    async () => {
+      const builtinRule: RuleView = {
+        name: '内置/进房欢迎',
+        position: 0,
+        enabled: true,
+        on: ['user_enter'],
+        do: [{ type: 'danmaku', template: ['欢迎 {{.user.username}} 来到直播间~'] }],
+      }
+      let putBody: RuleView[] | null = null
+      setupStores()
+      stubFetch({
+        rules: [builtinRule],
+        onWrite: (url, init) => {
+          if (url === '/api/bindings/1/rules' && init.method === 'PUT') {
+            putBody = JSON.parse(init.body as string) as RuleView[]
+          }
+        },
+      })
+      const wrapper = await mountCustom()
+
+      await addRuleWithName(wrapper, '新自定义规则')
+
+      const saveBtn = () => wrapper.findAll('button').find((b) => b.text() === '保存并生效')!
+      await saveBtn().trigger('click')
+      await flushPromises()
+
+      expect(putBody).not.toBeNull()
+      const kept = putBody!.find((r) => r.name === '内置/进房欢迎')
+      expect(kept, '弹幕姬页管的内置规则必须原样保留').toBeTruthy()
+      expect(kept).toEqual({
+        name: '内置/进房欢迎',
+        enabled: true,
+        on: ['user_enter'],
+        do: [{ type: 'danmaku', template: ['欢迎 {{.user.username}} 来到直播间~'] }],
+      })
+      expect(putBody!.map((r) => r.name)).toContain('新自定义规则')
+    },
+  )
+
+  it('第 1 步（PUT 写库）失败：弹出后端错误原文，dirty 保持真', async () => {
+    setupStores()
+    stubFetch({
+      rules: [],
+      putResponse: () => err(422, '第 1 条规则(新规则)不合法: 正则非法'),
+    })
+    const wrapper = await mountCustom()
+    await addRuleWithName(wrapper, '新规则')
+
+    const saveBtn = () => wrapper.findAll('button').find((b) => b.text() === '保存并生效')!
+    await saveBtn().trigger('click')
+    await flushPromises()
+
+    expect(messageMock.error).toHaveBeenCalledWith('第 1 条规则(新规则)不合法: 正则非法')
+    expect(wrapper.text()).toContain('有未保存的改动')
+    expect(wrapper.text()).not.toContain('已保存到数据库，但重载失败')
+  })
+
+  it(
+    '第 2 步（reload）失败：dirty 不归假，界面出现"已保存到数据库，但重载失败"的持久提示，' +
+      '且原样带上后端"仍在用上一份配置运行"的安抚文案',
+    async () => {
+      const reloadErrorMessage = '重载失败，仍在用上一份配置运行: 规则 新规则 的正则非法'
+      setupStores()
+      stubFetch({
+        rules: [],
+        reloadResponse: () => err(422, reloadErrorMessage),
+      })
+      const wrapper = await mountCustom()
+      await addRuleWithName(wrapper, '新规则')
+
+      const saveBtn = () => wrapper.findAll('button').find((b) => b.text() === '保存并生效')!
+      await saveBtn().trigger('click')
+      await flushPromises()
+
+      expect(messageMock.error).toHaveBeenCalledWith(reloadErrorMessage)
+      expect(wrapper.text()).toContain('有未保存的改动')
+      expect(wrapper.text()).toContain('已保存到数据库，但重载失败')
+      expect(wrapper.text()).toContain(reloadErrorMessage)
+    },
+  )
 })

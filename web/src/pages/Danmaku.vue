@@ -591,6 +591,7 @@ export type { RuleView }
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from 'vue'
 import {
+  NAlert,
   NCard,
   NCheckbox,
   NCollapse,
@@ -609,9 +610,11 @@ import {
 } from 'naive-ui'
 import { ApiError, request } from '@/api'
 import { useBindingsStore } from '@/stores/bindings'
+import { useDraft } from '@/composables/useDraft'
 import SaveBar from '@/components/SaveBar.vue'
 import TemplateList from '@/components/TemplateList.vue'
 import PkPanel, {
+  buildPkRule,
   defaultPkDraft,
   parsePkDraft,
   PK_RULE_NAME,
@@ -646,7 +649,6 @@ const GUARD_TEMPLATE_VAR_HINT = {
 }
 
 const loading = ref(false)
-const saving = ref(false)
 
 const enterDraft = reactive<EnterDraft>(defaultEnterDraft())
 const giftDraft = reactive<GiftDraft>(defaultGiftDraft())
@@ -676,10 +678,6 @@ function currentDraftsSnapshot() {
   })
 }
 
-const snapshot = ref(currentDraftsSnapshot())
-
-const dirty = computed(() => currentDraftsSnapshot() !== snapshot.value)
-
 const builtEnterRule = computed(() => buildEnterRule(enterDraft, bindings.current?.roomId ?? ''))
 const builtGiftRule = computed(() => buildGiftRule(giftDraft))
 const builtBroadcastRule = computed(() => buildBroadcastRule(broadcastDraft))
@@ -691,6 +689,37 @@ const builtGuardRule = computed(() => buildGuardRule(guardDraft))
 function onPkDraftUpdate(next: PkDraft) {
   Object.assign(pkDraft, next)
 }
+
+/** 本页管的七条内置规则名——合并保存时用来从「现有全部规则」里挑出该被本页替换的那些。 */
+const OWNED_RULE_NAMES = [
+  ENTER_RULE_NAME,
+  GIFT_RULE_NAME,
+  PK_RULE_NAME,
+  BROADCAST_RULE_NAME,
+  FOLLOW_RULE_NAME,
+  SHARE_RULE_NAME,
+  GUARD_RULE_NAME,
+]
+
+/** buildAllRules 组装本页管的全部七条规则，保存时整批送去跟其余页面的规则合并。 */
+function buildAllRules(): Rule[] {
+  return [
+    buildEnterRule(enterDraft, bindings.current?.roomId ?? ''),
+    buildGiftRule(giftDraft),
+    buildPkRule(pkDraft),
+    buildBroadcastRule(broadcastDraft),
+    buildFollowRule(followDraft),
+    buildShareRule(shareDraft),
+    buildGuardRule(guardDraft),
+  ]
+}
+
+const { dirty, saving, partialFailureMessage, markSaved, save } = useDraft({
+  bindingId: () => bindings.current?.id ?? null,
+  snapshot: currentDraftsSnapshot,
+  isOwned: (name) => OWNED_RULE_NAMES.includes(name),
+  buildRules: buildAllRules,
+})
 
 async function loadRules() {
   const b = bindings.current
@@ -705,7 +734,7 @@ async function loadRules() {
     Object.assign(followDraft, parseFollowDraft(claimRule(rules, FOLLOW_RULE_NAME)))
     Object.assign(shareDraft, parseShareDraft(claimRule(rules, SHARE_RULE_NAME)))
     Object.assign(guardDraft, parseGuardDraft(claimRule(rules, GUARD_RULE_NAME)))
-    snapshot.value = currentDraftsSnapshot()
+    markSaved()
   } catch (e) {
     message.error(e instanceof ApiError ? e.message : '加载规则失败')
   } finally {
@@ -721,14 +750,25 @@ watch(
 )
 
 /**
- * onSave 先留空。
+ * onSave 接 useDraft 的保存流程：GET 现有规则 → 合并 → PUT → POST reload。
  *
- * Task 13 接：统一的「写库（PUT /api/bindings/{id}/rules/{name} 或整组
- * 替换）→ 触发规则引擎 reload」交互在那里实现。本任务只负责把草稿状态
- * 做对，不自己调用后端保存接口。
+ * 两步都成功才提示「已保存并生效」。第 2 步（reload）失败时 useDraft 内部
+ * 已经把 partialFailureMessage 设好、dirty 也没有归假（见 useDraft.ts
+ * 文件头说明），这里的 catch 只负责把后端原文以 toast 形式再提醒一遍——
+ * 「仍在用上一份配置运行」这句安抚必须原样带到用户面前。
  */
-function onSave() {
-  // 有意留空，见上方注释。
+async function onSave() {
+  try {
+    await save()
+    message.success('已保存并生效')
+  } catch (e) {
+    message.error(e instanceof ApiError ? e.message : '保存失败')
+  }
+}
+
+/** 手动关掉「已保存到数据库，但重载失败」的持久提示——只是收起提示条，不影响 dirty。 */
+function dismissPartialFailure() {
+  partialFailureMessage.value = null
 }
 </script>
 
@@ -738,6 +778,23 @@ function onSave() {
       <h2>弹幕姬</h2>
       <SaveBar :dirty="dirty" :saving="saving" @save="onSave" />
     </div>
+
+    <!--
+      第三态：PUT 写库成功、但 POST reload 失败——库已经改了，引擎还在跑
+      旧配置。dirty 这时候不会归假（见 useDraft.ts），单靠 SaveBar 的
+      「有未保存的改动」不足以说明这一半保存了、一半没生效，所以单独给
+      一条持久提示，不只是转瞬即逝的 toast。
+    -->
+    <NAlert
+      v-if="partialFailureMessage"
+      type="warning"
+      title="已保存到数据库，但重载失败"
+      closable
+      class="partial-failure-alert"
+      @close="dismissPartialFailure"
+    >
+      {{ partialFailureMessage }}
+    </NAlert>
 
     <NEmpty v-if="!bindings.current" description="请先在顶部选择一个直播间" />
 
@@ -1092,6 +1149,9 @@ function onSave() {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  margin-bottom: 16px;
+}
+.partial-failure-alert {
   margin-bottom: 16px;
 }
 .section-card {

@@ -338,7 +338,7 @@ export type { RuleView }
 </script>
 
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { onMounted, reactive, ref, watch } from 'vue'
 import {
   NAlert,
   NButton,
@@ -360,6 +360,7 @@ import {
 } from 'naive-ui'
 import { ApiError, request } from '@/api'
 import { useBindingsStore } from '@/stores/bindings'
+import { useDraft } from '@/composables/useDraft'
 import SaveBar from '@/components/SaveBar.vue'
 import TemplateList from '@/components/TemplateList.vue'
 import ConditionTree, { COMMON_FIELD_OPTIONS } from '@/components/ConditionTree.vue'
@@ -370,7 +371,6 @@ const message = useMessage()
 const dialog = useDialog()
 
 const loading = ref(false)
-const saving = ref(false)
 
 // ---- 元数据：全部从 GET /api/meta/* 拉，不硬编码 ----
 //
@@ -407,8 +407,21 @@ function currentDraftsSnapshot(): string {
   return JSON.stringify(customRules)
 }
 
-const snapshot = ref(currentDraftsSnapshot())
-const dirty = computed(() => currentDraftsSnapshot() !== snapshot.value)
+/**
+ * 本页管的是「不在内置七条名单里」的一切规则——与 Danmaku.vue 互补。
+ * 合并保存时，凡是不属于内置七条的现有规则，都被本页新组装的
+ * customRules 整批替换；内置七条原样保留，不受本页保存影响。
+ */
+function isOwnedByCustomPage(name: string): boolean {
+  return !BUILTIN_RULE_NAMES.includes(name)
+}
+
+const { dirty, saving, partialFailureMessage, markSaved, save } = useDraft({
+  bindingId: () => bindings.current?.id ?? null,
+  snapshot: currentDraftsSnapshot,
+  isOwned: isOwnedByCustomPage,
+  buildRules: () => customRules.map(buildCustomRule),
+})
 
 async function loadRules() {
   const b = bindings.current
@@ -418,7 +431,7 @@ async function loadRules() {
     const rules = await request<RuleView[]>('GET', `/api/bindings/${b.id}/rules`)
     const drafts = rules.filter(isCustomRule).map(parseCustomRuleDraft)
     customRules.splice(0, customRules.length, ...drafts)
-    snapshot.value = currentDraftsSnapshot()
+    markSaved()
   } catch (e) {
     message.error(e instanceof ApiError ? e.message : '加载规则失败')
   } finally {
@@ -463,13 +476,21 @@ function removeAction(draft: CustomRuleDraft, index: number) {
 }
 
 /**
- * onSave 先留空。
- *
- * Task 13 接：统一的「写库 → 触发规则引擎 reload」交互在那里实现，
- * 与 Danmaku.vue 同一套约定，本任务只负责把草稿状态做对。
+ * onSave 接 useDraft 的保存流程，与 Danmaku.vue 同一套约定：
+ * GET 现有规则 → 合并（保留内置七条，替换本页管的自定义规则）→ PUT → POST reload。
  */
-function onSave() {
-  // 有意留空，见上方注释。
+async function onSave() {
+  try {
+    await save()
+    message.success('已保存并生效')
+  } catch (e) {
+    message.error(e instanceof ApiError ? e.message : '保存失败')
+  }
+}
+
+/** 手动关掉「已保存到数据库，但重载失败」的持久提示——只是收起提示条，不影响 dirty。 */
+function dismissPartialFailure() {
+  partialFailureMessage.value = null
 }
 </script>
 
@@ -479,6 +500,20 @@ function onSave() {
       <h2>自定义弹幕姬</h2>
       <SaveBar :dirty="dirty" :saving="saving" @save="onSave" />
     </div>
+
+    <!-- 第三态：PUT 写库成功、但 POST reload 失败——见 useDraft.ts 文件头说明，
+         dirty 这时候不归假，单靠 SaveBar 的「有未保存的改动」看不出「已经保存了一半」，
+         所以单独给一条持久提示。 -->
+    <NAlert
+      v-if="partialFailureMessage"
+      type="warning"
+      title="已保存到数据库，但重载失败"
+      closable
+      class="partial-failure-alert"
+      @close="dismissPartialFailure"
+    >
+      {{ partialFailureMessage }}
+    </NAlert>
 
     <NEmpty v-if="!bindings.current" description="请先在顶部选择一个直播间" />
 
@@ -712,6 +747,9 @@ function onSave() {
   margin-bottom: 16px;
 }
 .intro-alert {
+  margin-bottom: 16px;
+}
+.partial-failure-alert {
   margin-bottom: 16px;
 }
 .empty-rules {

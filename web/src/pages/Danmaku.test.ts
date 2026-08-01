@@ -59,6 +59,46 @@ function ok(body: unknown, status = 200) {
   })
 }
 
+function err(status: number, message: string) {
+  return new Response(JSON.stringify({ error: message }), {
+    status,
+    headers: { 'Content-Type': 'application/json' },
+  })
+}
+
+/**
+ * stubSaveFetch 给「保存」相关测试用：GET 规则列表（初次加载与 save()
+ * 内部各调一次，返回同一份 `rules`）、PUT 整组替换、POST reload。
+ *
+ * PUT/POST 的响应可以单独覆盖，用来演练"第 1 步失败"“第 2 步失败”这类
+ * 场景。**每次都要返回新的 Response 实例**——Response.body 只能读一次，
+ * GET 在测试里至少会被调用两次（挂载时一次，保存时一次）。
+ */
+function stubSaveFetch(opts: {
+  rules?: RuleView[]
+  putResponse?: () => Response
+  reloadResponse?: () => Response
+  onPut?: (body: unknown) => void
+}) {
+  const rules = opts.rules ?? []
+  const f = vi.fn().mockImplementation((url: string, init?: RequestInit) => {
+    const method = init?.method ?? 'GET'
+    if (url === '/api/bindings/1/rules' && method === 'GET') {
+      return Promise.resolve(ok(rules))
+    }
+    if (url === '/api/bindings/1/rules' && method === 'PUT') {
+      opts.onPut?.(JSON.parse(init!.body as string))
+      return Promise.resolve(opts.putResponse ? opts.putResponse() : ok({ status: 'ok' }))
+    }
+    if (url === '/api/bindings/1/reload' && method === 'POST') {
+      return Promise.resolve(opts.reloadResponse ? opts.reloadResponse() : ok({ status: 'ok' }))
+    }
+    throw new Error(`stubSaveFetch 没处理这个请求: ${method} ${url}`)
+  })
+  vi.stubGlobal('fetch', f)
+  return f
+}
+
 const 绑定 = {
   id: 1,
   accountId: 1,
@@ -345,10 +385,9 @@ describe('Danmaku 页面：四处悬空控件全部渲染，且都不 disabled',
   })
 })
 
-describe('Danmaku 页面：dirty 与保存留白', () => {
-  it('刚加载完成时 dirty 为假，保存按钮 disabled；改动草稿后 dirty 变真、按钮可点，但点击不发任何请求', async () => {
-    const f = vi.fn().mockImplementation(() => Promise.resolve(ok([])))
-    vi.stubGlobal('fetch', f)
+describe('Danmaku 页面：dirty', () => {
+  it('刚加载完成时 dirty 为假，保存按钮 disabled；改动草稿后 dirty 变真、按钮可点', async () => {
+    stubSaveFetch({ rules: [] })
     setupStores()
     const wrapper = await mountDanmaku()
 
@@ -361,13 +400,136 @@ describe('Danmaku 页面：dirty 与保存留白', () => {
 
     expect(wrapper.text()).toContain('有未保存的改动')
     expect(saveBtn()!.attributes('disabled')).toBeUndefined()
-
-    const callsBefore = f.mock.calls.length
-    await saveBtn()!.trigger('click')
-    await flushPromises()
-    // Task 13 才接后端保存，本任务点了保存也不该发出任何请求
-    expect(f.mock.calls.length).toBe(callsBefore)
   })
+})
+
+// ============================================================
+// Task 13：保存与热重载的统一交互
+// ============================================================
+
+describe('Danmaku 页面：保存（Task 13 接上 useDraft）', () => {
+  it('点击「保存并生效」依次 GET → PUT → POST reload，成功后 dirty 归假、弹出成功提示', async () => {
+    const f = stubSaveFetch({ rules: [] })
+    setupStores()
+    const wrapper = await mountDanmaku()
+
+    const firstTemplateInput = wrapper.find('input[placeholder="单人欢迎语模板"]')
+    await firstTemplateInput.setValue('改过的模板')
+    await flushPromises()
+
+    const saveBtn = () => wrapper.findAll('button').find((b) => b.text() === '保存并生效')!
+    const callsBefore = f.mock.calls.length
+    await saveBtn().trigger('click')
+    await flushPromises()
+
+    // 挂载时已经有一次 GET，点保存之后应该再追加 GET + PUT + POST 三次
+    expect(f.mock.calls.length).toBe(callsBefore + 3)
+    const methodsAndUrls = f.mock.calls.slice(callsBefore).map((call) => {
+      const [url, init] = call as [string, RequestInit?]
+      return `${init?.method ?? 'GET'} ${url}`
+    })
+    expect(methodsAndUrls).toEqual([
+      'GET /api/bindings/1/rules',
+      'PUT /api/bindings/1/rules',
+      'POST /api/bindings/1/reload',
+    ])
+
+    expect(wrapper.text()).not.toContain('有未保存的改动')
+    expect(saveBtn().attributes('disabled')).toBeDefined()
+    expect(messageMock.success).toHaveBeenCalledWith('已保存并生效')
+  })
+
+  it(
+    '【关键：钉死"整组替换不误删别的页面的规则"】库里已有一条自定义弹幕姬页建的规则时，' +
+      '从弹幕姬页保存，PUT 请求体里这条自建规则必须还在',
+    async () => {
+      const customRule: RuleView = {
+        name: '舰长专属欢迎',
+        position: 0,
+        on: ['user_enter'],
+        when: { field: 'user.uid', op: 'eq', value: '12345' },
+        do: [{ type: 'danmaku', template: ['欢迎舰长回家'] }],
+      }
+      let putBody: RuleView[] | null = null
+      stubSaveFetch({
+        rules: [customRule],
+        onPut: (body) => {
+          putBody = body as RuleView[]
+        },
+      })
+      setupStores()
+      const wrapper = await mountDanmaku()
+
+      const firstTemplateInput = wrapper.find('input[placeholder="单人欢迎语模板"]')
+      await firstTemplateInput.setValue('改过的模板')
+      await flushPromises()
+
+      const saveBtn = () => wrapper.findAll('button').find((b) => b.text() === '保存并生效')!
+      await saveBtn().trigger('click')
+      await flushPromises()
+
+      expect(putBody).not.toBeNull()
+      const names = putBody!.map((r) => r.name)
+      // 核心断言：自定义弹幕姬页建的这条规则不属于弹幕姬页管的七个内置
+      // 名字，保存时必须原样保留，不能被弹幕姬页的整组替换悄悄删掉。
+      expect(names).toContain('舰长专属欢迎')
+      expect(names).toContain(ENTER_RULE_NAME)
+    },
+  )
+
+  it('第 1 步（PUT 写库）失败：弹出后端错误原文，dirty 保持真（改动没丢）', async () => {
+    stubSaveFetch({
+      rules: [],
+      putResponse: () => err(422, '第 1 条规则(内置/进房欢迎)不合法: 正则非法'),
+    })
+    setupStores()
+    const wrapper = await mountDanmaku()
+
+    const firstTemplateInput = wrapper.find('input[placeholder="单人欢迎语模板"]')
+    await firstTemplateInput.setValue('改过的模板')
+    await flushPromises()
+
+    const saveBtn = () => wrapper.findAll('button').find((b) => b.text() === '保存并生效')!
+    await saveBtn().trigger('click')
+    await flushPromises()
+
+    expect(messageMock.error).toHaveBeenCalledWith('第 1 条规则(内置/进房欢迎)不合法: 正则非法')
+    expect(wrapper.text()).toContain('有未保存的改动')
+    expect(saveBtn().attributes('disabled')).toBeUndefined()
+    // 第 1 步失败，不是"保存了一半"，不该出现第三态提示
+    expect(wrapper.text()).not.toContain('已保存到数据库，但重载失败')
+  })
+
+  it(
+    '第 2 步（reload）失败：库已经改了、引擎还在跑旧配置——' +
+      'dirty 不归假，界面出现"已保存到数据库，但重载失败"的持久提示，' +
+      '且原样带上后端"仍在用上一份配置运行"的安抚文案',
+    async () => {
+      const reloadErrorMessage = '重载失败，仍在用上一份配置运行: 规则 内置/进房欢迎 的正则非法'
+      stubSaveFetch({
+        rules: [],
+        reloadResponse: () => err(422, reloadErrorMessage),
+      })
+      setupStores()
+      const wrapper = await mountDanmaku()
+
+      const firstTemplateInput = wrapper.find('input[placeholder="单人欢迎语模板"]')
+      await firstTemplateInput.setValue('改过的模板')
+      await flushPromises()
+
+      const saveBtn = () => wrapper.findAll('button').find((b) => b.text() === '保存并生效')!
+      await saveBtn().trigger('click')
+      await flushPromises()
+
+      expect(messageMock.error).toHaveBeenCalledWith(reloadErrorMessage)
+      // 用户的判断：不能让 dirty 归假——归假会让操作者以为已经完全生效，
+      // 但引擎其实还在跑旧规则。
+      expect(wrapper.text()).toContain('有未保存的改动')
+      expect(saveBtn().attributes('disabled')).toBeUndefined()
+      expect(wrapper.text()).toContain('已保存到数据库，但重载失败')
+      expect(wrapper.text()).toContain(reloadErrorMessage)
+    },
+  )
 })
 
 // ============================================================
