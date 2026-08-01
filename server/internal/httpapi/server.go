@@ -64,6 +64,7 @@ type Server struct {
 	qrLogin qrStarter
 	hub     *Hub
 	runtime *runtimeRegistry
+	cfgHash configHash
 }
 
 // qrTTL 是扫码会话在内存表里的存活时间，与 B 站二维码本身的
@@ -167,6 +168,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/bindings/{binding}/unblock",
 		s.requirePerm(perm.UserBlock, s.handleUnblockUser))
 
+	// 热重载：改完规则按保存才生效。走 rule:write——能改规则的人才能让它生效
+	s.mux.HandleFunc("POST /api/bindings/{binding}/reload",
+		s.requirePerm(perm.RuleWrite, s.handleReload))
+
 	// 业务日志：事件与动作在同一条时间线，走 event:read。
 	s.mux.HandleFunc("GET /api/bindings/{binding}/activity",
 		s.requirePerm(perm.EventRead, s.handleQueryActivity))
@@ -174,6 +179,9 @@ func (s *Server) routes() {
 	// 实时事件流：SSE 推送，权限与业务日志一致，同走 event:read。
 	s.mux.HandleFunc("GET /api/bindings/{binding}/stream",
 		s.requirePerm(perm.EventRead, s.handleStream))
+
+	// 运行期元数据：每个绑定的连接状态 + 配置版本是否与数据库一致。
+	s.mux.HandleFunc("GET /api/meta/runtime", s.requireAuth(s.handleRuntimeMeta))
 
 	// 授权管理：把别人拉进某个绑定、给他权限点、撤销。全部走 member:manage。
 	members := "/api/bindings/{binding}/members"

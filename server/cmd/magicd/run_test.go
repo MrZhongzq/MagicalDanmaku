@@ -3,13 +3,19 @@ package main
 import (
 	"context"
 	"errors"
+	"log/slog"
+	"os"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/event"
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/logging"
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/rules"
+	"github.com/MrZhongzq/MagicalDanmaku/server/internal/rules/spec"
+	"github.com/MrZhongzq/MagicalDanmaku/server/internal/scheduler"
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/store"
 )
 
@@ -266,4 +272,245 @@ func TestCloseAllUsesShutdownBudgetForPendingSends(t *testing.T) {
 		}
 	}
 	t.Error("动作日志应不带 error（发送应当成功），实际 flushed 里没有找到")
+}
+
+func TestHTTPAddrDefault(t *testing.T) {
+	t.Setenv("MAGICD_HTTP_ADDR", "")
+	// 显式设为空串表示关闭，与「未设置」不同
+	if got := httpAddr(); got != "" {
+		t.Errorf("显式空串应表示关闭，实际 %q", got)
+	}
+}
+
+func TestHTTPAddrUnsetUsesLocalhost(t *testing.T) {
+	os.Unsetenv("MAGICD_HTTP_ADDR")
+	if got := httpAddr(); got != "127.0.0.1:8080" {
+		t.Errorf("默认应只监听本机，实际 %q", got)
+	}
+}
+
+func TestHTTPAddrExplicit(t *testing.T) {
+	t.Setenv("MAGICD_HTTP_ADDR", "0.0.0.0:9000")
+	if got := httpAddr(); got != "0.0.0.0:9000" {
+		t.Errorf("= %q", got)
+	}
+}
+
+// newReloadTestStore 建一个独立 schema 的真实存储，供 roomRuntime.Reload
+// 的测试使用——Reload 直接依赖 *store.Store 的 LoadRunConfig，绕不开真库。
+func newReloadTestStore(t *testing.T) (*store.Store, int64, int64) {
+	t.Helper()
+	dsn := os.Getenv("MAGICD_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("未设置 MAGICD_TEST_DATABASE_URL，跳过需要真实数据库的测试。\n" +
+			"本地起库：docker compose -f docker-compose.dev.yml up -d\n" +
+			"然后：export MAGICD_TEST_DATABASE_URL='postgres://magicd:magicd@localhost:5433/magicd?sslmode=disable'")
+	}
+
+	const schema = "h_magicd_reload_test"
+	ctx := context.Background()
+
+	admin, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("连接数据库失败: %v", err)
+	}
+	if _, err := admin.Exec(ctx, `DROP SCHEMA IF EXISTS `+schema+` CASCADE`); err != nil {
+		admin.Close()
+		t.Fatalf("清理旧 schema 失败: %v", err)
+	}
+	if _, err := admin.Exec(ctx, `CREATE SCHEMA `+schema); err != nil {
+		admin.Close()
+		t.Fatalf("创建 schema 失败: %v", err)
+	}
+
+	var st *store.Store
+	t.Cleanup(func() {
+		if st != nil {
+			st.Close()
+		}
+		if _, err := admin.Exec(context.Background(),
+			`DROP SCHEMA IF EXISTS `+schema+` CASCADE`); err != nil {
+			t.Logf("清理 schema 失败: %v", err)
+		}
+		admin.Close()
+	})
+
+	st, err = store.OpenWithSchema(ctx, dsn, schema)
+	if err != nil {
+		t.Fatalf("打开存储失败: %v", err)
+	}
+	if err := st.Migrate(ctx); err != nil {
+		t.Fatalf("迁移失败: %v", err)
+	}
+
+	owner, err := st.CreateUser(ctx, "张三", "密码123456", false)
+	if err != nil {
+		t.Fatalf("建用户报错: %v", err)
+	}
+	acc, err := st.CreateAccount(ctx, store.AccountInput{
+		Name: "小号", Cookie: "SESSDATA=x", OwnerID: owner.ID,
+		RateLimit: time.Second, MaxLength: 40,
+	})
+	if err != nil {
+		t.Fatalf("建账号报错: %v", err)
+	}
+	b, err := st.UpsertBinding(ctx, acc.ID, "123")
+	if err != nil {
+		t.Fatalf("建绑定报错: %v", err)
+	}
+	return st, acc.ID, b.ID
+}
+
+// TestRoomRuntimeReloadSwapsEngine 证明 Reload 真的把引擎换成了新的——
+// 而不是仅仅报告成功却仍在用旧规则处理事件。
+//
+// 手法：初始引擎（不经过数据库，直接构造）挂一条命中就发「旧规则响应」
+// 的规则；数据库里存的是另一条命中就发「新规则响应」的规则。Reload
+// 之后再喂一个弹幕事件，若 rt.engine 真的被换掉，bindingStub 收到的
+// 应该是「新规则响应」；若 Swap 被跳过，会依然是「旧规则响应」。
+func TestRoomRuntimeReloadSwapsEngine(t *testing.T) {
+	st, _, bindingID := newReloadTestStore(t)
+	ctx := context.Background()
+
+	// 数据库里存新规则，Reload 会从这里读到
+	if err := st.ReplaceRules(ctx, bindingID, []spec.Rule{{
+		Name: "规则",
+		On:   []string{"danmaku"},
+		Do:   []spec.Action{{Type: "danmaku", Template: []string{"新规则响应"}}},
+	}}); err != nil {
+		t.Fatalf("写规则报错: %v", err)
+	}
+
+	stub := &bindingStub{}
+	bot := newRoomBot(stub, ctx)
+
+	activity := logging.NewActivityWriter(logging.ActivityWriterOptions{
+		Flush: func(context.Context, []store.ActivityRow) error { return nil },
+	})
+	t.Cleanup(activity.Close)
+
+	oldEngine, err := rules.NewEngine(rules.EngineOptions{
+		Label:  "小号@123",
+		RoomID: "123",
+		Bot:    bot,
+		Rules: []rules.Rule{{
+			Name:    "旧规则",
+			Enabled: true,
+			On:      []event.Type{event.TypeDanmaku},
+			Do:      []rules.Action{{Type: rules.ActionDanmaku, Template: []string{"旧规则响应"}}},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("创建初始引擎报错: %v", err)
+	}
+
+	rt := &roomRuntime{
+		bot:       bot,
+		sink:      activity.Sink(1, bindingID, "123"),
+		storage:   rules.NewMemStorage(),
+		label:     "小号@123",
+		roomID:    "123",
+		bindingID: bindingID,
+		st:        st,
+		sched:     scheduler.New(slog.Default()),
+		log:       slog.Default(),
+	}
+	rt.engine.Store(oldEngine)
+
+	if err := rt.Reload(ctx); err != nil {
+		t.Fatalf("Reload 报错: %v", err)
+	}
+
+	rt.Engine().Handle(event.Event{
+		Type:    event.TypeDanmaku,
+		Payload: event.Danmaku{User: event.User{UID: "1", Username: "观众"}, Text: "你好"},
+	})
+
+	stub.mu.Lock()
+	sent := append([]string{}, stub.sent...)
+	stub.mu.Unlock()
+
+	if len(sent) != 1 || sent[0] != "新规则响应" {
+		t.Fatalf("Reload 后应由新引擎处理事件，实际发送 = %v（期望 [\"新规则响应\"]，"+
+			"若看到 \"旧规则响应\" 说明引擎没有真的被换掉）", sent)
+	}
+}
+
+// TestRoomRuntimeConcurrentReloadAndEventFanoutIsRaceFree 用 -race 验证
+// run.go 里事件扇出的 goroutine（每条事件都调 rt.Engine()，不缓存）与
+// Reload 的 atomic.Pointer 替换是并发安全的。
+//
+// 这不是行为断言（谁先谁后不保证），纯粹是给竞态检测器的靶子：
+// 一边不停地 rt.Engine().Handle(ev)，一边不停地 rt.Reload()，
+// 若哪处偷偷缓存了 *rules.Engine 或漏了原子操作，-race 会报出来。
+func TestRoomRuntimeConcurrentReloadAndEventFanoutIsRaceFree(t *testing.T) {
+	st, _, bindingID := newReloadTestStore(t)
+	ctx := context.Background()
+
+	if err := st.ReplaceRules(ctx, bindingID, []spec.Rule{{
+		Name: "规则",
+		On:   []string{"danmaku"},
+		Do:   []spec.Action{{Type: "danmaku", Template: []string{"响应"}}},
+	}}); err != nil {
+		t.Fatalf("写规则报错: %v", err)
+	}
+
+	stub := &bindingStub{}
+	bot := newRoomBot(stub, ctx)
+	activity := logging.NewActivityWriter(logging.ActivityWriterOptions{
+		Flush: func(context.Context, []store.ActivityRow) error { return nil },
+	})
+	t.Cleanup(activity.Close)
+
+	initEngine, err := rules.NewEngine(rules.EngineOptions{
+		Label: "小号@123", RoomID: "123", Bot: bot,
+		Rules: []rules.Rule{{
+			Name: "初始规则", Enabled: true,
+			On: []event.Type{event.TypeDanmaku},
+			Do: []rules.Action{{Type: rules.ActionDanmaku, Template: []string{"初始响应"}}},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("创建初始引擎报错: %v", err)
+	}
+
+	rt := &roomRuntime{
+		bot: bot, sink: activity.Sink(1, bindingID, "123"), storage: rules.NewMemStorage(),
+		label: "小号@123", roomID: "123", bindingID: bindingID,
+		st: st, sched: scheduler.New(slog.Default()), log: slog.Default(),
+	}
+	rt.engine.Store(initEngine)
+
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+
+	// 模拟 run.go 的事件扇出：每条事件都重新取 rt.Engine()，不缓存
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		ev := event.Event{
+			Type:    event.TypeDanmaku,
+			Payload: event.Danmaku{User: event.User{UID: "1", Username: "观众"}, Text: "你好"},
+		}
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				rt.Engine().Handle(ev)
+			}
+		}
+	}()
+
+	// 并发反复 Reload，模拟操作者连续点保存
+	for i := 0; i < 20; i++ {
+		if err := rt.Reload(ctx); err != nil {
+			close(stop)
+			wg.Wait()
+			t.Fatalf("Reload 报错: %v", err)
+		}
+	}
+
+	close(stop)
+	wg.Wait()
 }

@@ -21,6 +21,15 @@ type BindingRuntime interface {
 	Block(ctx context.Context, uid string, hours int) error
 	Unblock(ctx context.Context, uid string) error
 	State() connector.State
+
+	// Reload 用数据库里当前的配置重建这个绑定的规则引擎。
+	//
+	// **不重建连接**——用户改的只是规则，重连要重新握手、重新拉房间
+	// 信息，还会丢掉这期间的弹幕。
+	//
+	// 新引擎构造失败时必须保持旧引擎继续跑并返回错误：保存了一份非法
+	// 规则不该把机器人搞停。
+	Reload(ctx context.Context) error
 }
 
 // runtimeRegistry 是绑定 ID 到运行期能力的映射。
@@ -158,4 +167,32 @@ func (s *Server) handleUnblockUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	respondJSON(w, http.StatusOK, map[string]string{"uid": uid})
+}
+
+// handleReload 让这个绑定用数据库里当前的配置重建规则引擎。
+//
+// 显式触发而不是监听文件或轮询——用户的要求是「改完按保存才生效」。
+func (s *Server) handleReload(w http.ResponseWriter, r *http.Request) {
+	b := bindingFrom(r.Context())
+
+	rt, ok := s.runtimeFor(w, b.ID, b.Label())
+	if !ok {
+		return
+	}
+
+	if err := rt.Reload(r.Context()); err != nil {
+		// 规则非法是最常见的失败，属于调用者的输入问题；旧引擎仍在跑，
+		// 机器人没有停。422 而不是 500，文案要带上具体原因——
+		// 「哪条规则错了」正是操作者按下保存后要看的
+		s.log.Warn("热重载失败", "binding", b.Label(), "err", err)
+		respondError(w, http.StatusUnprocessableEntity,
+			"重载失败，仍在用上一份配置运行: %v", err)
+		return
+	}
+
+	// 重载成功，配置版本就不再是「待重载」了
+	if h, err := s.CurrentConfigHash(r.Context()); err == nil {
+		s.SetConfigHash(h)
+	}
+	respondJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }

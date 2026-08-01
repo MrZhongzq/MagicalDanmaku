@@ -30,5 +30,6 @@ const (
 	TypeOnlineRankUpdate Type = "online_rank_update" // 高能榜变化
 	TypeRoomStatsUpdate  Type = "room_stats_update"  // 房间统计数据变化
 	TypeBattle           Type = "battle"             // PK 大乱斗（P6 消费）
+	TypeManual           Type = "manual"             // 操作者从 WebUI 手动触发
 	TypeUnknown          Type = "unknown"            // 未识别的 CMD
 )

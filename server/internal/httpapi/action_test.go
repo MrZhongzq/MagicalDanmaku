@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"sync"
 	"testing"
 
@@ -21,6 +22,9 @@ type fakeRuntime struct {
 	unblocked []string
 	err       error
 	state     connector.State
+
+	reloadErr  error
+	reloadHits int
 }
 
 func (f *fakeRuntime) SendDanmaku(_ context.Context, text string) error {
@@ -58,6 +62,13 @@ func (f *fakeRuntime) State() connector.State {
 		return connector.StateConnected
 	}
 	return f.state
+}
+
+func (f *fakeRuntime) Reload(ctx context.Context) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.reloadHits++
+	return f.reloadErr
 }
 
 func (f *fakeRuntime) snapshot() ([]string, []string, []string) {
@@ -227,5 +238,73 @@ func TestBlockRequiresUserBlockNotDanmakuSend(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusForbidden {
 		t.Errorf("有 danmaku:send 但无 user:block 时状态码 = %d, 期望 403", resp.StatusCode)
+	}
+}
+
+// 重载失败要回 422 并说明原因，而不是 500。
+//
+// 机器人没有停——旧引擎还在跑。操作者需要看到「哪条规则错了」。
+func TestReloadReportsFailure(t *testing.T) {
+	srv, st, api := newTestServerWithAPI(t)
+	c := loginAs(t, srv, st, "张三", false)
+	bid := mustBindingFor(t, st, "张三", "小号", "123")
+	fake := &fakeRuntime{reloadErr: errors.New("规则 关键词回复 的正则非法")}
+	api.SetRuntime(map[int64]httpapi.BindingRuntime{bid: fake})
+
+	resp := jsonRequest(t, c, "POST", srv.URL+"/api/bindings/"+itoa(bid)+"/reload", "")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnprocessableEntity {
+		t.Fatalf("状态码 = %d, 期望 422", resp.StatusCode)
+	}
+
+	var body map[string]string
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("解析报错: %v", err)
+	}
+	if !strings.Contains(body["error"], "正则非法") {
+		t.Errorf("错误文案应带上具体原因，实际: %q", body["error"])
+	}
+	// 「仍在用上一份配置运行」这句话是操作者最需要的安抚
+	if !strings.Contains(body["error"], "仍在用上一份配置") {
+		t.Errorf("错误文案应说明机器人没有停，实际: %q", body["error"])
+	}
+}
+
+func TestReloadSucceeds(t *testing.T) {
+	srv, st, api := newTestServerWithAPI(t)
+	c := loginAs(t, srv, st, "张三", false)
+	bid := mustBindingFor(t, st, "张三", "小号", "123")
+	fake := &fakeRuntime{}
+	api.SetRuntime(map[int64]httpapi.BindingRuntime{bid: fake})
+
+	resp := jsonRequest(t, c, "POST", srv.URL+"/api/bindings/"+itoa(bid)+"/reload", "")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("状态码 = %d", resp.StatusCode)
+	}
+	if fake.reloadHits != 1 {
+		t.Errorf("Reload 被调用 %d 次, 期望 1", fake.reloadHits)
+	}
+}
+
+// 重载改的是规则，所以要 rule:write 而不是 rule:read
+func TestReloadRequiresRuleWrite(t *testing.T) {
+	srv, st, api := newTestServerWithAPI(t)
+	loginAs(t, srv, st, "张三", false)
+	bid := mustBindingFor(t, st, "张三", "小号", "123")
+	api.SetRuntime(map[int64]httpapi.BindingRuntime{bid: &fakeRuntime{}})
+
+	li := loginAs(t, srv, st, "李四", false)
+	// 给一个**无关**的权限点：零授权的话他对这个绑定完全不可见，
+	// 守卫会回 404 而不是 403
+	if err := st.Grant(context.Background(), "李四", "小号", "123",
+		[]perm.Permission{perm.RuleRead}); err != nil {
+		t.Fatalf("授权报错: %v", err)
+	}
+
+	resp := jsonRequest(t, li, "POST", srv.URL+"/api/bindings/"+itoa(bid)+"/reload", "")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("只有 rule:read 时状态码 = %d, 期望 403", resp.StatusCode)
 	}
 }

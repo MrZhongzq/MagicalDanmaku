@@ -51,6 +51,11 @@ const usage = `magicd —— 神奇弹幕服务端
   MAGICD_LOG_LEVEL           debug / info / warn / error，默认 info
   MAGICD_LOG_FILE            系统日志文件路径，留空则只写 stderr
   MAGICD_LOG_RETENTION_DAYS  业务日志保留天数，默认 30，0 表示不清理
+  MAGICD_HTTP_ADDR           Web 管理界面的监听地址，默认 127.0.0.1:8080
+                             （只监听本机；Docker 部署需设为 0.0.0.0:8080，
+                              设为空串或 off 则不启动 Web 服务）
+  MAGICD_HTTP_SECURE_COOKIE  设为 1 时会话 Cookie 带 Secure 标志，
+                             反向代理加了 TLS 时才打开
 `
 
 func main() {
