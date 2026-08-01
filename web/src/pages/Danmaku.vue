@@ -29,11 +29,15 @@
  *   `text/template`，天然支持条件分支，`rewriteFieldChains` 只改写字段
  *   访问不碰 `if`/`else`/`end` 关键字）。
  *
- * ## 保存不在本任务范围内
+ * ## 保存：GET → 合并 → PUT → POST reload（Task 13 接上，现已实接）
  *
- * 改动只进内存草稿，`dirty` 变真即可；右上角 `SaveBar` 的 `save` 事件先
- * 留空，注释说明「Task 13 接」——统一的保存（写库）与 reload（让规则引擎
- * 拿到新配置）交互是那个任务的事，这里自己先做一套，之后要拆着改。
+ * 改动先只进内存草稿，`dirty` 变真；右上角 `SaveBar` 的 `save` 事件接的
+ * 是 `onSave`（本文件下方 `<script setup>` 部分），走 `useDraft` 提供的
+ * 统一流程：GET 现有规则 → 与本页管的七条规则合并（不误删别的页面建的
+ * 自定义规则）→ PUT 写库 → POST reload 让规则引擎拿到新配置。第 2 步
+ * （reload）失败时 `dirty` 不会归假，界面会给一条持久的「已保存到数据库，
+ * 但重载失败」提示，具体行为见下方 `onSave` 与 `partialFailureMessage`
+ * 处的注释。
  *
  * ## 三处悬空（设计文档 §7.2 页面 4 / §13）
  *

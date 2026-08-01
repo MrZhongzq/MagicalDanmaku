@@ -349,7 +349,7 @@ describe('Danmaku 页面：认领已保存配置（核心场景）', () => {
   })
 })
 
-describe('Danmaku 页面：四处悬空控件全部渲染，且都不 disabled', () => {
+describe('Danmaku 页面：三处悬空控件全部渲染，且都不 disabled', () => {
   it('八处"待后端支持"标签都出现（Task9 五处 + Task10 新增：轮播轮询、PK匹配信息、PK串门欢迎）', async () => {
     vi.stubGlobal(
       'fetch',

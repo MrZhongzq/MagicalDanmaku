@@ -40,10 +40,14 @@
  * 的组装——写了也没有字段能装，装了引擎也不会读。界面上用"待后端支持"
  * 标签说明，已登记进悬空清单。
  *
- * ## 保存不在本任务范围内
+ * ## 保存：GET → 合并 → PUT → POST reload（Task 13 接上，现已实接）
  *
- * 与 Task 9/10 同一套约定：改动只进内存草稿，`SaveBar` 的 `save` 事件
- * 先留空，注释「Task 13 接」。
+ * 与 Danmaku.vue 同一套约定：改动先只进内存草稿；`SaveBar` 的 `save`
+ * 事件接的是 `onSave`（本文件下方 `<script setup>` 部分），走 `useDraft`
+ * 提供的统一流程：GET 现有规则 → 合并（保留内置七条，替换本页管的自定义
+ * 规则）→ PUT 写库 → POST reload。第 2 步失败时 `dirty` 不归假，界面会
+ * 给一条持久的「已保存到数据库，但重载失败」提示，具体行为见下方
+ * `onSave` 与 `partialFailureMessage` 处的注释。
  */
 import type { Action, Aggregate, Condition, Rule, RuleView } from '@/api/rule-types'
 import { defaultLeafCondition, pruneCondition } from '@/components/ConditionTree.vue'
