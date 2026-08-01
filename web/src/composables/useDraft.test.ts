@@ -199,6 +199,48 @@ describe('useDraft：save() 合并逻辑【关键：钉死"整组替换不误删
     expect(names).toContain('内置/进房欢迎')
     expect(putBody).toHaveLength(2)
   })
+
+  it('不归本页管的规则带 suppress 时，合并回填不能把 suppress 丢掉（toWritableRule 必须透传它）', async () => {
+    const otherPagesOwnRule: RuleView = {
+      name: '自定义/只欢迎舰长',
+      position: 0,
+      on: ['user_enter'],
+      do: [{ type: 'danmaku', template: ['舰长你好'] }],
+      suppress: ['内置/进房欢迎'],
+    }
+    let putBody: Rule[] | null = null
+    const f = vi.fn().mockImplementation((url: string, init?: RequestInit) => {
+      if (url === '/api/bindings/1/rules' && (!init || !init.method || init.method === 'GET')) {
+        return Promise.resolve(ok([otherPagesOwnRule]))
+      }
+      if (url === '/api/bindings/1/rules' && init?.method === 'PUT') {
+        putBody = JSON.parse(init.body as string) as Rule[]
+        return Promise.resolve(ok({ status: 'ok' }))
+      }
+      if (url === '/api/bindings/1/reload' && init?.method === 'POST') {
+        return Promise.resolve(ok({ status: 'ok' }))
+      }
+      throw new Error(`unexpected fetch: ${init?.method ?? 'GET'} ${url}`)
+    })
+    vi.stubGlobal('fetch', f)
+
+    const { draft } = mountDraftHost({
+      bindingId: () => 1,
+      snapshot: () => 'x',
+      // 本页（弹幕姬页）只管"内置/进房欢迎"，otherPagesOwnRule 归自定义弹幕姬页管
+      isOwned: (name) => name === '内置/进房欢迎',
+      buildRules: () => [{ name: '内置/进房欢迎', enabled: true, on: ['user_enter'], do: [] }],
+    })
+
+    await draft.save()
+
+    expect(putBody).not.toBeNull()
+    const kept = putBody!.find((r) => r.name === '自定义/只欢迎舰长')
+    expect(kept, '不归本页管的规则应该原样保留在 PUT 请求体里').toBeTruthy()
+    // 核心断言：suppress 不能在回填合并的过程中被静默丢弃，否则这条
+    // 规则的排除配置在下一次别的页面保存时就会消失，且界面不报任何错。
+    expect(kept!.suppress).toEqual(['内置/进房欢迎'])
+  })
 })
 
 describe('useDraft：save() 第 1 步（PUT 写库）失败——库和引擎都没被动过', () => {

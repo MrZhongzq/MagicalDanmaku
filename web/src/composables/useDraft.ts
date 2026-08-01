@@ -90,6 +90,13 @@ export interface UseDraftReturn {
  * rule_handler.go），带着 position 发过去会被后端当成「不认识的字段」
  * 直接 422 拒收。逐字段挑选而不是「解构剩余 + 丢一个」，是为了不管
  * RuleView 未来新增什么字段，这里都不会意外透传。
+ *
+ * **反过来的坑：这个名单本身也可能漏字段。** `spec.Rule` 新增字段时要
+ * 走过四层——`spec` → `convert` → `rules`（引擎侧）→ 这里的白名单——
+ * 前三层漏了字段编译期/校验期就会报错，唯独这里漏了不会有任何提示：
+ * 编译通过、校验通过，只是保存时悄悄把这个字段丢了（`suppress` 就是
+ * 这么漏掉的，见 useDraft.test.ts 里那条"合并回填不能把 suppress 丢掉"
+ * 的用例）。新增字段时记得回来加一行。
  */
 function toWritableRule(view: RuleView): Rule {
   const rule: Rule = { name: view.name, enabled: view.enabled }
@@ -100,6 +107,7 @@ function toWritableRule(view: RuleView): Rule {
   if (view.cooldown !== undefined) rule.cooldown = view.cooldown
   if (view.cooldownGroup !== undefined) rule.cooldownGroup = view.cooldownGroup
   if (view.do !== undefined) rule.do = view.do
+  if (view.suppress !== undefined) rule.suppress = view.suppress
   return rule
 }
 
