@@ -35,7 +35,11 @@
  * 留空，注释说明「Task 13 接」——统一的保存（写库）与 reload（让规则引擎
  * 拿到新配置）交互是那个任务的事，这里自己先做一套，之后要拆着改。
  *
- * ## 四处悬空（设计文档 §7.2 页面 4 / §13）
+ * ## 三处悬空（设计文档 §7.2 页面 4 / §13）
+ *
+ * （原来数的是"四处"，其中一条是"进房欢迎只欢迎佩戴粉丝牌的用户"——后来去读
+ * 后端代码发现那条其实**已经打通**，不算悬空，挪到下面单独一节说明，
+ * 这里改成三处，不再重新编号旧的四条。）
  *
  * 1. **模板轮询模式**（§13.3）：规则引擎的 `Renderer.Render` 目前只会
  *    从多条模板里 `rand.Intn` 随机挑一条，没有「轮询」需要的游标状态
@@ -899,7 +903,9 @@ function dismissPartialFailure() {
               </template>
               规则引擎目前只实现了随机抽取（server/internal/rules/template.go 的 Renderer.Render 用
               rand.Intn），轮询需要引擎侧记住这条规则
-              上次用到第几条模板的游标状态，选中「轮询」暂不生效。
+              上次用到第几条模板的游标状态，选中「轮询」暂不生效。这个选择也不会被保存—— spec.Action
+              没有 pick 字段，点了保存也不会写进后端，刷新页面或切换直播间后
+              会复位成「随机抽取」，不是「存了但引擎不认」，是压根没地方存。
             </NTooltip>
           </div>
 
@@ -916,6 +922,8 @@ function dismissPartialFailure() {
               spec.Action 目前只有一个 Template 字段，一条规则装不下两套模板。
               这一栏会正常渲染、可以编辑，但保存时只有上面「单人欢迎语」进入
               规则体，这一栏暂不生效——需要引擎侧支持按合并条数（count==1 vs count>1）选模板集。
+              这里填的内容也不会被保存：点了保存也不会写进后端，刷新页面或切换直播间后
+              这一栏会清空复位。
             </NTooltip>
             <TemplateList v-model="enterDraft.multiTemplates" placeholder="多人合并欢迎语模板" />
           </div>
@@ -982,7 +990,8 @@ function dismissPartialFailure() {
               <template #trigger>
                 <NTag type="warning" size="small">待后端支持</NTag>
               </template>
-              同进房欢迎：规则引擎目前只有随机抽取，轮询需要引擎侧记游标状态。
+              同进房欢迎：规则引擎目前只有随机抽取，轮询需要引擎侧记游标状态。同样不会
+              被保存——点了保存也不会写进后端，刷新页面或切换直播间后会复位成「随机抽取」。
             </NTooltip>
           </div>
           <TemplateList v-model="giftDraft.templates" placeholder="答谢语模板" />
@@ -1010,6 +1019,7 @@ function dismissPartialFailure() {
               event.Gift（server/internal/event/payload.go）完全没有盲盒字段， B 站 SEND_GIFT
               报文里的 blind_gift 对象还没解析。
               需要用户真刷一次盲盒抓样本才能确定报文形状，这一步不是 纯写代码能解决的。
+              这个勾选也不会被保存——点了保存也不会写进后端，刷新页面或切换直播间后 会复位成未勾选。
             </NTooltip>
           </div>
           <div class="row">
@@ -1019,7 +1029,8 @@ function dismissPartialFailure() {
                 <NTag type="warning" size="small">待后端支持</NTag>
               </template>
               依赖上一项的协议层补丁，同样需要真实样本；且盈亏必须按电池
-              数量统计而非礼物名，滚动合并时盈亏要跟着重算。
+              数量统计而非礼物名，滚动合并时盈亏要跟着重算。这个勾选同样不会被保存，
+              刷新页面或切换直播间后会复位成未勾选。
             </NTooltip>
           </div>
 
@@ -1090,7 +1101,8 @@ function dismissPartialFailure() {
               <template #trigger>
                 <NTag type="warning" size="small">待后端支持</NTag>
               </template>
-              同进房欢迎/礼物答谢：规则引擎目前只有随机抽取，选「轮询」暂不生效。
+              同进房欢迎/礼物答谢：规则引擎目前只有随机抽取，选「轮询」暂不生效，也不会
+              被保存——点了保存也不会写进后端，刷新页面或切换直播间后会复位成「随机抽取」。
             </NTooltip>
           </div>
           <p class="hint">

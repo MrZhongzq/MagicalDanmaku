@@ -341,3 +341,35 @@ describe('Moderation 自动禁言规则占位：跳转到还没注册的路由�
     expect(messageMock.info).toHaveBeenCalled()
   })
 })
+
+describe('Moderation 自动禁言规则：路由存在时点「去配置」带上预填 query', () => {
+  beforeEach(() => {
+    vi.unstubAllGlobals()
+    messageMock.success.mockClear()
+    messageMock.error.mockClear()
+    messageMock.warning.mockClear()
+    messageMock.info.mockClear()
+  })
+
+  // Task 14 收尾：custom 路由已经注册了，「去配置」真能跳过去，但只跳过去
+  // 不够——不带 query 的话 Custom.vue 无从得知要预填。这条测试钉住跳转
+  // 一定带着 preset=automute，防止将来重构时把这个 query 弄丢。
+  it('跳转带 query preset=automute，不再只提示', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(() => Promise.resolve(ok([]))),
+    )
+    const { router } = setupStores(['user:block'])
+    router.addRoute({ name: 'custom', path: '/custom', component: { template: '<div/>' } })
+    const wrapper = await mountModeration(router)
+
+    const goBtn = wrapper.findAll('button').find((b) => b.text() === '去配置')
+    await goBtn!.trigger('click')
+    await flushPromises()
+
+    expect(router.currentRoute.value.name).toBe('custom')
+    expect(router.currentRoute.value.query.preset).toBe('automute')
+    // 路由已注册，不该再走「还没做」的提示分支
+    expect(messageMock.info).not.toHaveBeenCalled()
+  })
+})

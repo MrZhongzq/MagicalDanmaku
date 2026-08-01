@@ -151,11 +151,14 @@ const builtRule = computed(() => buildPkRule(props.modelValue))
     </template>
 
     <NAlert type="warning" :bordered="false" class="pk-alert">
-      这一整块目前<strong>只画界面，不生效</strong>：后端 <code>event.Battle</code> 只有一个
-      <code>SubCommand</code> 字段，PK
-      接通瞬间的对面数据（主播昵称、人数、大航海）协议层完全没解析，
-      串门欢迎也没有"来源房间"这个字段。下面出现的 <code>battle.opponentXxx</code> 都是占位示例，
-      真实字段名待真实 PK 场景抓包确认后可能完全不同（设计文档 §13.5）。
+      核心数据后端完全没解析：<code>event.Battle</code> 只有一个 <code>SubCommand</code> 字段， PK
+      接通瞬间的对面数据（主播昵称、人数、大航海）协议层拿不到，串门欢迎也没有
+      "来源房间"这个字段。<strong>但这不等于整块都不生效</strong>：右上角的总开关与下面的
+      播报模板会被正常保存，直播间真的发生 PK 时这条规则确实会触发并发出弹幕， 只是弹幕里
+      <code>battle.opponentXxx</code> 这类变量会渲染成空字符串（占位示例， 真实字段名待真实 PK
+      场景抓包确认后可能完全不同，设计文档 §13.5）。「PK 匹配信息」 四个勾选与「PK
+      串门欢迎」整块则是另一种更彻底的悬空——不会被保存，刷新页面或
+      切换直播间都会复位，具体见下面各自的提示。
     </NAlert>
 
     <h4>
@@ -165,7 +168,14 @@ const builtRule = computed(() => buildPkRule(props.modelValue))
           <NTag type="warning" size="small">待后端支持</NTag>
         </template>
         需要真实样本：是。控制器无法凭现有信息确定 PK 报文里这些字段叫什么、在第几层，
-        必须先在真实直播间触发一次 PK 并抓包。
+        必须先在真实直播间触发一次 PK 并抓包。上面四个勾选不会被保存——点了保存也不会写进
+        后端，刷新页面或切换直播间后会复位成默认勾选状态。<strong>这四个勾选还有第二层 悬空</strong
+        >：即便以后补齐了对面数据字段，"选择性播报其中几项"这个机制本身也还 没设计（后端目前
+        没有任何字段能承载"只播报被勾中的那几项"这种选择），抓包定下字段形状之后还要再设计
+        一版才能接上这四个勾选。下面的播报模板不同：模板文本本身会被保存（认领进
+        「内置/PK播报」这条规则，随整页保存写进数据库），但模板里
+        <code>battle.opponentXxx</code>
+        这类变量在后端不存在，真实触发时会渲染成空字符串——不是不发，是照常发一条内容 残缺的弹幕。
       </NTooltip>
     </h4>
     <p class="hint">只截取 PK 接通的那一瞬间，之后对面数据的变化不再播报。</p>
@@ -209,7 +219,9 @@ const builtRule = computed(() => buildPkRule(props.modelValue))
           <NTag type="warning" size="small">待后端支持</NTag>
         </template>
         需要真实样本：是。且比上面那块缺得更彻底——连"这个进场事件来自对面直播间"
-        这件事本身该怎么判断都还没确认，可能需要新的事件类型，不只是补字段。
+        这件事本身该怎么判断都还没确认，可能需要新的事件类型，不只是补字段。这个开关与
+        模板同样完全不会被保存：点了保存也不会写进后端，刷新页面或切换直播间后开关会
+        复位成关闭、模板会复位成默认文案。
       </NTooltip>
     </h4>
     <div class="row">

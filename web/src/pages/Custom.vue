@@ -444,12 +444,56 @@ async function loadRules() {
   }
 }
 
+// ---- 自动禁言预填：从「房管页 -> 去配置」跳转过来时预填一条草稿 ----
+//
+// Moderation.vue 的「自动禁言规则」卡片跳过来时带 query preset=automute。
+// 不用 useRoute()——本页很多测试直接 mount(Custom.vue) 不挂 vue-router，
+// useRoute() 在没有 router 插件时拿到 undefined，访问 .query 会直接抛错。
+// 改用 URLSearchParams 读 window.location.search：vue-router 的 history
+// 模式本来就会把当前路由同步进浏览器地址栏，两者读到的是同一份 query，
+// 不依赖是否挂了 router 插件。
+const presetParam = new URLSearchParams(window.location.search).get('preset')
+let presetApplied = false
+
+/**
+ * maybeApplyPreset 在每次 loadRules() 完成后调用。只应用一次——即使切换
+ * 直播间导致 loadRules 重新触发，也不会重复插入第二条预填草稿；也不会在
+ * 没有 preset 参数的正常访问路径上做任何事。
+ */
+function maybeApplyPreset() {
+  if (presetApplied || presetParam !== 'automute') return
+  presetApplied = true
+  customRules.push(buildAutoMutePresetDraft())
+  message.info('已为你预填一条「关键词禁言」草稿，填好关键词后记得点右上角保存')
+}
+
+/**
+ * buildAutoMutePresetDraft 是「去配置」按钮承诺的那一半：给出一条已经能跑
+ * 的骨架（弹幕命中关键词 -> 禁言 1 小时），而不是让用户从空白页开始搭。
+ * 关键词留空由用户自己填——禁言关键词因人而异，编不出默认值；硬塞一个
+ * 示例词还可能被当成"已经配置好"直接点了保存。
+ */
+function buildAutoMutePresetDraft(): CustomRuleDraft {
+  const draft = defaultCustomRuleDraft()
+  draft.name = '自动禁言（关键词，待填写）'
+  draft.on = ['danmaku']
+  draft.whenEnabled = true
+  draft.when = { field: 'text', op: 'contains', value: '' }
+  draft.actions = [defaultActionDraft('block')]
+  return draft
+}
+
+async function loadRulesThenMaybeApplyPreset() {
+  await loadRules()
+  maybeApplyPreset()
+}
+
 onMounted(() => void loadMeta())
 
 // 切换直播间要重新加载——上一个直播间的自定义规则不该带到下一个直播间去。
 watch(
   () => bindings.currentId,
-  () => void loadRules(),
+  () => void loadRulesThenMaybeApplyPreset(),
   { immediate: true },
 )
 
@@ -714,7 +758,9 @@ function dismissPartialFailure() {
               </template>
               规则引擎目前没有"一条规则命中后跳过指定规则"这种互斥/优先级机制（设计文档
               §13.6），spec.Rule 也没有字段能装这份声明。下面的多选框能选、能预览，
-              但不会写进保存的规则里——需要引擎侧新增"命中后跳过指定规则"的能力。
+              但连状态都不会被保存——点了保存也不会写进后端的规则里，刷新页面、切换
+              直播间、或者离开这页再回来，这里的选择都会复位成空。不是"存了但引擎不认"，
+              是压根没地方存，需要引擎侧新增"命中后跳过指定规则"的能力。
             </NTooltip>
           </h4>
           <p class="hint">

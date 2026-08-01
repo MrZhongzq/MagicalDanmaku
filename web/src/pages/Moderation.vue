@@ -226,17 +226,25 @@ function ownerActionNotSupported() {
   message.warning('拉黑功能的后端接口尚未实现')
 }
 
-// ---- 自动禁言规则占位：依赖规则引擎，本任务不做 ----
-
+// ---- 自动禁言规则：跳转到「自定义弹幕姬」页并预填一条草稿 ----
+//
+// Task 6 留下的松脱：当时 custom 路由还不存在，按钮跳不过去也看不出问题。
+// custom 路由做出来之后（Task 11），按钮真能跳了，但「预填自动禁言模板」
+// 那一半从未接过——按钮到得了地方，做不了它标签承诺的事。Task 14 把这半接上：
+// 跳转时带 query（preset=automute），Custom.vue 读到后往草稿列表里插一条
+// 「弹幕匹配关键词 → 禁言」的规则骨架（事件类型 danmaku、条件 text contains
+// 关键词、动作 block），关键词留空由用户自己填——禁言关键词因人而异，
+// 编不出默认值，硬编一个反而可能被误当成"已经配置好"直接保存。
 function goToCustomDanmaku() {
-  // 「自定义弹幕姬」是 Task 11，现在还没注册路由。router.push({name})
-  // 找不到 name 时 vue-router 会同步抛 MATCHER_NOT_FOUND，所以跳转前
-  // 先用 hasRoute 探一下，与 Shell.vue 里 go() 的处理一致。
+  // 「自定义弹幕姬」现在已经注册路由，这个判断理论上总是为真；保留它是因为
+  // router.push({name}) 找不到 name 时 vue-router 会同步抛
+  // MATCHER_NOT_FOUND——万一将来路由表被改动导致 custom 临时缺席，这里
+  // 也不会把同步异常炸到调用方（与 Shell.vue 里 go() 的处理一致）。
   if (!router.hasRoute('custom')) {
     message.info('『自定义弹幕姬』页还没做，做好之后这里会跳过去配置自动禁言规则')
     return
   }
-  void router.push({ name: 'custom' })
+  void router.push({ name: 'custom', query: { preset: 'automute' } })
 }
 </script>
 
@@ -314,7 +322,8 @@ function goToCustomDanmaku() {
         </template>
         <p class="hint">
           自动禁言关键词、指定昵称自动禁言（支持通配符与正则）依赖规则引擎，在
-          「自定义弹幕姬」页配置，不在这里。
+          「自定义弹幕姬」页配置，不在这里。点「去配置」会跳过去并预填一条 「弹幕匹配关键词 →
+          禁言」的规则草稿，关键词需要自己填，草稿仍要在那边 点「保存并生效」才会真正生效。
         </p>
         <NButton size="small" @click="goToCustomDanmaku">去配置</NButton>
       </NCard>

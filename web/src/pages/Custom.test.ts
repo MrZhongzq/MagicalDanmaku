@@ -129,6 +129,9 @@ beforeEach(() => {
   messageMock.warning.mockClear()
   messageMock.info.mockClear()
   warningMock.mockClear()
+  // 预填草稿（自动禁言 preset）读的是 window.location.search，不重置的话
+  // 上一个测试 pushState 过的 ?preset=automute 会漏进下一个测试。
+  window.history.pushState({}, '', '/custom')
 })
 
 async function mountCustom() {
@@ -687,4 +690,105 @@ describe('Custom 页：保存（Task 13 接上 useDraft）', () => {
       expect(wrapper.text()).not.toContain('已保存到数据库，但重载失败')
     },
   )
+})
+
+// ============================================================
+// Task 14：房管页「去配置」跳过来的自动禁言预填
+// ============================================================
+//
+// Moderation.vue 点「去配置」时会带 query ?preset=automute 跳过来。这组
+// 测试要证明：预填草稿真的出现、字段形状正确（弹幕命中关键词 -> 禁言），
+// 且只应用一次（防止切换直播间导致 loadRules 重跑时重复插入）。
+describe('Custom 页：从房管页「去配置」跳转过来的自动禁言预填', () => {
+  it('URL 带 preset=automute 时自动插入一条「弹幕->禁言」草稿，并提示用户', async () => {
+    setupStores()
+    window.history.pushState({}, '', '/custom?preset=automute')
+    stubFetch({ rules: [] })
+
+    const wrapper = await mountCustom()
+
+    // 规则名是 NInput 的 value，不是文本节点，wrapper.text() 读不到，
+    // 要从渲染出的 <input> 元素上取值。
+    const nameInputs = wrapper.findAll('input[placeholder="规则名（如：舰长专属欢迎）"]')
+    expect(
+      nameInputs.some(
+        (i) => (i.element as HTMLInputElement).value === '自动禁言（关键词，待填写）',
+      ),
+    ).toBe(true)
+    expect(messageMock.info).toHaveBeenCalledWith(
+      expect.stringContaining('已为你预填一条「关键词禁言」草稿'),
+    )
+
+    // 展开 JSON 预览，确认组装出的规则形状确实是「弹幕命中关键词 -> 禁言」
+    const collapseHeaders = wrapper.findAll('.n-collapse-item__header-main')
+    await collapseHeaders[collapseHeaders.length - 1].trigger('click')
+    await flushPromises()
+    const preview = JSON.parse(wrapper.findAll('.json-preview').at(-1)!.text()) as {
+      on?: string[]
+      when?: { field?: string; op?: string }
+      do?: { type: string; hours?: number }[]
+    }
+    expect(preview.on).toEqual(['danmaku'])
+    expect(preview.when).toMatchObject({ field: 'text', op: 'contains' })
+    expect(preview.do).toEqual([{ type: 'block', hours: 1 }])
+  })
+
+  it('没有 preset 参数时不插入任何预填草稿', async () => {
+    setupStores()
+    stubFetch({ rules: [] })
+
+    const wrapper = await mountCustom()
+
+    const nameInputs = wrapper.findAll('input[placeholder="规则名（如：舰长专属欢迎）"]')
+    expect(
+      nameInputs.some(
+        (i) => (i.element as HTMLInputElement).value === '自动禁言（关键词，待填写）',
+      ),
+    ).toBe(false)
+    expect(messageMock.info).not.toHaveBeenCalled()
+  })
+
+  function countPresetCards(wrapper: Awaited<ReturnType<typeof mountCustom>>): number {
+    return wrapper
+      .findAll('input[placeholder="规则名（如：舰长专属欢迎）"]')
+      .filter((i) => (i.element as HTMLInputElement).value === '自动禁言（关键词，待填写）').length
+  }
+
+  it('切换直播间重新触发 loadRules 后不会插入第二条——presetApplied 只用一次', async () => {
+    const { bindings } = setupStores()
+    bindings.list = [
+      { ...绑定, id: 1, roomId: '9000', permissions: [...绑定.permissions] },
+      { ...绑定, id: 2, roomId: '9001', permissions: [...绑定.permissions] },
+    ]
+    bindings.select(1)
+    window.history.pushState({}, '', '/custom?preset=automute')
+
+    const f = vi.fn().mockImplementation((url: string, init?: RequestInit) => {
+      const method = init?.method ?? 'GET'
+      if (url === '/api/meta/event-types') return Promise.resolve(ok(FULL_EVENT_TYPES))
+      if (url === '/api/meta/action-types') return Promise.resolve(ok(FULL_ACTION_TYPES))
+      if (url === '/api/meta/operators') return Promise.resolve(ok(FULL_OPERATORS))
+      if (url === '/api/meta/aggregate-by') return Promise.resolve(ok(FULL_AGGREGATE_BY))
+      if (url === '/api/bindings/1/rules' && method === 'GET') return Promise.resolve(ok([]))
+      if (url === '/api/bindings/2/rules' && method === 'GET') return Promise.resolve(ok([]))
+      throw new Error(`unexpected fetch: ${method} ${url}`)
+    })
+    vi.stubGlobal('fetch', f)
+
+    const wrapper = await mountCustom()
+    expect(countPresetCards(wrapper)).toBe(1)
+
+    // 切到另一个直播间：loadRules() 会用绑定 2 的（空）规则整批替换
+    // customRules——这跟"手动新建一条规则后切直播间会丢草稿"是同一个
+    // 既有行为，预填草稿不例外，这里不是要钉住"不会丢"。真正要钉住的是
+    // presetApplied 已经用过一次之后，绝不会在任何后续 loadRules 里
+    // 再插入第二条——即便切回最初那个直播间也一样。
+    bindings.select(2)
+    await flushPromises()
+    expect(countPresetCards(wrapper)).toBe(0)
+
+    bindings.select(1)
+    await flushPromises()
+    expect(countPresetCards(wrapper)).toBe(0)
+  })
 })
