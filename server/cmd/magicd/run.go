@@ -262,6 +262,170 @@ func (rt *roomRuntime) Reload(ctx context.Context) error {
 	return nil
 }
 
+// buildRoomRuntime 组装单个绑定的运行时资源：actions/bot/sink/storage/
+// engine/client/roomRuntime，直到规则引擎那一步为止（不含定时规则注册，
+// 见下方说明）。
+//
+// **不做任何网络请求**：直播间信息（info）由调用方提前用
+// acctRT.api.RoomInfo 拿到再传进来，这样"规则非法"这条失败路径可以
+// 脱离网络单独做单元测试（TestBuildRoomRuntimeSkipsBindingWithInvalidRules）。
+//
+// 失败只可能来自 rules.NewEngine（规则本身不合法，比如 Suppress 指向
+// 不存在的规则名）。调用方（runRun）拿到这个 error 后应该**跳过这一个
+// 绑定，而不是让整个进程起不来**——理由见 runRun 里对应位置的注释。
+//
+// 定时规则注册（sched.Add）特意留在这个函数之外，由 runRun 的装配循环
+// 自己做：那一步失败是性质不同的问题（规则校验已经通过，是调度器出了
+// 别的问题），仍然保留原来的"致命错误"处理方式，不跟着这里一起降级。
+func buildRoomRuntime(
+	ctx context.Context,
+	c store.RunConfig,
+	acctRT *accountRuntime,
+	info *api.RoomInfo,
+	activity *logging.ActivityWriter,
+	st *store.Store,
+	sched *scheduler.Scheduler,
+	log *slog.Logger,
+) (room *roomRuntime, bot *roomBot, engine *rules.Engine, client *bilibili.Client, err error) {
+	// 限流统一由 account.Binding 负责，这里传空限流器，
+	// 否则与 Binding 的等待叠加会让实际间隔翻倍。
+	actions := bilibili.NewActions(acctRT.api, ratelimit.NewInterval(0))
+	if c.MaxLength > 0 {
+		actions.SetMaxLength(c.MaxLength)
+	}
+	binding := &account.Binding{
+		Account: acctRT.acc,
+		RoomID:  info.RoomID,
+		Actions: actions,
+	}
+
+	bot = newRoomBot(binding, ctx)
+	sink := activity.Sink(c.AccountID, c.BindingID, info.RoomID)
+	storage := st.BindingStorage(c.BindingID)
+	engine, err = rules.NewEngine(rules.EngineOptions{
+		Label:          binding.Label(),
+		RoomID:         info.RoomID,
+		Rules:          c.Rules,
+		Bot:            bot,
+		Storage:        storage,
+		Activity:       sink,
+		CooldownGroups: c.CooldownGroups,
+		Logger:         log,
+	})
+	if err != nil {
+		return nil, nil, nil, nil, fmt.Errorf("%s 的规则非法: %w", binding.Label(), err)
+	}
+
+	client = bilibili.NewClient(info.RoomID, acctRT.api, bilibili.WithLogger(log))
+
+	room = &roomRuntime{
+		binding:   binding,
+		client:    client,
+		bot:       bot,
+		sink:      sink,
+		storage:   storage,
+		label:     binding.Label(),
+		roomID:    info.RoomID,
+		bindingID: c.BindingID,
+		st:        st,
+		sched:     sched,
+		log:       log,
+	}
+	room.engine.Store(engine)
+	return room, bot, engine, client, nil
+}
+
+// roomAssembly 是一个绑定装配成功后的运行时组件，供 runRun 用来起
+// 事件扇出/连接 goroutine 与登记进 apiRuntimes。
+type roomAssembly struct {
+	room   *roomRuntime
+	bot    *roomBot
+	engine *rules.Engine
+	client *bilibili.Client
+	cfg    store.RunConfig
+}
+
+// assembleRuntimes 依次为 cfgs 里的每个绑定组装运行时资源。
+//
+// **不启动任何 goroutine**：事件扇出与连接 goroutine 涉及真实网络连接，
+// 生命周期归 runRun 自己管，不适合放进这个函数——这也是为什么这个函数
+// 能在不发起真实 B 站连接的前提下用 httptest 单独测试
+// （TestAssembleRuntimesSkipsInvalidBindingButKeepsOthers）。
+//
+// **单个绑定规则非法不会让整体失败**：buildRoomRuntime 返回 err 时只是
+// 跳过这一个绑定、记一条 log.Error，继续装配其余的。这是 P4-3 全批次
+// 终审项【2】的修复——一个绑定的配置坏了不该让整个守护进程（包括用户
+// 唯一的自救入口 WebUI）都起不来。
+//
+// RoomInfo 失败与定时规则注册失败仍然是致命的，原样冒泡给调用方：前者
+// 是网络/账号问题，后者说明规则本身已经校验通过、是调度器出了别的
+// 问题，两者都不是「规则本身不合法」，不在这次降级范围内。
+func assembleRuntimes(
+	ctx context.Context,
+	cfgs []store.RunConfig,
+	accounts map[string]*accountRuntime,
+	activity *logging.ActivityWriter,
+	st *store.Store,
+	sched *scheduler.Scheduler,
+	log *slog.Logger,
+) ([]roomAssembly, error) {
+	out := make([]roomAssembly, 0, len(cfgs))
+	for _, c := range cfgs {
+		acctRT := accounts[c.AccountName]
+
+		// 解析真实房间号：配置里可能填的是短号
+		info, err := acctRT.api.RoomInfo(ctx, c.RoomID)
+		if err != nil {
+			return nil, fmt.Errorf("账号 %q 获取直播间 %s 信息失败: %w", c.AccountName, c.RoomID, err)
+		}
+
+		room, bot, engine, client, err := buildRoomRuntime(ctx, c, acctRT, info, activity, st, sched, log)
+		if err != nil {
+			// 一个绑定的规则非法不该让整个守护进程起不来——尤其是当
+			// 修复入口正是这个进程本身提供的 WebUI。跳过这一个绑定，
+			// 其余绑定与 HTTP 服务照常装配、照常起来；用户能从这条
+			// 日志、以及仍然能打开的 WebUI 里看到问题并把规则改对。
+			// 这与「热重载失败时旧引擎照跑」是同一个原则：局部失败
+			// 不该升级成全局失败。
+			log.Error("绑定装配失败，已跳过该绑定，请修复规则后重启或通过 WebUI 重新保存",
+				"binding", c.Label(), "err", err)
+			continue
+		}
+
+		// 注册该绑定的定时规则。这一步失败与「规则非法」是不同性质的
+		// 问题——规则本身校验通过了，是调度器出了别的问题——所以仍然
+		// 保留原来的处理方式：让整个装配失败，不跟着降级。
+		for _, r := range engine.ScheduledRules() {
+			name, eng := r.Name, engine
+			if err := sched.Add(r.Schedule, room.label+"/"+name, func() {
+				eng.FireScheduled(name)
+			}); err != nil {
+				return nil, err
+			}
+		}
+
+		status := "未开播"
+		if info.IsLiving() {
+			status = "直播中"
+		}
+		enabled := 0
+		for _, r := range c.Rules {
+			if r.Enabled {
+				enabled++
+			}
+		}
+		log.Info("已配置绑定",
+			"binding", room.label,
+			"title", info.Title,
+			"status", status,
+			"rules", len(c.Rules),
+			"enabled", enabled)
+
+		out = append(out, roomAssembly{room: room, bot: bot, engine: engine, client: client, cfg: c})
+	}
+	return out, nil
+}
+
 // defaultRetentionDays 是业务日志的默认保留天数。
 const defaultRetentionDays = 30
 
@@ -358,92 +522,20 @@ func runRun(args []string) error {
 		closeAll(engines, bots, shutdownCtx, activity)
 	}()
 
-	for _, c := range cfgs {
-		acctRT := accounts[c.AccountName]
+	// 装配：规则非法的绑定在这一步被跳过（记日志，不致命），其余的与
+	// RoomInfo/定时规则注册失败一样仍是致命的——assembleRuntimes 的注释
+	// 里写了各自的理由。
+	assemblies, err := assembleRuntimes(ctx, cfgs, accounts, activity, st, sched, log)
+	if err != nil {
+		return err
+	}
 
-		// 解析真实房间号：配置里可能填的是短号
-		info, err := acctRT.api.RoomInfo(ctx, c.RoomID)
-		if err != nil {
-			return fmt.Errorf("账号 %q 获取直播间 %s 信息失败: %w", c.AccountName, c.RoomID, err)
-		}
-
-		// 限流统一由 account.Binding 负责，这里传空限流器，
-		// 否则与 Binding 的等待叠加会让实际间隔翻倍。
-		actions := bilibili.NewActions(acctRT.api, ratelimit.NewInterval(0))
-		if c.MaxLength > 0 {
-			actions.SetMaxLength(c.MaxLength)
-		}
-		binding := &account.Binding{
-			Account: acctRT.acc,
-			RoomID:  info.RoomID,
-			Actions: actions,
-		}
-
-		bot := newRoomBot(binding, ctx)
-		sink := activity.Sink(c.AccountID, c.BindingID, info.RoomID)
-		storage := st.BindingStorage(c.BindingID)
-		engine, err := rules.NewEngine(rules.EngineOptions{
-			Label:          binding.Label(),
-			RoomID:         info.RoomID,
-			Rules:          c.Rules,
-			Bot:            bot,
-			Storage:        storage,
-			Activity:       sink,
-			CooldownGroups: c.CooldownGroups,
-			Logger:         log,
-		})
-		if err != nil {
-			return fmt.Errorf("%s 的规则非法: %w", binding.Label(), err)
-		}
-		bots = append(bots, bot)
-
-		client := bilibili.NewClient(info.RoomID, acctRT.api, bilibili.WithLogger(log))
-
-		room := &roomRuntime{
-			binding:   binding,
-			client:    client,
-			bot:       bot,
-			sink:      sink,
-			storage:   storage,
-			label:     binding.Label(),
-			roomID:    info.RoomID,
-			bindingID: c.BindingID,
-			st:        st,
-			sched:     sched,
-			log:       log,
-		}
-		room.engine.Store(engine)
-		roomRTs = append(roomRTs, room)
+	for _, a := range assemblies {
+		bots = append(bots, a.bot)
+		roomRTs = append(roomRTs, a.room)
 		if api != nil {
-			apiRuntimes[c.BindingID] = room
+			apiRuntimes[a.cfg.BindingID] = a.room
 		}
-
-		// 注册该绑定的定时规则
-		for _, r := range engine.ScheduledRules() {
-			name, eng := r.Name, engine
-			if err := sched.Add(r.Schedule, binding.Label()+"/"+name, func() {
-				eng.FireScheduled(name)
-			}); err != nil {
-				return err
-			}
-		}
-
-		status := "未开播"
-		if info.IsLiving() {
-			status = "直播中"
-		}
-		enabled := 0
-		for _, r := range c.Rules {
-			if r.Enabled {
-				enabled++
-			}
-		}
-		log.Info("已配置绑定",
-			"binding", binding.Label(),
-			"title", info.Title,
-			"status", status,
-			"rules", len(c.Rules),
-			"enabled", enabled)
 
 		wg.Add(2)
 		go func(rt *roomRuntime, c *bilibili.Client, bindingID int64) {
@@ -459,7 +551,7 @@ func runRun(args []string) error {
 					api.Hub().Publish(bindingID, ev)
 				}
 			}
-		}(room, client, c.BindingID)
+		}(a.room, a.client, a.cfg.BindingID)
 
 		go func(label string, c *bilibili.Client) {
 			defer wg.Done()
@@ -467,7 +559,7 @@ func runRun(args []string) error {
 			if err := c.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 				log.Error("绑定连接退出", "binding", label, "err", err)
 			}
-		}(binding.Label(), client)
+		}(a.room.label, a.client)
 	}
 
 	// 业务日志的定期清理

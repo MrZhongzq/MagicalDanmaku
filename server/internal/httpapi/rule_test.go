@@ -204,6 +204,119 @@ func TestReplaceRulesReportsDuplicateName(t *testing.T) {
 	}
 }
 
+// 全批次终审项【2a】：PUT 整组规则时，Suppress 指向的名字必须在这一批
+// 里存在。
+//
+// 修复前只有 rules.NewEngine 做这项检查，而那要等到 POST /reload 才会
+// 触发——PUT 本身会成功返回 200，库里就此存了一份非法配置。这是
+// review 描述的两条现实可达路径之一：全新安装时，内置的七条规则只有
+// 弹幕姬页保存过一次之后才真实存在，自定义弹幕姬页却可以更早地引用
+// 一个还不存在的内置规则名。
+func TestReplaceRulesRejectsInvalidSuppressReference(t *testing.T) {
+	srv, st := newTestServer(t)
+	c := loginAs(t, srv, st, "张三", false)
+	bid := mustBindingFor(t, st, "张三", "小号", "123")
+	grantWrite(t, st, "张三", "小号", "123")
+
+	resp := jsonRequest(t, c, "PUT", srv.URL+"/api/bindings/"+itoa(bid)+"/rules",
+		`[{"name":"只欢迎舰长","on":["user_enter"],"do":[{"type":"log"}],"suppress":["不存在的规则"]}]`)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnprocessableEntity {
+		t.Fatalf("状态码 = %d, 期望 422", resp.StatusCode)
+	}
+
+	rs, err := st.ListRules(context.Background(), bid)
+	if err != nil {
+		t.Fatalf("列规则报错: %v", err)
+	}
+	if len(rs) != 0 {
+		t.Errorf("非法的整组替换不该落库，实际 %d 条", len(rs))
+	}
+}
+
+// suppress 引用同一批里确实存在的名字应当放行——不能矫枉过正。
+func TestReplaceRulesAcceptsValidSuppressReference(t *testing.T) {
+	srv, st := newTestServer(t)
+	c := loginAs(t, srv, st, "张三", false)
+	bid := mustBindingFor(t, st, "张三", "小号", "123")
+	grantWrite(t, st, "张三", "小号", "123")
+
+	resp := jsonRequest(t, c, "PUT", srv.URL+"/api/bindings/"+itoa(bid)+"/rules",
+		`[{"name":"内置/进房欢迎","on":["user_enter"],"do":[{"type":"log"}]},
+		  {"name":"只欢迎舰长","on":["user_enter"],"do":[{"type":"log"}],"suppress":["内置/进房欢迎"]}]`)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("状态码 = %d, 期望 200", resp.StatusCode)
+	}
+
+	rs, err := st.ListRules(context.Background(), bid)
+	if err != nil {
+		t.Fatalf("列规则报错: %v", err)
+	}
+	if len(rs) != 2 {
+		t.Errorf("合法的整组替换应该落库，实际 %d 条", len(rs))
+	}
+}
+
+// 全批次终审项【2b】：DELETE 一条被别的规则 Suppress 引用的规则应当被拒。
+//
+// 修复前没有任何检查会拦住这个操作——删掉之后，引用它的那条规则的
+// suppress 就指向一个不存在的名字，库被写脏，要等到下次启动
+// NewEngine 才会报错。
+func TestDeleteRuleRejectsWhenSuppressedByAnotherRule(t *testing.T) {
+	srv, st := newTestServer(t)
+	c := loginAs(t, srv, st, "张三", false)
+	bid := mustBindingFor(t, st, "张三", "小号", "123")
+	grantWrite(t, st, "张三", "小号", "123")
+
+	rules := srv.URL + "/api/bindings/" + itoa(bid) + "/rules"
+	base := jsonRequest(t, c, "POST", rules,
+		`{"name":"进房欢迎","on":["user_enter"],"do":[{"type":"log"}]}`)
+	base.Body.Close()
+	dependent := jsonRequest(t, c, "POST", rules,
+		`{"name":"只欢迎舰长","on":["user_enter"],"do":[{"type":"log"}],"suppress":["进房欢迎"]}`)
+	dependent.Body.Close()
+
+	resp := jsonRequest(t, c, "DELETE", rules+"/进房欢迎", "")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnprocessableEntity {
+		t.Fatalf("状态码 = %d, 期望 422", resp.StatusCode)
+	}
+	var body map[string]string
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("解析报错: %v", err)
+	}
+	// 要说清是被哪条规则压制引用的，让用户知道去改哪一条
+	if !strings.Contains(body["error"], "只欢迎舰长") {
+		t.Errorf("错误文案应指出是哪条规则在压制引用，实际: %q", body["error"])
+	}
+
+	rs, err := st.ListRules(context.Background(), bid)
+	if err != nil {
+		t.Fatalf("列规则报错: %v", err)
+	}
+	if len(rs) != 2 {
+		t.Errorf("被拒的删除不该真的删掉规则，实际剩 %d 条", len(rs))
+	}
+}
+
+// 没有被任何规则压制引用的规则应当能正常删除——不能矫枉过正。
+func TestDeleteRuleAllowsWhenNotSuppressedByAnyRule(t *testing.T) {
+	srv, st := newTestServer(t)
+	c := loginAs(t, srv, st, "张三", false)
+	bid := mustBindingFor(t, st, "张三", "小号", "123")
+	grantWrite(t, st, "张三", "小号", "123")
+
+	create := jsonRequest(t, c, "POST", srv.URL+"/api/bindings/"+itoa(bid)+"/rules", sampleRuleJSON)
+	create.Body.Close()
+
+	resp := jsonRequest(t, c, "DELETE", srv.URL+"/api/bindings/"+itoa(bid)+"/rules/关键词回复", "")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("状态码 = %d, 期望 200", resp.StatusCode)
+	}
+}
+
 // PUT 一条**新**规则，要排到最后而不是插到最前。
 //
 // 位置决定谁先触发。写成 `pos := 0` 的话，PUT 一条新规则会插到现有

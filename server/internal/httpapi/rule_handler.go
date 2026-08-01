@@ -190,6 +190,29 @@ func (s *Server) handleReplaceRules(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// 跨规则校验：Suppress 指向的名字必须在这一批里存在。
+	//
+	// 只有 rules.NewEngine 做这个检查是不够的——那要等到热重载（POST
+	// /reload）才暴露，而此时库里已经存了一份非法配置：PUT 本身会
+	// 成功返回 200，用户看不出问题。下次进程启动时装配循环里对这个
+	// 绑定的 NewEngine 会失败——虽然现在已经不会拖累整个进程（见
+	// cmd/magicd/run.go 的 buildRoomRuntime/assembleRuntimes），但这个
+	// 绑定本身依然跑不起来，而用户本可以在 PUT 的这一刻就被拦下来，
+	// 不必等到下次启动才发现。
+	//
+	// 拿本次请求体里的名字集合校验就够——整组替换的语义就是「库里最后
+	// 只剩这些」，不用去查库里现存的其他规则名。
+	for i, rule := range list {
+		for _, sup := range rule.Suppress {
+			if !seen[sup] {
+				respondError(w, http.StatusUnprocessableEntity,
+					"第 %d 条规则(%s)的 suppress 指向不存在的规则名 %q",
+					i+1, rule.Name, sup)
+				return
+			}
+		}
+	}
+
 	// 走到这里请求体已经全部合法，ReplaceRules 再报错就是存储层的问题，
 	// 不是客户端的错。无条件回 422 会把数据库故障说成「你的请求不合法」，
 	// 还会把原始数据库错误文本抄给客户端
@@ -234,6 +257,31 @@ func (s *Server) handlePatchRule(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleDeleteRule(w http.ResponseWriter, r *http.Request) {
 	b := bindingFrom(r.Context())
 	name := r.PathValue("name")
+
+	// 删之前检查有没有别的规则在压制它。没有这道检查，删掉一条被
+	// Suppress 引用的规则会让引用它的那条规则从此指向一个不存在的
+	// 名字——这与 handleReplaceRules 里补的跨规则校验是同一个漏洞的
+	// 另一条现实可达路径：那边挡住了"新建时写错名字"，这边挡住
+	// "先写对、后来被删掉"。同样是库被写脏、要等到下次启动
+	// NewEngine 才会报错。
+	rules, err := s.store.ListRules(r.Context(), b.ID)
+	if err != nil {
+		respondStoreError(w, err, "")
+		return
+	}
+	for _, rec := range rules {
+		if rec.Name == name {
+			continue
+		}
+		for _, sup := range rec.Spec.Suppress {
+			if sup == name {
+				respondError(w, http.StatusUnprocessableEntity,
+					"规则 %q 正在被规则 %q 压制引用，删除前请先修改或删除那条规则的 suppress 配置",
+					name, rec.Name)
+				return
+			}
+		}
+	}
 
 	if err := s.store.DeleteRule(r.Context(), b.ID, name); err != nil {
 		respondStoreError(w, err, "规则 "+name+" 不存在")

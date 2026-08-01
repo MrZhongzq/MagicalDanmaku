@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/MrZhongzq/MagicalDanmaku/server/internal/account"
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/connector/bilibili/api"
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/connector/bilibili/auth"
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/event"
@@ -92,6 +94,124 @@ func TestRoomBotPropagatesError(t *testing.T) {
 	}
 	if err := b.Block("1", 1); err == nil {
 		t.Error("底层错误应当上报")
+	}
+}
+
+// ---- 全批次终审项【2】：单个绑定规则非法不该让整个守护进程起不来 ----
+
+// newAssembleTestAccount 建一个不会真的联网的 accountRuntime：api.Client
+// 指向本地 httptest 服务器，只用于 RoomInfo（不需要 wbi 签名，room.go 里
+// GetJSON 的 sign 参数是 false），所以不必先调 RefreshNav。
+func newAssembleTestAccount(t *testing.T, name string, srv *httptest.Server) *accountRuntime {
+	t.Helper()
+	sess, err := auth.ParseSession("SESSDATA=" + name + "; bili_jct=y; DedeUserID=1")
+	if err != nil {
+		t.Fatalf("ParseSession 失败: %v", err)
+	}
+	c := api.New(sess, api.WithHTTPClient(srv.Client()))
+	c.SetBaseURL("roomInfo", srv.URL)
+	return &accountRuntime{acc: account.New(name, sess, time.Second), api: c}
+}
+
+// TestBuildRoomRuntimeSkipsBindingWithInvalidRules 验证 buildRoomRuntime
+// 在规则非法（这里用 Suppress 指向不存在的规则名模拟）时返回 error，且不
+// 返回任何部分构造好的资源——调用方据此判断"跳过这个绑定"而不是
+// "带着半成品资源继续跑"。
+//
+// 不需要真实网络：buildRoomRuntime 本身不发任何请求，直播间信息由
+// 调用方直接构造传入。
+func TestBuildRoomRuntimeSkipsBindingWithInvalidRules(t *testing.T) {
+	sess, err := auth.ParseSession("SESSDATA=x; bili_jct=y; DedeUserID=1")
+	if err != nil {
+		t.Fatalf("ParseSession 失败: %v", err)
+	}
+	acctRT := &accountRuntime{acc: account.New("小号", sess, time.Second), api: api.New(sess)}
+	info := &api.RoomInfo{RoomID: "123", UID: "1", Title: "标题"}
+
+	activity := logging.NewActivityWriter(logging.ActivityWriterOptions{
+		Flush: func(context.Context, []store.ActivityRow) error { return nil },
+	})
+	t.Cleanup(activity.Close)
+
+	cfg := store.RunConfig{
+		AccountName: "小号", BindingID: 1, AccountID: 1, RoomID: "123",
+		Rules: []rules.Rule{{
+			Name:    "只欢迎舰长",
+			Enabled: true,
+			On:      []event.Type{event.TypeUserEnter},
+			Do:      []rules.Action{{Type: rules.ActionDanmaku, Template: []string{"舰长你好"}}},
+			// 压制一个不存在的规则名——这是 review 描述的两条现实可达
+			// 路径之一：DELETE 一条规则后，另一条 Suppress 指向它的
+			// 规则就会变成这样，且当时没有任何检查会拦下来。
+			Suppress: []string{"不存在的规则"},
+		}},
+	}
+
+	room, bot, engine, client, err := buildRoomRuntime(
+		context.Background(), cfg, acctRT, info, activity, nil, scheduler.New(slog.Default()), slog.Default())
+	if err == nil {
+		t.Fatal("Suppress 指向不存在的规则名，buildRoomRuntime 应当报错，实际没有")
+	}
+	if room != nil || bot != nil || engine != nil || client != nil {
+		t.Error("失败时不应返回任何部分构造好的资源")
+	}
+}
+
+// TestAssembleRuntimesSkipsInvalidBindingButKeepsOthers 是本项修复的核心
+// 测试：两个绑定一起装配，一个规则非法、一个合法。**RED（修复前）**：
+// 旧代码在装配循环里对 NewEngine 的错误直接 `return err`，这个测试会在
+// 第一个断言（err 不该非 nil）就失败，因为 assembleRuntimes 会把坏绑定
+// 的错误整个冒泡出来，而不是跳过它。
+//
+// 用 httptest 模拟 RoomInfo（唯一需要的网络请求），不需要真实 B 站账号，
+// 也不需要 wbi 签名（room.go 的 GetJSON 调用 sign=false）。
+func TestAssembleRuntimesSkipsInvalidBindingButKeepsOthers(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		roomID := r.URL.Query().Get("room_id")
+		fmt.Fprintf(w, `{"code":0,"data":{"room_id":%s,"uid":1,"title":"标题","live_status":0}}`, roomID)
+	}))
+	t.Cleanup(srv.Close)
+
+	accounts := map[string]*accountRuntime{
+		"坏账号": newAssembleTestAccount(t, "坏账号", srv),
+		"好账号": newAssembleTestAccount(t, "好账号", srv),
+	}
+
+	cfgs := []store.RunConfig{
+		{
+			AccountName: "坏账号", BindingID: 1, AccountID: 1, RoomID: "111",
+			Rules: []rules.Rule{{
+				Name: "只欢迎舰长", Enabled: true,
+				On:       []event.Type{event.TypeUserEnter},
+				Do:       []rules.Action{{Type: rules.ActionDanmaku, Template: []string{"你好"}}},
+				Suppress: []string{"不存在的规则"},
+			}},
+		},
+		{
+			AccountName: "好账号", BindingID: 2, AccountID: 2, RoomID: "222",
+			Rules: []rules.Rule{{
+				Name: "进场欢迎", Enabled: true,
+				On: []event.Type{event.TypeUserEnter},
+				Do: []rules.Action{{Type: rules.ActionDanmaku, Template: []string{"欢迎"}}},
+			}},
+		},
+	}
+
+	activity := logging.NewActivityWriter(logging.ActivityWriterOptions{
+		Flush: func(context.Context, []store.ActivityRow) error { return nil },
+	})
+	t.Cleanup(activity.Close)
+
+	assemblies, err := assembleRuntimes(
+		context.Background(), cfgs, accounts, activity, nil, scheduler.New(slog.Default()), slog.Default())
+	if err != nil {
+		t.Fatalf("坏账号的规则非法不该让整体装配失败，实际报错: %v", err)
+	}
+	if len(assemblies) != 1 {
+		t.Fatalf("应该只有 1 个绑定装配成功（坏账号应被跳过），实际 %d 个", len(assemblies))
+	}
+	if assemblies[0].cfg.BindingID != 2 {
+		t.Errorf("装配成功的应是好账号（BindingID=2），实际 BindingID=%d", assemblies[0].cfg.BindingID)
 	}
 }
 
