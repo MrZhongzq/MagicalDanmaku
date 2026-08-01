@@ -763,6 +763,22 @@ func loginCheckOnce(ctx context.Context, st *store.Store, check loginChecker, lo
 		return
 	}
 	for _, a := range accounts {
+		// 关停时（ctx 已被取消）提前退出，不再继续探测剩下的账号。
+		//
+		// 没有这个检查的话：Ctrl+C 之后 ctx 立刻被取消，但循环还会
+		// 把剩下的账号全部跑一遍——探测用已取消的 ctx 必然失败，记一条
+		// log.Warn；写库同样用这个 ctx，也必然失败，再记一条
+		// log.Error。剩下 N 个账号就是 2N 行没有任何信息量的日志，
+		// 纯粹是退出路径上的噪音。select+default 而不是让 check/
+		// UpdateAccountLoginState 自己去处理取消，是因为「提前退出」
+		// 这个决定属于编排逻辑，不该让每个账号各自触发一次注定失败的
+		// 探测才发现 ctx 没了。
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
 		state, err := check(ctx, a.Cookie)
 		if err != nil {
 			log.Warn("账号登录态探测失败", "account", a.Name, "err", err)

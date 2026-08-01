@@ -2,7 +2,6 @@ package httpapi
 
 import (
 	"net/http"
-	"time"
 
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/store"
 )
@@ -58,31 +57,16 @@ func (s *Server) handleQueryStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	q := store.StatsQuery{BindingID: b.ID}
-
-	// since/until 的解析与校验照搬 /activity（activity_handler.go）：
-	// RFC3339，since 晚于 until 要 422，不能静默返回空——那样在统计卡片
-	// 上会长得和「这段时间真的没数据」一模一样。
-	for _, f := range []struct {
-		name string
-		dst  *time.Time
-	}{{"since", &q.Since}, {"until", &q.Until}} {
-		if v := params.Get(f.name); v != "" {
-			t, err := time.Parse(time.RFC3339, v)
-			if err != nil {
-				respondError(w, http.StatusUnprocessableEntity,
-					"%s 必须是 RFC3339 时间，例如 2026-07-31T20:00:00Z", f.name)
-				return
-			}
-			*f.dst = t
-		}
-	}
-	if !q.Since.IsZero() && !q.Until.IsZero() && q.Since.After(q.Until) {
-		respondError(w, http.StatusUnprocessableEntity,
-			"since 不能晚于 until（since=%s, until=%s）",
-			q.Since.Format(time.RFC3339), q.Until.Format(time.RFC3339))
+	// since/until 的解析与校验复用 /activity 那份（activity_handler.go
+	// 的 parseActivityTimeRange）：RFC3339，since 晚于 until 要 422，
+	// 不能静默返回空——那样在统计卡片上会长得和「这段时间真的没数据」
+	// 一模一样。这里此前自己重写了一遍逐字符相同的解析逻辑，是第三份
+	// 口径，容易走岔，改成共用。
+	since, until, ok := parseActivityTimeRange(w, params)
+	if !ok {
 		return
 	}
+	q := store.StatsQuery{BindingID: b.ID, Since: since, Until: until}
 
 	var buckets []store.StatsBucket
 	var err error

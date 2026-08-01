@@ -984,6 +984,48 @@ func TestLoginCheckOnceOneAccountFailureDoesNotBlockOthers(t *testing.T) {
 	}
 }
 
+// 全批次终审项【6b】：ctx 取消（关停中）时，loginCheckOnce 不该继续
+// 对剩下的账号挨个探测——那必然失败（Warn）再必然写库失败（Error），
+// 每个账号刷 2 行没有任何信息量的日志，纯粹是退出路径上的噪音。
+//
+// 手法：账号甲先建（ListAccounts 按 id 排序，先被处理），check 在处理
+// 账号甲期间触发 cancel()，模拟"探测进行到一半，Ctrl+C 来了"。断言
+// check 恰好被调用 1 次——若没有 ctx.Done() 检查，循环会继续跑到账号乙，
+// calls 会是 2。
+func TestLoginCheckOnceReturnsEarlyWhenContextCancelled(t *testing.T) {
+	st := newLoginCheckTestStore(t)
+	ctx := context.Background()
+
+	owner, err := st.CreateUser(ctx, "张三", "密码123456", false)
+	if err != nil {
+		t.Fatalf("建用户报错: %v", err)
+	}
+	if _, err := st.CreateAccount(ctx, store.AccountInput{Name: "账号甲", Cookie: "SESSDATA=a", OwnerID: owner.ID}); err != nil {
+		t.Fatalf("建账号报错: %v", err)
+	}
+	if _, err := st.CreateAccount(ctx, store.AccountInput{Name: "账号乙", Cookie: "SESSDATA=b", OwnerID: owner.ID}); err != nil {
+		t.Fatalf("建账号报错: %v", err)
+	}
+
+	runCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var calls int32
+	check := func(context.Context, string) (string, error) {
+		if atomic.AddInt32(&calls, 1) == 1 {
+			cancel() // 模拟处理账号甲期间关停发生
+		}
+		return store.LoginStateValid, nil
+	}
+
+	loginCheckOnce(runCtx, st, check, slog.Default())
+
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Errorf("check 被调用了 %d 次，期望恰好 1 次——ctx 在处理账号甲期间被取消后，"+
+			"账号乙不该再被探测", got)
+	}
+}
+
 // TestLoginCheckLoopRunsImmediatelyAndRespectsCancellation 验证
 // loginCheckLoop 与 purgeLoop 同样的两条约束：启动时立刻做一次检测
 // （不等第一个 10 分钟的 tick），以及 ctx 取消后能干净退出。
