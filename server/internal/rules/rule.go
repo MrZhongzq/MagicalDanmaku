@@ -65,7 +65,9 @@ type Rule struct {
 	// 典型场景：给某位舰长配了专属进房欢迎，就不该再触发通用进房欢迎，
 	// 否则他进房会被欢迎两次。
 	//
-	// **只对同一次触发生效**，不是全局开关。
+	// **只对同一次触发生效**，不是全局开关。**只对事件驱动（On）的规则
+	// 生效**：定时（Schedule）规则一次调用只触发自己，不存在「本次触发
+	// 命中的其他规则」这个集合，配了会被 Validate 拒绝。
 	Suppress []string
 }
 
@@ -82,6 +84,19 @@ func (r Rule) Validate() error {
 	}
 	if !hasOn && !hasSchedule {
 		return fmt.Errorf("rules: 规则 %q 必须指定 on 或 schedule 之一", r.Name)
+	}
+
+	// Schedule 触发的规则配 Suppress 是无声死配置，拒绝掉。
+	//
+	// cron 按规则名逐条注册任务，一次调用只触发一条规则，根本不存在
+	// 「本次触发命中的其他规则」这个集合可供压制——FireScheduled 也
+	// 确实不消费这个字段。
+	//
+	// 不拦的话它能通过全部校验、运行时被彻底忽略、不报错不记日志。
+	// 与「压制不存在的规则名」是同一类问题：静默不生效非常难查。
+	if hasSchedule && len(r.Suppress) > 0 {
+		return fmt.Errorf("rules: 规则 %q 是定时触发的，配 suppress 不会生效——"+
+			"压制只在同一次事件触发命中多条规则时才有意义", r.Name)
 	}
 
 	if len(r.Do) == 0 {

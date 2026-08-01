@@ -61,6 +61,53 @@ func TestRuleValidateRejectsEmptyName(t *testing.T) {
 	}
 }
 
+// Schedule 触发的规则配 Suppress 是无声死配置：cron 按规则名逐条注册
+// 任务，一次调用只触发一条规则（FireScheduled 直接 fireLocked，不经过
+// matcher.Match 与 Handle 里的 suppressed 循环），根本不存在「本次触发
+// 命中的其他规则」这个集合可供压制。不拦的话它能通过全部校验、运行时
+// 被彻底忽略、不报错不记日志——与「压制不存在的规则名」是同一类问题：
+// 静默不生效非常难查。
+func TestRuleValidateRejectsSuppressOnScheduledRule(t *testing.T) {
+	r := Rule{
+		Name:     "定时压制",
+		Schedule: "0 */5 * * * *",
+		Suppress: []string{"某规则"},
+		Do:       []Action{{Type: ActionDanmaku, Template: []string{"x"}}},
+	}
+	err := r.Validate()
+	if err == nil {
+		t.Fatal("定时规则配 suppress 应当报错")
+	}
+	if !strings.Contains(err.Error(), "定时") && !strings.Contains(err.Error(), "suppress") {
+		t.Errorf("错误信息应说明是定时规则配 suppress 不生效，实际: %v", err)
+	}
+}
+
+// On 触发的规则配 Suppress 是正常场景，不该被上一条误伤。
+func TestRuleValidateAcceptsSuppressOnEventRule(t *testing.T) {
+	r := Rule{
+		Name:     "事件压制",
+		On:       []event.Type{event.TypeUserEnter},
+		Suppress: []string{"某规则"},
+		Do:       []Action{{Type: ActionDanmaku, Template: []string{"x"}}},
+	}
+	if err := r.Validate(); err != nil {
+		t.Errorf("事件驱动规则配 suppress 不应报错: %v", err)
+	}
+}
+
+// Schedule 触发但没配 Suppress 的规则应正常放行。
+func TestRuleValidateAcceptsScheduledRuleWithoutSuppress(t *testing.T) {
+	r := Rule{
+		Name:     "普通定时",
+		Schedule: "0 */5 * * * *",
+		Do:       []Action{{Type: ActionDanmaku, Template: []string{"x"}}},
+	}
+	if err := r.Validate(); err != nil {
+		t.Errorf("定时规则未配 suppress 不应报错: %v", err)
+	}
+}
+
 // Suppress 含自己会导致规则命中后把自己标记为压制——虽然按当前实现的
 // 执行顺序不会真的自我拦截（先执行再标记），但这明显不是用户的意图，
 // 应当在校验阶段就拒绝，而不是留一个费解的死配置。
