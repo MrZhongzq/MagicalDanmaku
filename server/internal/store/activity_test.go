@@ -322,6 +322,119 @@ func TestPurgeActivityBefore(t *testing.T) {
 	}
 }
 
+// DeleteActivity 按时间范围删，只删落在范围内的行。
+func TestDeleteActivityByRange(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	accID := mustAccount(t, s, "小号")
+	b, err := s.UpsertBinding(ctx, accID, "123")
+	if err != nil {
+		t.Fatalf("创建绑定报错: %v", err)
+	}
+
+	if err := s.InsertActivity(ctx, []ActivityRow{
+		{AccountID: accID, BindingID: &b.ID, Kind: ActivityEvent, EventType: "danmaku",
+			OccurredAt: fixedTime.Add(-48 * time.Hour)},
+		{AccountID: accID, BindingID: &b.ID, Kind: ActivityEvent, EventType: "danmaku",
+			OccurredAt: fixedTime},
+	}); err != nil {
+		t.Fatalf("写入报错: %v", err)
+	}
+
+	n, err := s.DeleteActivity(ctx, b.ID, time.Time{}, fixedTime.Add(-24*time.Hour))
+	if err != nil {
+		t.Fatalf("删除报错: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("删除条数 = %d, 期望 1", n)
+	}
+
+	got, err := s.QueryActivity(ctx, ActivityQuery{BindingID: b.ID})
+	if err != nil {
+		t.Fatalf("查询报错: %v", err)
+	}
+	if len(got) != 1 {
+		t.Errorf("剩余条数 = %d, 期望 1", len(got))
+	}
+}
+
+// since/until 都是零值时不限制范围，等于删这个绑定名下的全部日志。
+func TestDeleteActivityAllWhenRangeUnset(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	accID := mustAccount(t, s, "小号")
+	b, err := s.UpsertBinding(ctx, accID, "123")
+	if err != nil {
+		t.Fatalf("创建绑定报错: %v", err)
+	}
+
+	if err := s.InsertActivity(ctx, []ActivityRow{
+		{AccountID: accID, BindingID: &b.ID, Kind: ActivityEvent, EventType: "danmaku",
+			OccurredAt: fixedTime.Add(-48 * time.Hour)},
+		{AccountID: accID, BindingID: &b.ID, Kind: ActivityEvent, EventType: "danmaku",
+			OccurredAt: fixedTime},
+	}); err != nil {
+		t.Fatalf("写入报错: %v", err)
+	}
+
+	n, err := s.DeleteActivity(ctx, b.ID, time.Time{}, time.Time{})
+	if err != nil {
+		t.Fatalf("删除报错: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("删除条数 = %d, 期望 2", n)
+	}
+
+	got, err := s.QueryActivity(ctx, ActivityQuery{BindingID: b.ID})
+	if err != nil {
+		t.Fatalf("查询报错: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("剩余条数 = %d, 期望 0", len(got))
+	}
+}
+
+// DeleteActivity 只匹配 binding_id = bindingID 的行。绑定被删除后，
+// 该绑定名下的历史日志 binding_id 会被置空（P3 设计：账号在这个
+// 房间的历史保留），这些「孤儿」行不再匹配任何 bindingID，
+// DeleteActivity 删不到它们——这是有意的，不是遗漏。
+func TestDeleteActivityDoesNotReachOrphanedRows(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	accID := mustAccount(t, s, "小号")
+	b, err := s.UpsertBinding(ctx, accID, "123")
+	if err != nil {
+		t.Fatalf("创建绑定报错: %v", err)
+	}
+
+	if err := s.InsertActivity(ctx, []ActivityRow{{
+		AccountID: accID, BindingID: &b.ID, Kind: ActivityEvent,
+		EventType: "danmaku", OccurredAt: fixedTime,
+	}}); err != nil {
+		t.Fatalf("写入报错: %v", err)
+	}
+
+	if err := s.DeleteBinding(ctx, "小号", "123"); err != nil {
+		t.Fatalf("删除绑定报错: %v", err)
+	}
+
+	n, err := s.DeleteActivity(ctx, b.ID, time.Time{}, time.Time{})
+	if err != nil {
+		t.Fatalf("删除报错: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("孤儿行不该被 DeleteActivity 删到，实际删了 %d 条", n)
+	}
+
+	got, err := s.QueryActivity(ctx, ActivityQuery{AccountID: accID})
+	if err != nil {
+		t.Fatalf("查询报错: %v", err)
+	}
+	if len(got) != 1 {
+		t.Errorf("孤儿行应仍在，实际 %d 条", len(got))
+	}
+}
+
 // 删账号时业务日志跟着走，删绑定时日志保留但 binding_id 置空
 func TestActivityCascadeOnAccountDeleteAndBindingDelete(t *testing.T) {
 	s := testStore(t)

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 	"time"
 
@@ -66,28 +67,11 @@ func (s *Server) handleQueryActivity(w http.ResponseWriter, r *http.Request) {
 	// 拿一份固定清单去校验，只会让新类型查不出来
 	q.EventType = params.Get("eventType")
 
-	for _, f := range []struct {
-		name string
-		dst  *time.Time
-	}{{"since", &q.Since}, {"until", &q.Until}} {
-		if v := params.Get(f.name); v != "" {
-			t, err := time.Parse(time.RFC3339, v)
-			if err != nil {
-				respondError(w, http.StatusUnprocessableEntity,
-					"%s 必须是 RFC3339 时间，例如 2026-07-31T20:00:00Z", f.name)
-				return
-			}
-			*f.dst = t
-		}
-	}
-	// 时间填反了要说出来。静默返回空在日志页里和「这段时间真的没有
-	// 日志」长得一模一样，用户会往错的方向查
-	if !q.Since.IsZero() && !q.Until.IsZero() && q.Since.After(q.Until) {
-		respondError(w, http.StatusUnprocessableEntity,
-			"since 不能晚于 until（since=%s, until=%s）",
-			q.Since.Format(time.RFC3339), q.Until.Format(time.RFC3339))
+	since, until, ok := parseActivityTimeRange(w, params)
+	if !ok {
 		return
 	}
+	q.Since, q.Until = since, until
 
 	q.Limit = maxActivityLimit
 	if v := params.Get("limit"); v != "" {
@@ -112,6 +96,73 @@ func (s *Server) handleQueryActivity(w http.ResponseWriter, r *http.Request) {
 		out = append(out, toActivityView(&recs[i]))
 	}
 	respondJSON(w, http.StatusOK, out)
+}
+
+// parseActivityTimeRange 解析 since/until 查询参数，二者都要求
+// RFC3339，且 since 不得晚于 until。
+//
+// GET .../activity（查询）与 DELETE .../activity（清除）共用这一份
+// 解析——校验规则理应一致，写两份迟早会走岔。
+//
+// ok 为 false 时错误响应已经写好，调用方直接 return 即可。
+func parseActivityTimeRange(w http.ResponseWriter, params url.Values) (since, until time.Time, ok bool) {
+	for _, f := range []struct {
+		name string
+		dst  *time.Time
+	}{{"since", &since}, {"until", &until}} {
+		if v := params.Get(f.name); v != "" {
+			t, err := time.Parse(time.RFC3339, v)
+			if err != nil {
+				respondError(w, http.StatusUnprocessableEntity,
+					"%s 必须是 RFC3339 时间，例如 2026-07-31T20:00:00Z", f.name)
+				return time.Time{}, time.Time{}, false
+			}
+			*f.dst = t
+		}
+	}
+	// 时间填反了要说出来。静默返回空在日志页里和「这段时间真的没有
+	// 日志」长得一模一样，用户会往错的方向查
+	if !since.IsZero() && !until.IsZero() && since.After(until) {
+		respondError(w, http.StatusUnprocessableEntity,
+			"since 不能晚于 until（since=%s, until=%s）",
+			since.Format(time.RFC3339), until.Format(time.RFC3339))
+		return time.Time{}, time.Time{}, false
+	}
+	return since, until, true
+}
+
+// handleDeleteActivity 清除该绑定名下的业务日志，返回删了多少行。
+//
+// 权限用 event:read，与查询日志一致：能看到全部日志的人删掉它们
+// 不构成额外的信息泄漏，这是个自托管单人工具，没必要为这一个操作
+// 再发明一个权限点。
+//
+// 不带 since/until 时必须显式传 all=1，否则 422：一次手滑的
+// DELETE .../activity 不该清空整个房间的历史。带了时间范围就不需要
+// all——此时以范围为准，all 只是「我确认要删全部」的确认标记，
+// 有范围时它没有意义（同时传范围与 all=1 不会报错，也不会删得比
+// 范围更多）。
+func (s *Server) handleDeleteActivity(w http.ResponseWriter, r *http.Request) {
+	b := bindingFrom(r.Context())
+	params := r.URL.Query()
+
+	since, until, ok := parseActivityTimeRange(w, params)
+	if !ok {
+		return
+	}
+
+	if since.IsZero() && until.IsZero() && params.Get("all") != "1" {
+		respondError(w, http.StatusUnprocessableEntity,
+			"未指定 since 或 until：要删除全部日志请显式传 all=1")
+		return
+	}
+
+	n, err := s.store.DeleteActivity(r.Context(), b.ID, since, until)
+	if err != nil {
+		respondStoreError(w, err, "")
+		return
+	}
+	respondJSON(w, http.StatusOK, map[string]int64{"deleted": n})
 }
 
 // sseKeepalive 是心跳间隔，防中间代理掐断空闲连接。

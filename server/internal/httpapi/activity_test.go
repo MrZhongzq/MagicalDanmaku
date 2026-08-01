@@ -185,6 +185,168 @@ func TestQueryActivityBadLimit(t *testing.T) {
 	}
 }
 
+func TestDeleteActivityByRange(t *testing.T) {
+	srv, st := newTestServer(t)
+	c := loginAs(t, srv, st, "张三", false)
+	bid := mustBindingFor(t, st, "张三", "小号", "123")
+	grantEventRead(t, st, "张三", "小号", "123")
+
+	seedActivity(t, st, bid,
+		store.ActivityRow{Kind: store.ActivityEvent, EventType: "danmaku",
+			OccurredAt: seedTime.Add(-48 * time.Hour)},
+		store.ActivityRow{Kind: store.ActivityEvent, EventType: "danmaku",
+			OccurredAt: seedTime},
+	)
+
+	resp := jsonRequest(t, c, "DELETE",
+		srv.URL+"/api/bindings/"+itoa(bid)+"/activity?until="+
+			seedTime.Add(-24*time.Hour).Format(time.RFC3339), "")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("状态码 = %d, 期望 200", resp.StatusCode)
+	}
+	var got map[string]int64
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("解析报错: %v", err)
+	}
+	if got["deleted"] != 1 {
+		t.Errorf("deleted = %d, 期望 1", got["deleted"])
+	}
+
+	remain := jsonRequest(t, c, "GET", srv.URL+"/api/bindings/"+itoa(bid)+"/activity", "")
+	defer remain.Body.Close()
+	var recs []map[string]any
+	if err := json.NewDecoder(remain.Body).Decode(&recs); err != nil {
+		t.Fatalf("解析报错: %v", err)
+	}
+	if len(recs) != 1 {
+		t.Errorf("剩余条数 = %d, 期望 1", len(recs))
+	}
+}
+
+// 不带任何时间参数、也不带 all=1，必须拒绝——这是这个接口最要紧的
+// 一条防线：一次手滑的 DELETE .../activity 不该清空整个房间的历史。
+//
+// 断言不能只看状态码：要同时确认库里的行一条没少，否则「返回
+// 422 但其实还是删了」这种更糟的错误会被当成通过。
+func TestDeleteActivityRequiresAllFlagWhenRangeUnset(t *testing.T) {
+	srv, st := newTestServer(t)
+	c := loginAs(t, srv, st, "张三", false)
+	bid := mustBindingFor(t, st, "张三", "小号", "123")
+	grantEventRead(t, st, "张三", "小号", "123")
+
+	seedActivity(t, st, bid,
+		store.ActivityRow{Kind: store.ActivityEvent, EventType: "danmaku", OccurredAt: seedTime},
+		store.ActivityRow{Kind: store.ActivityEvent, EventType: "gift", OccurredAt: seedTime},
+	)
+
+	resp := jsonRequest(t, c, "DELETE", srv.URL+"/api/bindings/"+itoa(bid)+"/activity", "")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnprocessableEntity {
+		t.Errorf("状态码 = %d, 期望 422", resp.StatusCode)
+	}
+
+	remain := jsonRequest(t, c, "GET", srv.URL+"/api/bindings/"+itoa(bid)+"/activity", "")
+	defer remain.Body.Close()
+	var recs []map[string]any
+	if err := json.NewDecoder(remain.Body).Decode(&recs); err != nil {
+		t.Fatalf("解析报错: %v", err)
+	}
+	if len(recs) != 2 {
+		t.Errorf("被拒绝的删除不该动库里的数据，实际剩 %d 条，期望 2", len(recs))
+	}
+}
+
+func TestDeleteActivityAllRequiresExplicitFlag(t *testing.T) {
+	srv, st := newTestServer(t)
+	c := loginAs(t, srv, st, "张三", false)
+	bid := mustBindingFor(t, st, "张三", "小号", "123")
+	grantEventRead(t, st, "张三", "小号", "123")
+
+	seedActivity(t, st, bid,
+		store.ActivityRow{Kind: store.ActivityEvent, EventType: "danmaku", OccurredAt: seedTime},
+		store.ActivityRow{Kind: store.ActivityEvent, EventType: "gift", OccurredAt: seedTime},
+	)
+
+	resp := jsonRequest(t, c, "DELETE",
+		srv.URL+"/api/bindings/"+itoa(bid)+"/activity?all=1", "")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("状态码 = %d, 期望 200", resp.StatusCode)
+	}
+	var got map[string]int64
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("解析报错: %v", err)
+	}
+	if got["deleted"] != 2 {
+		t.Errorf("deleted = %d, 期望 2", got["deleted"])
+	}
+}
+
+// 同时传时间范围与 all=1：以范围为准。all 只是「我确认要删全部」
+// 的确认标记，有范围时它没有意义。
+func TestDeleteActivityRangeTakesPrecedenceOverAllFlag(t *testing.T) {
+	srv, st := newTestServer(t)
+	c := loginAs(t, srv, st, "张三", false)
+	bid := mustBindingFor(t, st, "张三", "小号", "123")
+	grantEventRead(t, st, "张三", "小号", "123")
+
+	seedActivity(t, st, bid,
+		store.ActivityRow{Kind: store.ActivityEvent, EventType: "danmaku",
+			OccurredAt: seedTime.Add(-48 * time.Hour)},
+		store.ActivityRow{Kind: store.ActivityEvent, EventType: "gift", OccurredAt: seedTime},
+	)
+
+	resp := jsonRequest(t, c, "DELETE",
+		srv.URL+"/api/bindings/"+itoa(bid)+"/activity?until="+
+			seedTime.Add(-24*time.Hour).Format(time.RFC3339)+"&all=1", "")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("状态码 = %d, 期望 200", resp.StatusCode)
+	}
+	var got map[string]int64
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("解析报错: %v", err)
+	}
+	if got["deleted"] != 1 {
+		t.Errorf("deleted = %d, 期望 1（应以 until 范围为准，而不是删全部）", got["deleted"])
+	}
+}
+
+func TestDeleteActivityRejectsInvertedRange(t *testing.T) {
+	srv, st := newTestServer(t)
+	c := loginAs(t, srv, st, "张三", false)
+	bid := mustBindingFor(t, st, "张三", "小号", "123")
+	grantEventRead(t, st, "张三", "小号", "123")
+
+	resp := jsonRequest(t, c, "DELETE",
+		srv.URL+"/api/bindings/"+itoa(bid)+
+			"/activity?since=2026-08-01T00:00:00Z&until=2026-07-01T00:00:00Z", "")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnprocessableEntity {
+		t.Errorf("状态码 = %d, 期望 422", resp.StatusCode)
+	}
+}
+
+func TestDeleteActivityRequiresEventRead(t *testing.T) {
+	srv, st := newTestServer(t)
+	loginAs(t, srv, st, "张三", false)
+	bid := mustBindingFor(t, st, "张三", "小号", "123")
+
+	li := loginAs(t, srv, st, "李四", false)
+	if err := st.Grant(context.Background(), "李四", "小号", "123",
+		[]perm.Permission{perm.RuleWrite}); err != nil {
+		t.Fatalf("授权报错: %v", err)
+	}
+
+	resp := jsonRequest(t, li, "DELETE",
+		srv.URL+"/api/bindings/"+itoa(bid)+"/activity?all=1", "")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("状态码 = %d, 期望 403", resp.StatusCode)
+	}
+}
+
 func TestQueryActivityRequiresEventRead(t *testing.T) {
 	srv, st := newTestServer(t)
 	loginAs(t, srv, st, "张三", false)

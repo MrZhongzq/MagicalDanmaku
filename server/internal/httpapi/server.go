@@ -200,6 +200,13 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/bindings/{binding}/activity",
 		s.requirePerm(perm.EventRead, s.handleQueryActivity))
 
+	// 清除业务日志：真的删库，权限与查询一致仍走 event:read——能看到
+	// 全部日志的人删掉它们不构成额外的信息泄漏（自托管单人工具），
+	// 不为此单独发明权限点。不带 since/until 时要求显式 all=1，
+	// 防止手滑清空整个房间的历史；见 handleDeleteActivity 的注释。
+	s.mux.HandleFunc("DELETE /api/bindings/{binding}/activity",
+		s.requirePerm(perm.EventRead, s.handleDeleteActivity))
+
 	// 统计聚合：WebUI 统计页的卡片数据，SQL 侧 GROUP BY，权限与业务
 	// 日志一致，同走 event:read（这是查看事件统计，不是新的权限点）。
 	s.mux.HandleFunc("GET /api/bindings/{binding}/stats",

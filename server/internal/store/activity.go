@@ -162,6 +162,40 @@ func (s *Store) QueryActivity(ctx context.Context, q ActivityQuery) ([]ActivityR
 	return out, nil
 }
 
+// DeleteActivity 删除某个绑定名下的业务日志，返回删除行数。
+//
+// since/until 任一为零值表示对应端不设限；both 为零值即删这个绑定
+// 名下的全部日志——是否要求调用方额外确认，由 HTTP 层负责，这里
+// 只管按条件删。
+//
+// 只用一条 DELETE ... WHERE 语句拿 CommandTag.RowsAffected()，不
+// 先查后删：省一次往返，也避免两条语句之间的竞态。
+//
+// 只匹配 binding_id = bindingID 的行。activity_logs.binding_id 在
+// 绑定被删除时会被置为 NULL（P3 设计：绑定删了之后账号在这个房间
+// 的历史仍要保留），这些「孤儿」行不再匹配任何 bindingID——
+// DeleteActivity 删不到它们。这是有意为之，不是遗漏：这个接口只
+// 清理还挂在这个绑定上的日志，不负责清理绑定已经不存在之后留下的
+// 历史（那些历史本来就是留给统计用的）。
+func (s *Store) DeleteActivity(ctx context.Context, bindingID int64, since, until time.Time) (int64, error) {
+	sql := `DELETE FROM activity_logs WHERE binding_id = $1`
+	args := []any{bindingID}
+	if !since.IsZero() {
+		args = append(args, since)
+		sql += fmt.Sprintf(" AND occurred_at >= $%d", len(args))
+	}
+	if !until.IsZero() {
+		args = append(args, until)
+		sql += fmt.Sprintf(" AND occurred_at <= $%d", len(args))
+	}
+
+	tag, err := s.pool.Exec(ctx, sql, args...)
+	if err != nil {
+		return 0, fmt.Errorf("store: 删除业务日志失败: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}
+
 // PurgeActivityBefore 删除指定时刻之前的业务日志，返回删除条数。
 func (s *Store) PurgeActivityBefore(ctx context.Context, t time.Time) (int64, error) {
 	tag, err := s.pool.Exec(ctx, `DELETE FROM activity_logs WHERE occurred_at < $1`, t)
