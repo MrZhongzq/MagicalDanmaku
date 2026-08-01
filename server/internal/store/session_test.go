@@ -210,13 +210,28 @@ func TestPurgeExpiredSessions(t *testing.T) {
 	}
 }
 
-func TestSchemaVersionIsTwoAfterSessionsMigration(t *testing.T) {
+// 迁移全部被应用后，schema 版本应当等于迁移文件数。
+//
+// 不写死具体数字：那样每加一个迁移这条测试都会红一次，而它红的原因
+// 与被加的那个迁移毫无关系——改的人只会把数字加一，测试就退化成
+// 「记得改这里」的提醒。
+//
+// 对着文件数断言仍然能抓住真正要防的东西：迁移文件加进来了却没被应用
+// （比如文件名不符合命名约定被 loadMigrations 跳过）。
+func TestSchemaVersionMatchesMigrationCount(t *testing.T) {
 	s := testStore(t)
 	v, err := s.SchemaVersion(context.Background())
 	if err != nil {
 		t.Fatalf("查版本报错: %v", err)
 	}
-	if v != 2 {
-		t.Errorf("schema 版本 = %d, 期望 2（新增了 002_sessions.sql）", v)
+
+	entries, err := migrationFS.ReadDir("migrations")
+	if err != nil {
+		t.Fatalf("读迁移目录报错: %v", err)
+	}
+	want := len(entries)
+	if v != want {
+		t.Errorf("schema 版本 = %d, 期望 %d（迁移目录下有 %d 个文件，"+
+			"版本对不上说明有迁移没被应用）", v, want, want)
 	}
 }
