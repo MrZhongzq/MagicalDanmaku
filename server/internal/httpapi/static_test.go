@@ -58,3 +58,26 @@ func TestStaticDoesNotSwallowAPI404(t *testing.T) {
 		t.Errorf("Content-Type = %q, API 的 404 必须仍是 JSON", ct)
 	}
 }
+
+// 裸路径 /api（无尾斜杠）同样不能被 SPA 回退吞掉。
+//
+// 分流条件写成 HasPrefix(path, "/api/") 时，/api 不满足前缀会掉进
+// 静态处理器拿到 200 + HTML。已有的那条测试用的是 /api/xxx，
+// 自带斜杠，测不出这个变体。
+func TestStaticDoesNotSwallowBareAPIPath(t *testing.T) {
+	srv, _ := newTestServer(t)
+
+	resp, err := http.Get(srv.URL + "/api")
+	if err != nil {
+		t.Fatalf("请求报错: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("状态码 = %d, 期望 404", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		body, _ := io.ReadAll(resp.Body)
+		t.Errorf("Content-Type = %q, 期望 application/json；响应体: %.200s", ct, body)
+	}
+}

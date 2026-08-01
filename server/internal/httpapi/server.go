@@ -248,7 +248,10 @@ func (s *Server) Handler() http.Handler {
 	// 经过 mux 的 "/" 模式——mux 根本没注册 "/"，静态资源与 SPA 回退
 	// 的分流完全在这一层做，理由见 static.go 里 mountStatic 的注释。
 	var h http.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if s.staticHandler == nil || strings.HasPrefix(r.URL.Path, "/api/") {
+		// 裸路径 /api 也算 API 前缀。少了这一句，GET /api 会掉进 SPA 回退
+		// 拿到 200 + HTML —— 而这正是本任务最该守住的那条线的反例。
+		// 简报给的测试用的是 /api/xxx，自带斜杠，测不出这个变体。
+		if s.staticHandler == nil || strings.HasPrefix(r.URL.Path, "/api/") || r.URL.Path == "/api" {
 			s.mux.ServeHTTP(w, r)
 			return
 		}
