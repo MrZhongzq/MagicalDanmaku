@@ -5,10 +5,16 @@ import { useAuthStore } from '@/stores/auth'
 const router = createRouter({
   history: createWebHistory(),
   routes: [
-    { path: '/', redirect: '/accounts' },
     { path: '/login', name: 'login', component: () => import('@/pages/Login.vue') },
-    { path: '/accounts', name: 'accounts', component: () => import('@/pages/Accounts.vue') },
-    // 其余页面在后续任务里加进来
+    {
+      path: '/',
+      component: () => import('@/layouts/Shell.vue'),
+      children: [
+        { path: '', redirect: '/accounts' },
+        { path: 'accounts', name: 'accounts', component: () => import('@/pages/Accounts.vue') },
+        // 其余页面在后续任务里逐个加进来
+      ],
+    },
     // 后端做了 SPA 回退（任何非 /api 路径都返回 index.html），
     // 所以这里必须自己兜住未知路径，否则用户看到的是空白页
     { path: '/:pathMatch(.*)*', redirect: '/accounts' },

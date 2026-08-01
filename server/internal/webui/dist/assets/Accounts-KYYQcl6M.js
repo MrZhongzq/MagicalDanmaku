@@ -1,0 +1,1 @@
+import{_ as c}from"./_plugin-vue_export-helper-DlAUqK2U.js";import{a0 as e,a6 as o}from"./index-DB3yn9lF.js";const r={};function t(n,a){return o(),e("div",null,"账号与直播间（Task 5 实现）")}const f=c(r,[["render",t]]);export{f as default};
