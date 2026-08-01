@@ -8,12 +8,14 @@ on:
       - "refactor/**"
     paths:
       - "server/**"
+      - "web/**"
       - ".github/workflows/ci.yml"
       - ".goreleaser.yaml"
       - "docker-compose.dev.yml"
   pull_request:
     paths:
       - "server/**"
+      - "web/**"
       - ".github/workflows/ci.yml"
       - ".goreleaser.yaml"
       - "docker-compose.dev.yml"

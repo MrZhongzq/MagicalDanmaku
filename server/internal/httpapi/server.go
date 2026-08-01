@@ -12,6 +12,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/connector/bilibili/auth"
@@ -65,6 +66,10 @@ type Server struct {
 	hub     *Hub
 	runtime *runtimeRegistry
 	cfgHash configHash
+
+	// staticHandler 服务前端产物与 SPA 回退，由 mountStatic 装配。
+	// 不挂在 mux 上，见 static.go 里的说明。
+	staticHandler http.Handler
 }
 
 // qrTTL 是扫码会话在内存表里的存活时间，与 B 站二维码本身的
@@ -188,6 +193,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET "+members, s.requirePerm(perm.MemberManage, s.handleListMembers))
 	s.mux.HandleFunc("PUT "+members+"/{username}", s.requirePerm(perm.MemberManage, s.handleGrantMember))
 	s.mux.HandleFunc("DELETE "+members+"/{username}", s.requirePerm(perm.MemberManage, s.handleRevokeMember))
+
+	// 前端静态资源与 SPA 回退。装配好的处理器存进 s.staticHandler，
+	// 不挂在 mux 上——分流逻辑在 Handler() 里，理由见 static.go。
+	s.mountStatic()
 }
 
 // testRoutes 注册仅供测试用的路由（/api/test/*）。
@@ -232,7 +241,19 @@ func (s *Server) testRoutes() {
 
 // Handler 返回套好中间件的处理器。
 func (s *Server) Handler() http.Handler {
-	var h http.Handler = s.mux
+	// /api 下的请求全部交给 mux：未知路径、方法不对都由 mux 自带的
+	// 404/405 判断处理，再经 withNotFoundJSON 包成 JSON。
+	//
+	// 其余路径走前端静态资源与 SPA 回退（s.staticHandler），不让它们
+	// 经过 mux 的 "/" 模式——mux 根本没注册 "/"，静态资源与 SPA 回退
+	// 的分流完全在这一层做，理由见 static.go 里 mountStatic 的注释。
+	var h http.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.staticHandler == nil || strings.HasPrefix(r.URL.Path, "/api/") {
+			s.mux.ServeHTTP(w, r)
+			return
+		}
+		s.staticHandler.ServeHTTP(w, r)
+	})
 	h = s.withNotFoundJSON(h)
 	h = s.withRequestLog(h)
 	h = s.withRecover(h)

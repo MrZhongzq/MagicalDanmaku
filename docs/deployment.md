@@ -32,8 +32,57 @@ magicd binding add 小号 1706666491
 magicd run
 ```
 
-规则的配置目前有两条路：写 YAML 然后 `magicd import`，或者等 P4 的
-WebUI。示例见仓库根目录的 `config.example.yaml`。
+规则的配置目前有两条路：写 YAML 然后 `magicd import`，或者用下面的
+Web 管理界面。示例见仓库根目录的 `config.example.yaml`。
+
+## Web 管理界面
+
+`magicd run` 默认在 `127.0.0.1:8080` 起 Web 管理界面的后端接口：账号、
+规则、禁言名单的增删改查，手动发弹幕/禁言/解禁，以及实时事件流都在
+上面。
+
+```bash
+export MAGICD_HTTP_ADDR=127.0.0.1:8080     # 默认值，只监听本机
+magicd run
+# 浏览器打开 http://127.0.0.1:8080
+```
+
+用 `magicd migrate` 打印的管理员账号密码登录（见上面「快速开始」第 3
+步——空库首次迁移时会创建管理员账户并把用户名、密码打印一次，
+**只打印这一次**，务必当场记下）。
+
+> 当前打开的还是一个占位页：可视化的规则编辑器界面在 P4-2 才会随
+> `web/` 前端一起构建出来。接口本身已经完整可用，想现在就用可以直接
+> 拿 `curl` 或其他 HTTP 客户端调 `/api/...`（比如 `/api/health`、
+> `/api/bindings`）。
+
+**默认只监听本机**是有意的：管理界面能改 Cookie、发弹幕、禁言，
+不该因为忘了配防火墙就暴露到公网。需要远程访问时：
+
+- **推荐**：SSH 端口转发 `ssh -L 8080:127.0.0.1:8080 你的服务器`
+- 或者反向代理加 TLS 与访问控制，然后设 `MAGICD_HTTP_ADDR=127.0.0.1:8080`
+  让代理去连本机
+- Docker 部署设 `MAGICD_HTTP_ADDR=0.0.0.0:8080`，并**务必**在容器外做
+  访问控制（防火墙只放行受信任来源，或者仍然套一层反向代理）
+
+反向代理加了 TLS 时，设 `MAGICD_HTTP_SECURE_COOKIE=1` 让会话 Cookie 带
+`Secure` 标志——默认关闭是因为默认监听 127.0.0.1 走的是明文 HTTP，这时
+打开 `Secure` 反而会让浏览器根本不发这个 Cookie。
+
+设 `MAGICD_HTTP_ADDR=off` 则完全不起 Web 服务，退化成纯机器人。
+
+### 改完规则不需要重启主程序
+
+在网页（或直接调接口）上改完规则，保存后调用对应绑定的重载接口
+（`POST /api/bindings/{binding}/reload`），规则立刻在运行中的引擎里
+生效——**不需要重启 `magicd run`**。`/api/meta/runtime` 会在保存的配置
+版本与运行中的版本不一致时报告 `configStale=true`，界面据此提示「有
+改动还没重载」。
+
+这和「加一个全新的账号/绑定」是两回事：全新绑定要机器人去建立一条
+新的直播间连接，仍然需要重启 `magicd run`（见下面「用 Docker 部署」
+一节里 `docker compose restart magicd` 那步）。热重载只对**已经在跑的
+绑定**的规则改动生效。
 
 ## 用 Docker 部署（推荐）
 
@@ -69,7 +118,8 @@ docker compose restart magicd
 ```bash
 docker compose logs -f magicd          # 看实时日志
 docker compose ps                      # 看服务状态
-docker compose restart magicd          # 改完配置后重启生效
+docker compose restart magicd          # 加了新账号/绑定、或改了 .env 后重启生效
+                                        # （规则改动走网页热重载，不需要重启）
 docker compose down                    # 停止（保留数据）
 docker compose pull; docker compose up -d   # 升级到新版镜像
 ```
@@ -108,6 +158,8 @@ docker compose exec -T postgres pg_dump -U magicd magicd > backup.sql
 | `MAGICD_LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error` |
 | `MAGICD_LOG_FILE` | 空 | 系统日志文件路径，留空则只写 stderr |
 | `MAGICD_LOG_RETENTION_DAYS` | `30` | 业务日志保留天数，0 表示不清理 |
+| `MAGICD_HTTP_ADDR` | `127.0.0.1:8080` | Web 管理界面监听地址；只监听本机。设为 `0.0.0.0:8080` 对外监听（Docker 部署需要，务必自行做访问控制），设为空串或 `off` 则不起 Web 服务 |
+| `MAGICD_HTTP_SECURE_COOKIE` | 关闭 | 设为 `1` 时会话 Cookie 带 `Secure` 标志，仅当反向代理已加 TLS 时才打开 |
 
 ## 两类日志
 
