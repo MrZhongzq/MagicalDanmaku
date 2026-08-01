@@ -191,9 +191,13 @@ func (s *Server) handleReload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 重载成功，配置版本就不再是「待重载」了
-	if h, err := s.CurrentConfigHash(r.Context()); err == nil {
-		s.SetConfigHash(h)
+	// 重载成功，只更新**这一个**绑定的配置版本。绝不能调
+	// s.CurrentConfigHash + s.SetConfigHash 去重算并整体写回全部
+	// 绑定的哈希——那等于「按绑定重载却按全库重算」：只重载了 b，
+	// 若把其余绑定的哈希也跟着刷新成「当前」，其余绑定明明还在跑
+	// 旧引擎，却会被判定成不再 stale。
+	if h, err := s.currentBindingHash(r.Context(), b); err == nil {
+		s.SetBindingConfigHash(b.ID, h)
 	}
 	respondJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }

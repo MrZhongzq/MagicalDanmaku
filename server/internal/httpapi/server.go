@@ -65,7 +65,7 @@ type Server struct {
 	qrLogin qrStarter
 	hub     *Hub
 	runtime *runtimeRegistry
-	cfgHash configHash
+	cfgHash configHashes
 
 	// staticHandler 服务前端产物与 SPA 回退，由 mountStatic 装配。
 	// 不挂在 mux 上，见 static.go 里的说明。
