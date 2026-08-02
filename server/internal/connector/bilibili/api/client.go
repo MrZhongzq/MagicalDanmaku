@@ -29,6 +29,12 @@ var defaultBaseURLs = map[string]string{
 	"sendMsg":   "https://api.live.bilibili.com/msg/send",
 	"addBlock":  "https://api.live.bilibili.com/xlive/web-ucenter/v1/banned/AddSilentUser",
 	"delBlock":  "https://api.live.bilibili.com/xlive/web-ucenter/v1/banned/DelSilentUser",
+	// 以下三个是 PK 场景专用：查「对面」直播间的人数与大航海。
+	// 接口地址与字段路径取自原 C++ 项目 bili_liveservice.cpp 里真实调用过的
+	// 参数（行号见 task-5-api-research.md），不是从通用知识里猜的。
+	"roomOnline":  "https://api.live.bilibili.com/xlive/web-room/v1/index/getInfoByRoom",
+	"guardTotal":  "https://api.live.bilibili.com/xlive/app-room/v2/guardTab/topListNew",
+	"guardOnline": "https://api.live.bilibili.com/xlive/app-room/v2/guardTab/topList",
 }
 
 // riskControlCode 是 B 站的风控错误码。
