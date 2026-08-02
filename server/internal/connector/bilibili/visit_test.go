@@ -107,15 +107,27 @@ func TestClassifyVisitFromOpponentByFanMedal(t *testing.T) {
 	}
 }
 
-// TestClassifyVisitFromOpponentByAudienceSet 按真实管道顺序摆数据：
-// u1 是真实存在的对面观众，先在对面房间发过言（真实管道里 runOpponent
-// 会同步调用 trackOpposite，见 opponent_link.go），然后才跑来我方房间
-// 发言，此时应该命中判据 2。
+// TestClassifyVisitFromOpponentByAudienceSet 是第三轮审查 New-2 的核心
+// 回归测试：必须按真实管道顺序摆数据，而且必须让命中路径本身真的经过
+// `observeMine`，否则测不出 mineSeed 被误写成 mine 这个回退（第二轮
+// 审查特别警告过的踩坑写法）。
+//
+// 真实管道里 u1 先在对面房间发过言（runOpponent 转发前先调用
+// trackOpposite），然后跑来我方房间发言——而 client.go 的事件钩子
+// observeMine 对*任何*到达消费者之前的本房间事件都会同步执行
+// （handleMessage 无条件调用 hook(ev)，不管这个人是不是"真的算我方的"），
+// 所以到 ClassifyVisit 被调用的这一刻，u1 必然已经被 observeMine 写进了
+// 实时 mine——如果排除条件读的是 mine 而不是 mineSeed，这里会被误判成
+// "他是我方老观众"从而排除掉、判定失败。上一版测试没有调用 observeMine，
+// 所以查 mine 和查 mineSeed 在测试里看起来行为一样（复审变异 mineSeed→mine
+// 后这条测试依然是绿的，抓不到），这一版补上这一步，让它真正对这个
+// 回退敏感。
 func TestClassifyVisitFromOpponentByAudienceSet(t *testing.T) {
 	p := newTestPkLinkWithRound("self", "opp")
 	p.trackOpposite("opp", danmakuFrom("opp", "u1", nil)) // u1 先在对面说过话
 
 	ev := danmakuFrom("self", "u1", nil) // 没有戴任何粉丝牌，现在跑来我方
+	p.observeMine(ev)                    // 真实管道：client.go 的钩子会先同步跑一遍
 
 	got, ok := p.ClassifyVisit(ev)
 	if !ok {
@@ -155,6 +167,47 @@ func TestClassifyVisitFromOpponentIgnoresOwnRegularWhoVisitedAndReturned(t *test
 
 	if got, ok := p.ClassifyVisit(hostEv); ok {
 		t.Fatalf("我方常驻观众回到我方房间，不应该被判定成「对面来的客人」，实际判定为 %+v", got)
+	}
+}
+
+// TestClassifyVisitFromOpponentMisclassifiesOwnRegularWhenSeedIncomplete
+// 是第三轮审查 New-1 的记录性测试：钉住一个已知、经过裁决接受的局限，
+// 不是要修的缺陷。
+//
+// 场景：u1 事实上是 PK 前就已经是我方的常驻观众，但因为播种
+// mineSeed 的那一路（RoomRecentDanmakuUIDs 拉近期弹幕发送者）要么还
+// 没跑完（connect 返回到 seedAudiences 那个独立 goroutine 真正播种
+// 完成之间有一个窗口）、要么请求失败（seedAudiences 对失败只 Warn +
+// continue，此后整场 PK 种子集合都不会再补全，是永久性的，不是暂时
+// 的）——总之 u1 没能进 mineSeed。他中途去对面串了个门、又回到我方
+// 房间发言，跟一个真实的对面观众在协议层完全没有区别，会被误判成
+// TypeVisitFromOpponent。
+//
+// 裁决（选项 b）：不加"种子未就绪就不判"的门——"未就绪"（暂时）和
+// "HTTP 失败后永久不完整"是两种性质不同的状态，一道门只能盖住前者，
+// 而且会让串门判定在 PK 刚开始的一段时间内整体失效，代价不比现在的
+// 误判小。保留当前行为，用这条测试把它钉成明确记录在案的已知局限，
+// 不是没人知道的隐藏缺陷。完整的权衡记录见 opponent_link.go
+// seedAudiences 函数上方的注释和 task-6b-report.md 的 New-1 一节。
+func TestClassifyVisitFromOpponentMisclassifiesOwnRegularWhenSeedIncomplete(t *testing.T) {
+	p := newTestPkLinkWithRound("self", "opp")
+	// 故意不调用 p.seedMine("u1")：模拟播种 u1 这个老观众的那次 HTTP
+	// 请求还没跑完/已经失败，mineSeed 里没有他。
+
+	p.trackOpposite("opp", danmakuFrom("opp", "u1", nil)) // 他中途去对面说了句话
+
+	ev := danmakuFrom("self", "u1", nil) // 现在他回到我方房间
+	p.observeMine(ev)
+
+	got, ok := p.ClassifyVisit(ev)
+	if !ok {
+		t.Fatal("已知局限的记录性断言失败：本该复现「种子不完整时被误判」这个已知行为，" +
+			"实际却没有命中——如果这里变成了 false，说明底层判定逻辑变了，" +
+			"请回读 New-1 的权衡记录，确认是否需要同步更新这条测试和相关注释")
+	}
+	if got.Type != event.TypeVisitFromOpponent {
+		t.Errorf("Type = %v, 期望 %v（误判成了「对面来的客人」，这正是这条测试要钉住的已知局限）",
+			got.Type, event.TypeVisitFromOpponent)
 	}
 }
 
