@@ -294,6 +294,9 @@ func TestAggregateSpecValidate(t *testing.T) {
 	if err := (AggregateSpec{Window: time.Second, By: "坏分组"}).Validate(); err == nil {
 		t.Error("未知分组键应当报错")
 	}
+	if err := (AggregateSpec{Window: time.Second, By: AggregateByBlindBox}).Validate(); err != nil {
+		t.Errorf("blindBox 分组键应当合法: %v", err)
+	}
 }
 
 func TestTriggerHoldsEvents(t *testing.T) {

@@ -1,6 +1,9 @@
 package rules
 
 import (
+	"fmt"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -187,6 +190,15 @@ func (a *Aggregator) groupKey(b *bucket) string {
 	case AggregateByGift:
 		name, _ := LookupPath(b.vars, "gift.name")
 		return string(b.typ) + "\x00" + b.uid + "\x00" + toString(name)
+	case AggregateByBlindBox:
+		// 按盲盒名称分组，而不是按爆出的结果礼物名（那是 AggregateByGift
+		// 的键）。同一个盲盒可能爆出不同的礼物（星光铃铛/梦雾纸签/…），
+		// 这些结果礼物在第一步 bucketKey 已经被分到了不同的桶里；这里
+		// 必须用盲盒名把它们重新收拢到同一组，否则「幸运盲盒」和「心动
+		// 盲盒」交叉送时会被结果礼物名切得七零八落，且盈亏无法按盲盒
+		// 类型分别结算（用户原话：「心动和幸运交叉送也要分开统计盈亏」）。
+		name, _ := LookupPath(b.vars, "gift.blindBox.name")
+		return string(b.typ) + "\x00" + b.uid + "\x00" + toString(name)
 	default: // AggregateByType
 		return string(b.typ)
 	}
@@ -203,6 +215,15 @@ func mergeBuckets(bs []*bucket) Trigger {
 	seenUser := make(map[string]bool, len(bs))
 	gifts := make([]string, 0, len(bs))
 	seenGift := make(map[string]bool, len(bs))
+
+	// 盲盒盈亏结算：投入取 gift.totalCoin（用户实际花的），产出取
+	// gift.price × gift.count（爆出礼物的价值 × 次数）。同一分组内
+	// （AggregateByBlindBox 按盲盒名分组）可能混有多种不同的爆出结果
+	// 礼物，它们在第一步已经被 bucketKey 分到了不同的 bucket，所以这里
+	// 必须逐个 bucket 累加，不能只取 first 的一份。
+	var blindBoxName string
+	var blindBoxCount, blindBoxCost, blindBoxGain int64
+	hasBlindBox := false
 
 	for _, b := range bs {
 		events = append(events, b.events...)
@@ -221,13 +242,76 @@ func mergeBuckets(bs []*bucket) Trigger {
 				gifts = append(gifts, s)
 			}
 		}
+		if name, ok := LookupPath(b.vars, "gift.blindBox.name"); ok {
+			if s := toString(name); s != "" {
+				hasBlindBox = true
+				if blindBoxName == "" {
+					blindBoxName = s
+				}
+				count, _ := LookupPath(b.vars, "gift.count")
+				price, _ := LookupPath(b.vars, "gift.price")
+				totalCoin, _ := LookupPath(b.vars, "gift.totalCoin")
+				blindBoxCount += toInt64(count)
+				blindBoxGain += toInt64(price) * toInt64(count)
+				blindBoxCost += toInt64(totalCoin)
+			}
+		}
 	}
 
 	vars["count"] = len(bs)
 	vars["users"] = users
 	vars["gifts"] = gifts
 
+	if hasBlindBox {
+		profit := blindBoxGain - blindBoxCost
+		vars["blindBox"] = map[string]any{
+			"name":       blindBoxName,
+			"count":      blindBoxCount,
+			"cost":       blindBoxCost,
+			"gain":       blindBoxGain,
+			"profit":     profit,
+			"costYuan":   formatYuan(blindBoxCost),
+			"gainYuan":   formatYuan(blindBoxGain),
+			"profitYuan": formatYuan(profit),
+		}
+	}
+
 	return Trigger{Type: first.typ, Events: events, Vars: vars}
+}
+
+// toInt64 把 LookupPath 取回的任意数值类型转成 int64，取不到时返回 0。
+func toInt64(v any) int64 {
+	f, ok := toFloat(v)
+	if !ok {
+		return 0
+	}
+	return int64(f)
+}
+
+// formatYuan 把 1/1000 元的原始整数值格式化成「元」的展示字符串，
+// 如 5000 → "5"，5200 → "5.2"，-11000 → "-11"。
+//
+// 用字符串而不是 float64：{{blindBox.profitYuan}} 在模板里直接就是
+// "-4.1" 这种能读的数字；float64 存小数在模板渲染时可能出现
+// "-4.099999999999999" 这种二进制浮点误差导致的展示问题。存储与
+// 计算全程只用整数（1/100 电池），只在这里生成展示字符串时才做除法，
+// 且用字符串拼接而非浮点除法，不引入任何浮点运算。
+func formatYuan(raw int64) string {
+	neg := raw < 0
+	if neg {
+		raw = -raw
+	}
+	whole := raw / 1000
+	frac := raw % 1000
+	s := strconv.FormatInt(whole, 10)
+	if frac != 0 {
+		fracStr := strings.TrimRight(fmt.Sprintf("%03d", frac), "0")
+		s += "." + fracStr
+	}
+	if neg {
+		s = "-" + s
+	}
+	return s
 }
 
 // accumulateGift 累加礼物数量与价值。

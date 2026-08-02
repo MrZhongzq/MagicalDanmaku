@@ -45,6 +45,25 @@ func giftEvent(uid, name, giftName string, count, coin int64) event.Event {
 	}
 }
 
+// blindGiftEvent 构造一次盲盒开出事件。blindPrice 是盲盒售价（单个，
+// 1/100 电池，投入），tipPrice 是爆出的 resultGiftName 这件礼物的
+// 价值（1/100 电池，产出）。TotalCoin 按 event.Gift 的约定
+// == blindPrice * count（真实抓包样本已验证）。
+func blindGiftEvent(uid, uname, blindBoxName, resultGiftName string, blindPrice, tipPrice, count int64) event.Event {
+	return event.Event{
+		Type: event.TypeGift, RoomID: "1", Timestamp: time.Unix(1700000000, 0),
+		Payload: event.Gift{
+			User:      event.User{UID: uid, Username: uname},
+			GiftName:  resultGiftName,
+			Count:     count,
+			CoinType:  "gold",
+			TotalCoin: blindPrice * count,
+			Price:     tipPrice,
+			BlindBox:  &event.BlindBox{Name: blindBoxName, Price: blindPrice, TipPrice: tipPrice},
+		},
+	}
+}
+
 func TestAggregateByTypeMergesAll(t *testing.T) {
 	c := &collector{}
 	// 窗口设很长，用 Flush 手动结算，避免测试依赖真实时间
@@ -523,5 +542,133 @@ func TestPassthroughTriggerGiftsEmptyForNonGiftEvent(t *testing.T) {
 	}
 	if len(gifts) != 0 {
 		t.Errorf("非礼物事件的 gifts 应为空数组，实际 %v", gifts)
+	}
+}
+
+func keysOfTriggerMap(m map[string]Trigger) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
+
+// TestAggregateByBlindBoxSeparatesProfitByName 用用户真实抓包样本
+// （server/blindbox.jsonl，uid 3546956351671045「子どもの箱」）里一段
+// 交叉送幸运盲盒与心动盲盒的真实记录钉住分组与盈亏结果。
+//
+// 原始记录（行号/爆出礼物/爆出价值 tip/盲盒售价 cost，均 1/100 电池）：
+//
+//	L159 幸运盲盒→星光铃铛 tip=5200  cost=5000
+//	L167 心动盲盒→爱心抱枕 tip=16000 cost=15000
+//	L174 幸运盲盒→梦雾纸签 tip=10000 cost=5000
+//	L180 心动盲盒→棉花糖   tip=9000  cost=15000
+//	L189 幸运盲盒→星光铃铛 tip=5200  cost=5000
+//	L190 心动盲盒→棉花糖   tip=9000  cost=15000
+//
+// 按盲盒名分组（本测试要验证的结果）：
+//
+//	幸运盲盒：投入 3×5000=15000，产出 5200+10000+5200=20400，盈亏 +5400
+//	心动盲盒：投入 3×15000=45000，产出 16000+9000+9000=34000，盈亏 -11000
+//
+// 若不按盲盒名分组、只按 uid 合并（见下方变异测试的验证方式）：
+// 投入合计 60000，产出合计 54400，盈亏 -5600——把幸运盲盒的盈利与
+// 心动盲盒的亏损混成一个错误的「总共亏 5600」结论。这正是用户强调
+// 「心动和幸运交叉送也要分开统计盈亏」所引用的样本证据。
+func TestAggregateByBlindBoxSeparatesProfitByName(t *testing.T) {
+	c := &collector{}
+	agg := NewAggregator(AggregateSpec{Window: time.Hour, By: AggregateByBlindBox}, c.add)
+	defer agg.Close()
+
+	const uid, uname = "3546956351671045", "子どもの箱"
+	agg.Add(blindGiftEvent(uid, uname, "幸运盲盒", "星光铃铛", 5000, 5200, 1))   // L159
+	agg.Add(blindGiftEvent(uid, uname, "心动盲盒", "爱心抱枕", 15000, 16000, 1)) // L167
+	agg.Add(blindGiftEvent(uid, uname, "幸运盲盒", "梦雾纸签", 5000, 10000, 1))  // L174
+	agg.Add(blindGiftEvent(uid, uname, "心动盲盒", "棉花糖", 15000, 9000, 1))   // L180
+	agg.Add(blindGiftEvent(uid, uname, "幸运盲盒", "星光铃铛", 5000, 5200, 1))   // L189
+	agg.Add(blindGiftEvent(uid, uname, "心动盲盒", "棉花糖", 15000, 9000, 1))   // L190
+	agg.Flush()
+
+	got := c.all()
+	if len(got) != 2 {
+		t.Fatalf("幸运盲盒与心动盲盒应分成 2 组，实际 %d 组", len(got))
+	}
+
+	byName := map[string]Trigger{}
+	for _, tr := range got {
+		name, _ := LookupPath(tr.Vars, "blindBox.name")
+		byName[toString(name)] = tr
+	}
+
+	lucky, ok := byName["幸运盲盒"]
+	if !ok {
+		t.Fatalf("缺少幸运盲盒分组，实际分组名 %v", keysOfTriggerMap(byName))
+	}
+	if cnt, _ := LookupPath(lucky.Vars, "blindBox.count"); cnt != int64(3) {
+		t.Errorf("幸运盲盒 blindBox.count = %v，期望 3", cnt)
+	}
+	if cost, _ := LookupPath(lucky.Vars, "blindBox.cost"); cost != int64(15000) {
+		t.Errorf("幸运盲盒 blindBox.cost = %v，期望 15000", cost)
+	}
+	if gain, _ := LookupPath(lucky.Vars, "blindBox.gain"); gain != int64(20400) {
+		t.Errorf("幸运盲盒 blindBox.gain = %v，期望 20400", gain)
+	}
+	if profit, _ := LookupPath(lucky.Vars, "blindBox.profit"); profit != int64(5400) {
+		t.Errorf("幸运盲盒 blindBox.profit = %v，期望 5400（用户断言：幸运赚 5400）", profit)
+	}
+	if s, _ := LookupPath(lucky.Vars, "blindBox.profitYuan"); s != "5.4" {
+		t.Errorf("幸运盲盒 blindBox.profitYuan = %v，期望 \"5.4\"", s)
+	}
+	if s, _ := LookupPath(lucky.Vars, "blindBox.costYuan"); s != "15" {
+		t.Errorf("幸运盲盒 blindBox.costYuan = %v，期望 \"15\"", s)
+	}
+	if s, _ := LookupPath(lucky.Vars, "blindBox.gainYuan"); s != "20.4" {
+		t.Errorf("幸运盲盒 blindBox.gainYuan = %v，期望 \"20.4\"", s)
+	}
+
+	heartbeat, ok := byName["心动盲盒"]
+	if !ok {
+		t.Fatalf("缺少心动盲盒分组，实际分组名 %v", keysOfTriggerMap(byName))
+	}
+	if cnt, _ := LookupPath(heartbeat.Vars, "blindBox.count"); cnt != int64(3) {
+		t.Errorf("心动盲盒 blindBox.count = %v，期望 3", cnt)
+	}
+	if cost, _ := LookupPath(heartbeat.Vars, "blindBox.cost"); cost != int64(45000) {
+		t.Errorf("心动盲盒 blindBox.cost = %v，期望 45000", cost)
+	}
+	if gain, _ := LookupPath(heartbeat.Vars, "blindBox.gain"); gain != int64(34000) {
+		t.Errorf("心动盲盒 blindBox.gain = %v，期望 34000", gain)
+	}
+	if profit, _ := LookupPath(heartbeat.Vars, "blindBox.profit"); profit != int64(-11000) {
+		t.Errorf("心动盲盒 blindBox.profit = %v，期望 -11000（用户断言：心动亏 11000）", profit)
+	}
+	if s, _ := LookupPath(heartbeat.Vars, "blindBox.profitYuan"); s != "-11" {
+		t.Errorf("心动盲盒 blindBox.profitYuan = %v，期望 \"-11\"", s)
+	}
+}
+
+// TestFormatYuan 钉住「元」展示字符串的换算：原始值单位是 1/100 电池，
+// 元 = 原始值 / 1000。只用整数运算，不经过 float64，避免出现
+// "-4.099999999999999" 这类不能读的展示值。
+func TestFormatYuan(t *testing.T) {
+	cases := []struct {
+		raw  int64
+		want string
+	}{
+		{0, "0"},
+		{5000, "5"},
+		{5200, "5.2"},
+		{15000, "15"},
+		{-11000, "-11"},
+		{5400, "5.4"},
+		{-4100, "-4.1"},
+		{100, "0.1"},
+		{10, "0.01"},
+		{1, "0.001"},
+	}
+	for _, c := range cases {
+		if got := formatYuan(c.raw); got != c.want {
+			t.Errorf("formatYuan(%d) = %q，期望 %q", c.raw, got, c.want)
+		}
 	}
 }

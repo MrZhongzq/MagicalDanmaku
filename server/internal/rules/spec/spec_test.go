@@ -167,6 +167,31 @@ do:
 	}
 }
 
+// TestAggregateByBlindBoxThroughToRule 确认 by: blindBox 能从序列化形式
+// 一路转成领域模型的 rules.AggregateByBlindBox，且不被 Validate 拒绝——
+// 盲盒聚合与 by: gift/type/user 走的是同一条转换路径，本身不需要
+// spec 包新增任何代码，这条测试钉住的是「没漏接」而非新逻辑。
+func TestAggregateByBlindBoxThroughToRule(t *testing.T) {
+	r, err := spec.Rule{
+		Name: "盲盒盈亏播报",
+		On:   []string{"gift"},
+		Aggregate: &spec.Aggregate{
+			Window: spec.Duration(3 * time.Second),
+			By:     "blindBox",
+		},
+		Do: []spec.Action{{
+			Type:     "danmaku",
+			Template: []string{"{{.blindBox.name}} 本轮盈亏 {{.blindBox.profitYuan}} 元"},
+		}},
+	}.ToRule()
+	if err != nil {
+		t.Fatalf("ToRule 报错: %v", err)
+	}
+	if r.Aggregate.By != rules.AggregateByBlindBox {
+		t.Errorf("Aggregate.By = %q，期望 %q", r.Aggregate.By, rules.AggregateByBlindBox)
+	}
+}
+
 func TestToRuleDefaultsEnabledToTrue(t *testing.T) {
 	// 写了规则却不生效最反直觉，所以未写 enabled 时默认启用
 	r, err := spec.Rule{

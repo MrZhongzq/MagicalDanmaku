@@ -37,10 +37,23 @@ func VarsFromEvent(ev event.Event) map[string]any {
 		}
 	case event.Gift:
 		v["user"] = userVars(p.User)
-		v["gift"] = map[string]any{
+		gm := map[string]any{
 			"id": p.GiftID, "name": p.GiftName, "count": p.Count,
 			"coinType": p.CoinType, "totalCoin": p.TotalCoin, "action": p.Action,
+			"price": p.Price,
+			// isBlindBox 不走「零值不写入」的惯例——它必须在普通礼物上也
+			// 明确写成 false，否则常规礼物答谢规则想用
+			// {field:"gift.isBlindBox", op:"eq", value:false} 把盲盒排除
+			// 掉时，路径缺失会让条件在普通礼物上也匹配不到，规则整个失效。
+			"isBlindBox": p.BlindBox != nil,
 		}
+		if p.BlindBox != nil {
+			gm["blindBox"] = map[string]any{
+				"name": p.BlindBox.Name, "giftId": p.BlindBox.GiftID,
+				"price": p.BlindBox.Price, "tipPrice": p.BlindBox.TipPrice,
+			}
+		}
+		v["gift"] = gm
 	case event.GiftCombo:
 		v["user"] = userVars(p.User)
 		v["gift"] = map[string]any{
@@ -142,6 +155,13 @@ type Variable struct {
 // 少一项（gifts 就是这么漏掉的，直到全批次终审才补上）。新增聚合期
 // 变量时记得回来加一行，并检查 mergeBuckets/PassthroughTrigger 两处
 // 是否都填了它。
+//
+// blindBox.* 是这个盲区里最新的一批：它们只在 AggregateByBlindBox 分组
+// 触发、mergeBuckets 结算出盈亏后才存在（PassthroughTrigger 不填——
+// 盲盒盈亏统计的前提就是配了盲盒聚合，没配聚合的直通触发本来就不该有
+// 这套字段），与 gifts 同一类聚合期变量，同样只靠这里人工登记来对
+// /api/meta/variables 和条件构建器生效，检查方式见 vars_test.go 里的
+// TestVariableCatalogHasBlindBoxFields。
 var commonVariables = []Variable{
 	{Path: "type", Label: "事件类型"},
 	{Path: "roomId", Label: "直播间号"},
@@ -149,6 +169,14 @@ var commonVariables = []Variable{
 	{Path: "count", Label: "合并窗口内的事件数量（仅聚合规则触发时存在）", Optional: true},
 	{Path: "users", Label: "合并窗口内涉及的用户昵称列表（仅聚合规则触发时存在）", Optional: true},
 	{Path: "gifts", Label: "合并窗口内涉及的礼物名列表，去重（仅聚合规则触发时存在）", Optional: true},
+	{Path: "blindBox.name", Label: "本轮盲盒名称（仅按盲盒聚合触发时存在）", Optional: true},
+	{Path: "blindBox.count", Label: "本轮盲盒开出次数（仅按盲盒聚合触发时存在）", Optional: true},
+	{Path: "blindBox.cost", Label: "本轮盲盒投入，1/100 电池（仅按盲盒聚合触发时存在）", Optional: true},
+	{Path: "blindBox.gain", Label: "本轮盲盒产出，1/100 电池（仅按盲盒聚合触发时存在）", Optional: true},
+	{Path: "blindBox.profit", Label: "本轮盲盒盈亏=产出-投入，1/100 电池，可为负（仅按盲盒聚合触发时存在）", Optional: true},
+	{Path: "blindBox.costYuan", Label: "本轮盲盒投入（元，展示用字符串；仅按盲盒聚合触发时存在）", Optional: true},
+	{Path: "blindBox.gainYuan", Label: "本轮盲盒产出（元，展示用字符串；仅按盲盒聚合触发时存在）", Optional: true},
+	{Path: "blindBox.profitYuan", Label: "本轮盲盒盈亏（元，展示用字符串，可为负；仅按盲盒聚合触发时存在）", Optional: true},
 }
 
 // userVariables 是 userVars 展开产出的字段，路径不带前缀——
@@ -221,6 +249,12 @@ func VariableCatalog() (common []Variable, byEvent map[event.Type][]Variable) {
 			{Path: "gift.coinType", Label: "瓜子类型（gold 金瓜子 / silver 银瓜子）"},
 			{Path: "gift.totalCoin", Label: "总价值（瓜子）"},
 			{Path: "gift.action", Label: "动作描述（如「投喂」）"},
+			{Path: "gift.price", Label: "单价，1/100 电池；盲盒场景下为爆出礼物的价值"},
+			{Path: "gift.isBlindBox", Label: "是否为盲盒礼物"},
+			{Path: "gift.blindBox.name", Label: "盲盒名称（如「幸运盲盒」），仅盲盒礼物存在", Optional: true},
+			{Path: "gift.blindBox.giftId", Label: "盲盒自身的礼物 ID，仅盲盒礼物存在", Optional: true},
+			{Path: "gift.blindBox.price", Label: "盲盒售价（单个），1/100 电池，仅盲盒礼物存在", Optional: true},
+			{Path: "gift.blindBox.tipPrice", Label: "爆出礼物的价值，1/100 电池，仅盲盒礼物存在", Optional: true},
 		}...),
 		event.TypeGiftCombo: append(append([]Variable{}, user...), []Variable{
 			{Path: "gift.id", Label: "礼物 ID"},

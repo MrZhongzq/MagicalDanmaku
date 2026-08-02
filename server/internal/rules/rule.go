@@ -33,9 +33,10 @@ type AggregateBy string
 
 // 全部分组方式。
 const (
-	AggregateByType AggregateBy = "type" // 按事件类型：窗口内全部合成一条
-	AggregateByUser AggregateBy = "user" // 按类型+UID：仅去重不聚合
-	AggregateByGift AggregateBy = "gift" // 按类型+UID+礼物名：数量累加
+	AggregateByType     AggregateBy = "type"     // 按事件类型：窗口内全部合成一条
+	AggregateByUser     AggregateBy = "user"     // 按类型+UID：仅去重不聚合
+	AggregateByGift     AggregateBy = "gift"     // 按类型+UID+礼物名：数量累加
+	AggregateByBlindBox AggregateBy = "blindBox" // 按类型+UID+盲盒名称：盲盒单独聚合、结算盈亏
 )
 
 // validOps 是条件支持的全部操作符。
@@ -294,7 +295,7 @@ func (s AggregateSpec) Validate() error {
 		return fmt.Errorf("minCount 不能为负")
 	}
 	switch s.By {
-	case AggregateByType, AggregateByUser, AggregateByGift:
+	case AggregateByType, AggregateByUser, AggregateByGift, AggregateByBlindBox:
 		return nil
 	default:
 		return fmt.Errorf("未知的分组键 %q", s.By)

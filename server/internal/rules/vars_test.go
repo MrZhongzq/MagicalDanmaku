@@ -95,6 +95,72 @@ func TestVarsFromGift(t *testing.T) {
 	}
 }
 
+// TestVarsFromGiftBlindBox 钉住盲盒礼物暴露的判据与附加字段：
+// gift.isBlindBox 供常规礼物答谢规则用 when 条件排除盲盒
+// （{field: "gift.isBlindBox", op: "eq", value: false}），
+// gift.blindBox.* 供「只答谢心动盲盒」这类条件使用。
+func TestVarsFromGiftBlindBox(t *testing.T) {
+	ev := event.Event{
+		Type: event.TypeGift, RoomID: "1", Timestamp: time.Unix(1700000000, 0),
+		Payload: event.Gift{
+			User:      event.User{UID: "9", Username: "土豪"},
+			GiftName:  "星光铃铛",
+			Count:     1,
+			CoinType:  "gold",
+			TotalCoin: 5000,
+			Price:     5200,
+			BlindBox:  &event.BlindBox{Name: "幸运盲盒", GiftID: 35206, Price: 5000, TipPrice: 5200},
+		},
+	}
+	v := VarsFromEvent(ev)
+	cases := map[string]any{
+		"gift.price":             int64(5200),
+		"gift.isBlindBox":        true,
+		"gift.blindBox.name":     "幸运盲盒",
+		"gift.blindBox.giftId":   int64(35206),
+		"gift.blindBox.price":    int64(5000),
+		"gift.blindBox.tipPrice": int64(5200),
+	}
+	for path, want := range cases {
+		got, ok := LookupPath(v, path)
+		if !ok {
+			t.Errorf("路径 %q 不存在", path)
+			continue
+		}
+		if got != want {
+			t.Errorf("%s = %v (%T), 期望 %v (%T)", path, got, got, want, want)
+		}
+	}
+}
+
+// TestVarsFromGiftNotBlindBoxIsBlindBoxFalse 钉住 gift.isBlindBox 在非
+// 盲盒礼物上也必须存在且为 false——它不能走「零值不写入」的惯例，
+// 否则 when 条件 {field:"gift.isBlindBox", op:"eq", value:false} 在
+// 普通礼物上会因路径缺失而永远匹配不到，常规礼物答谢规则就排除不掉
+// 盲盒之外的东西（本该总是命中却总是不命中）。
+func TestVarsFromGiftNotBlindBoxIsBlindBoxFalse(t *testing.T) {
+	ev := event.Event{
+		Type: event.TypeGift, RoomID: "1", Timestamp: time.Unix(1700000000, 0),
+		Payload: event.Gift{
+			User:      event.User{UID: "9", Username: "土豪"},
+			GiftName:  "小花花",
+			Count:     1,
+			TotalCoin: 100,
+		},
+	}
+	v := VarsFromEvent(ev)
+	isBlind, ok := LookupPath(v, "gift.isBlindBox")
+	if !ok {
+		t.Fatal("gift.isBlindBox 应始终存在，即使不是盲盒")
+	}
+	if isBlind != false {
+		t.Errorf("gift.isBlindBox = %v，非盲盒礼物应为 false", isBlind)
+	}
+	if _, ok := LookupPath(v, "gift.blindBox.name"); ok {
+		t.Error("非盲盒礼物不应存在 gift.blindBox.name")
+	}
+}
+
 func TestVarsFromGuardBuy(t *testing.T) {
 	ev := event.Event{
 		Type: event.TypeGuardBuy, RoomID: "1", Timestamp: time.Unix(1700000000, 0),
@@ -236,10 +302,44 @@ func TestVariableCatalogCommonMatchesVarsFromEvent(t *testing.T) {
 			t.Errorf("VarsFromEvent 未产出公共字段 %q", p)
 		}
 	}
-	for _, p := range []string{"count", "users", "gifts"} {
+	for _, p := range []string{
+		"count", "users", "gifts",
+		"blindBox.name", "blindBox.count", "blindBox.cost", "blindBox.gain",
+		"blindBox.profit", "blindBox.costYuan", "blindBox.gainYuan", "blindBox.profitYuan",
+	} {
 		if commonPaths[p] && !optional[p] {
 			t.Errorf("公共变量 %q 只在合并窗口聚合后才存在，VarsFromEvent 本身不产出，"+
 				"必须标记 Optional", p)
+		}
+	}
+}
+
+// TestVariableCatalogHasBlindBoxFields 钉住 blindBox.* 确实在公共变量
+// 清单里——它和 gifts 是同一类聚合期变量（见 commonVariables 定义处
+// 的注释）：mergeBuckets 结算时才填，VarsFromEvent 本身永远不产出，
+// 全靠这里人工登记；漏了不会有 TestVariableCatalogMatchesVarsFromEvent
+// 报红，只会在 /api/meta/variables 和条件构建器下拉里悄悄少几项。
+func TestVariableCatalogHasBlindBoxFields(t *testing.T) {
+	common, _ := VariableCatalog()
+	want := []string{
+		"blindBox.name", "blindBox.count", "blindBox.cost", "blindBox.gain",
+		"blindBox.profit", "blindBox.costYuan", "blindBox.gainYuan", "blindBox.profitYuan",
+	}
+	got := map[string]bool{}
+	optional := map[string]bool{}
+	for _, v := range common {
+		got[v.Path] = true
+		if v.Optional {
+			optional[v.Path] = true
+		}
+	}
+	for _, p := range want {
+		if !got[p] {
+			t.Errorf("公共变量清单里没有 %q——mergeBuckets 早就在填这个变量了，清单没跟上", p)
+			continue
+		}
+		if !optional[p] {
+			t.Errorf("%q 是聚合期变量，未按盲盒聚合触发时不存在，必须标记 Optional", p)
 		}
 	}
 }
@@ -303,7 +403,12 @@ func TestVariableCatalogMatchesVarsFromEvent(t *testing.T) {
 			Type: event.TypeGift, RoomID: "1", Timestamp: time.Unix(1700000000, 0),
 			Payload: event.Gift{
 				User: fullUser, GiftID: 1, GiftName: "礼物", Count: 1,
-				CoinType: "gold", TotalCoin: 100, Action: "投喂",
+				CoinType: "gold", TotalCoin: 100, Action: "投喂", Price: 100,
+				// BlindBox 填满，让 gift.blindBox.* 这组 Optional 字段也走到
+				// 「实际产出」一侧被验证——不填的话这些路径在 catalog 里
+				// 声明了 Optional 就永远不会被真正核对到，与 gifts 当年
+				// 漏掉的路数一样：清单和实现悄悄漂开也不会有测试报红。
+				BlindBox: &event.BlindBox{Name: "测试盲盒", GiftID: 999, Price: 5000, TipPrice: 5200},
 			},
 		},
 		event.TypeGiftCombo: {
