@@ -9,15 +9,26 @@ import (
 )
 
 // pkTeardownGraceLimit 是 disconnect 兜底等待清理完成的硬上限。正常情况
-// 下清理在毫秒级完成；给上限是为了防一个慢角落：子连接可能卡在
-// authenticate()（client.go）里等对面服务器的认证回复——那段代码用的是
-// 固定 authTimeout 读超时，不接受 ctx，ctx 取消对它不生效，只能等读
-// 超时自己触发。disconnect 常常同步跑在宿主 Client.Run 的 defer 里，
-// 不能因为一个（可能异常/被风控）对手服务器迟迟不回包，就把宿主整个
-// 退出流程拖住到无限久——超过这个上限就记录警告后放弃等待，让调用方
-// 尽快拿回控制权；子连接自己的 goroutine 仍然会在各自的读超时触发后
-// 正常退出，不是真正意义上的无限泄漏，只是不再同步阻塞在这里等它。
-const pkTeardownGraceLimit = authTimeout + 5*time.Second
+// 下清理在毫秒级完成。
+//
+// authenticate() 的读、写两个阶段都已经接了 ctx 观察者（client.go），
+// ctx 取消会立即 conn.Close()，不会再卡在 authTimeout 那 10 秒——这个
+// 上限不再是为了兜"authenticate 不感知 ctx"这件事，那条已经被修掉了。
+// 真正兜的是仓库里目前唯一还找不到 ctx 出口的角落：conn.WriteMessage
+// 从未设置过 SetWriteDeadline，如果对端 TCP 接收窗口已经填满（异常/
+// 恶意对手连接的常见表现），这个写调用本身会无限阻塞，watcher 的
+// conn.Close() 能否让它及时返回取决于底层 net.Conn 的实现（多数
+// 平台上会返回 use of closed network connection，但这不是语言层面的
+// 保证）。disconnect 常常同步跑在宿主 Client.Run 的 defer 里，不能
+// 因为一个连接卡在这种边角情况，就把宿主整个退出流程拖住到无限久——
+// 超过这个上限就记录警告后放弃等待，让调用方尽快拿回控制权；子连接
+// 自己的 goroutine 该退出还是会退出，不是真正意义上的无限泄漏，只是
+// 不再同步阻塞在这里等它。
+//
+// 不再从 authTimeout 派生：两者已经没有因果关系，写成
+// authTimeout+5s 会让后人误以为这个值还在兜认证读超时，独立写成
+// 15s，含义是"给这类极端边角情况一个宽松但有限的等待窗口"。
+const pkTeardownGraceLimit = 15 * time.Second
 
 // PkLink 管理 PK 期间到对手房间的若干条弹幕连接。
 //
@@ -127,14 +138,21 @@ func (p *PkLink) connect(ctx context.Context, members []event.PkMember) {
 	p.mu.Unlock()
 
 	// 必须在起任何连接、做任何阻塞工作（下面的播种 HTTP 调用）之前，
-	// 就把这一轮登记到宿主 Client 上——宿主 Run 的 defer 兜底清理靠
-	// host.pkLink 才能找到并断开这一轮。审查曾指出：如果登记发生在
-	// seedAudiences 那 N+1 次 HTTP 调用（预算最长 opponentSnapshotBudget）
-	// 之后，宿主若恰好在这个窗口内退出，defer 读到的 pkLink 还是 nil，
-	// 这一轮连接会永久变成孤儿——探针复现过。registerPKLink 跟 Run 的
-	// defer 共用同一把锁做「读 closed + 写 pkLink」，不管两个 goroutine
-	// 谁先谁后都不会漏；如果它告知宿主已经关闭，说明这次 connect 本身
-	// 就是「宿主已经退出后才发起」，直接自行收尾，不建立任何真实连接。
+	// 就把这一轮登记到宿主 Client 上。
+	//
+	// 真正防泄漏的是 registerPKLink 内部的 closed 检查本身，不是它在
+	// 这里被调用的时机——Run 的 defer 先在 c.mu 下把 closed 置位，
+	// registerPKLink 在同一把 c.mu 下把「读 closed + 写 pkLink」做成
+	// 一次原子操作，两种加锁顺序穷尽后结果都安全，这个结论跟登记发生
+	// 在播种之前还是之后无关（第三轮复审订正，详见
+	// opponent_link_test.go 里 TestStartPKDuringHostShutdownDoesNotLeak
+	// 的完整推导：单独去掉 closed 检查、单独交换顺序都不足以下这个
+	// 结论，第一版报告在这一点上判断错了）。生产路径上 StartPK 全程
+	// 持有 pkMu，EndPK 也要先抢到 pkMu 才能碰 pkLink，两者根本不可能
+	// 在 connect 内部交错——早登记在生产路径下对防泄漏是零贡献，它的
+	// 真正价值是 Important-3：不阻塞调用方消费 Client.Events() 的
+	// 事件循环。如果它告知宿主已经关闭，说明这次 connect 本身就是
+	// 「宿主已经退出后才发起」，直接自行收尾，不建立任何真实连接。
 	if p.host.registerPKLink(p) {
 		cancel()
 		p.finishRound(round)
@@ -206,10 +224,10 @@ func (p *PkLink) finishRound(round *pkRound) {
 
 // disconnect 断开当前这一场 PK 的全部对手连接，等待清理真正完成
 // （goroutine 退出、事件通道关闭、观众集合钩子摘除）才返回，但不会
-// 无限等下去——见 pkTeardownGraceLimit 的注释：子连接可能卡在不接受
-// ctx 的 authenticate() 读超时里，超过上限就放弃等待、记录警告后返回，
-// 不能让一个慢/异常的对手连接把调用方（常常是宿主 Run 的 defer）
-// 拖住无限久。
+// 无限等下去——见 pkTeardownGraceLimit 的注释：子连接的读写两个阶段
+// 已经能响应 ctx 取消，这个上限兜的是仅存的极端边角情况（写调用没有
+// 写超时保护），超过上限就放弃等待、记录警告后返回，不能让一个卡在
+// 边角情况的对手连接把调用方（常常是宿主 Run 的 defer）拖住无限久。
 //
 // 幂等：没有进行中的 PK、或者这场 PK 已经因为 ctx 被外部取消而自行清理
 // 完毕，都是安全的空操作/快速返回——不要求调用方精确知道当前状态。

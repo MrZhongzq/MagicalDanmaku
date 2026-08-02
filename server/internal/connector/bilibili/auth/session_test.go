@@ -185,6 +185,10 @@ func TestSessionConcurrentAccessDoesNotCrash(t *testing.T) {
 // 实现从「复用 s.order」换成了「make 一份新的」，就要证明换完之后
 // 产出的 Cookie 头没有变化。并发安全性本身需要 -race 才能验证，这里
 // 验证不了，如实记录。
+//
+// 断言必须是完整串、按字典序精确匹配，不能只用 strings.Contains 逐个
+// 查存在性——「保证输出确定」正是这个降级分支存在的全部目的，只查
+// 存在性连键的顺序被打乱都测不出来。
 func TestCookieHeaderFallsBackToSortedOrderWhenOrderIncomplete(t *testing.T) {
 	s, err := ParseSession("SESSDATA=xyz; bili_jct=tok; DedeUserID=42")
 	if err != nil {
@@ -196,9 +200,10 @@ func TestCookieHeaderFallsBackToSortedOrderWhenOrderIncomplete(t *testing.T) {
 
 	h := s.CookieHeader()
 
-	for _, want := range []string{"SESSDATA=xyz", "bili_jct=tok", "DedeUserID=42"} {
-		if !strings.Contains(h, want) {
-			t.Errorf("CookieHeader 缺少 %q，实际 %q", want, h)
-		}
+	// 字典序（大写字母的 ASCII 值小于小写字母）：DedeUserID < SESSDATA
+	// < bili_jct。
+	const want = "DedeUserID=42; SESSDATA=xyz; bili_jct=tok"
+	if h != want {
+		t.Errorf("CookieHeader = %q, 期望 %q（按字典序的完整串）", h, want)
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -405,11 +406,14 @@ func TestAuthenticateRespectsCtxCancellation(t *testing.T) {
 func TestClearEventHookIfOwnerDoesNotClobberNewerHook(t *testing.T) {
 	c := NewClient("21452505", api.New(nil))
 
-	// 用 new(int) 而不是 &struct{}{}：Go 对零大小分配的地址不保证唯一
-	// （运行时可能把所有 &struct{}{} 都指向同一个地址），拿它们当"两个
-	// 不同身份的令牌"本身就是错的，会让这条测试自己产生假阳性/假阴性。
-	ownerA := new(int) // 模拟旧一轮的 *pkRound
-	ownerB := new(int) // 模拟新一轮的 *pkRound
+	// 用两个独立的 &pkRound{} 实例模拟"旧一轮"/"新一轮"——注意不能用
+	// &struct{}{} 这类零大小类型当身份令牌：Go 对零大小分配的地址不
+	// 保证唯一（运行时可能把所有 &struct{}{} 都指向同一个地址），拿
+	// 它们当"两个不同身份的令牌"本身就是错的，会让这条测试自己产生
+	// 假阳性/假阴性。pkRound 有实际字段，不是零大小类型，两个实例
+	// 保证是不同的指针。
+	ownerA := &pkRound{} // 模拟旧一轮的 *pkRound
+	ownerB := &pkRound{} // 模拟新一轮的 *pkRound
 
 	var calledB bool
 	c.setEventHook(ownerA, func(event.Event) {})
@@ -436,5 +440,55 @@ func TestClearEventHookIfOwnerDoesNotClobberNewerHook(t *testing.T) {
 	c.mu.Unlock()
 	if hook != nil {
 		t.Error("owner 匹配时应该清掉当前钩子，但钩子仍然存在")
+	}
+}
+
+// TestAuthenticateHandshakeDoesNotLeakGoroutines 覆盖 Minor-3 改动的
+// 副作用风险：ctx 观察者 goroutine 挪到了 conn.WriteMessage 之前，
+// 握手路径（写认证包、读认证回复）本身变得更早起一个 goroutine——
+// 必须确认正常成功的握手不会因此积累悬挂 goroutine。跑 300 次成功
+// 握手，比较前后 runtime.NumGoroutine()，两者应该相等。
+func TestAuthenticateHandshakeDoesNotLeakGoroutines(t *testing.T) {
+	up := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := up.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		if _, _, err := conn.ReadMessage(); err != nil {
+			return
+		}
+		conn.WriteMessage(websocket.BinaryMessage, wire.Encode(wire.OpAuthReply, []byte(`{"code":0}`)))
+	}))
+	t.Cleanup(srv.Close)
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
+	c := NewClient("21452505", api.New(nil))
+
+	runtime.GC()
+	time.Sleep(20 * time.Millisecond)
+	before := runtime.NumGoroutine()
+
+	const iterations = 300
+	for i := 0; i < iterations; i++ {
+		conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+		if err != nil {
+			t.Fatalf("第 %d 次拨号失败: %v", i, err)
+		}
+		if err := c.authenticate(context.Background(), conn, "tok"); err != nil {
+			conn.Close()
+			t.Fatalf("第 %d 次 authenticate 失败: %v", i, err)
+		}
+		conn.Close()
+	}
+
+	runtime.GC()
+	time.Sleep(20 * time.Millisecond)
+	after := runtime.NumGoroutine()
+
+	t.Logf("goroutine 数：before=%d after=%d", before, after)
+	if after > before {
+		t.Errorf("300 次成功握手后 goroutine 数从 %d 涨到 %d，怀疑 watcher goroutine 泄漏", before, after)
 	}
 }

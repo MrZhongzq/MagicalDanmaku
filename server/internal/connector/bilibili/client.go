@@ -105,10 +105,15 @@ type Client struct {
 	hostIndex   int
 	deviceFixed bool // 是否已因风控补齐过设备字段
 
-	onEvent      func(event.Event) // PK 期间的同步观察钩子，见 setEventHook
-	onEventOwner any               // 当前钩子的归属令牌，见 clearEventHookIfOwner
-	pkLink       *PkLink           // 当前进行中的 PK 对面连接管理器，无 PK 时为 nil
-	closed       bool              // Run 的 defer 是否已经跑过；见 registerPKLink
+	onEvent func(event.Event) // PK 期间的同步观察钩子，见 setEventHook
+	// onEventOwner 是当前钩子的归属令牌，见 clearEventHookIfOwner。
+	// 类型写成具体的 *pkRound 而不是 any：目前唯一的调用方就是
+	// PkLink，用具体类型让编译器挡住误传，也避免 any 比较在不可比较
+	// 类型上 panic 的理论风险（这里其实用不到那个风险，但没有理由
+	// 为了一个从来只有一种调用方的场景放宽成 any）。
+	onEventOwner *pkRound
+	pkLink       *PkLink // 当前进行中的 PK 对面连接管理器，无 PK 时为 nil
+	closed       bool    // Run 的 defer 是否已经跑过；见 registerPKLink
 
 	// pkMu 序列化 StartPK/EndPK 之间的调用（包括 Run 退出时兜底触发的
 	// 那次 EndPK）。文档化的调用方是单一事件循环，正常不会有并发调用，
@@ -358,13 +363,13 @@ func (c *Client) authenticate(ctx context.Context, conn *websocket.Conn, token s
 		return fmt.Errorf("构造认证包失败: %w", err)
 	}
 
-	if err := conn.WriteMessage(websocket.BinaryMessage, wire.Encode(wire.OpAuth, body)); err != nil {
-		return fmt.Errorf("发送认证包失败: %w", err)
-	}
-
-	// ctx 取消时立即关闭连接，打断下面可能阻塞长达 authTimeout 的
-	// ReadMessage——watcherDone 保证 authenticate 正常返回时这个
-	// goroutine 也会跟着退出，不会泄漏。
+	// ctx 取消时立即关闭连接。必须装在 WriteMessage 之前：仓库里没有
+	// 任何地方对这条连接设置过 SetWriteDeadline，如果对端 TCP 接收
+	// 窗口已经填满（异常/恶意对手常见的表现），WriteMessage 本身就会
+	// 无限阻塞，跟下面的读超时无关——这才是 pkTeardownGraceLimit 真正
+	// 要兜的场景，早前把 watcher 只挡在读之前是不完整的。watcherDone
+	// 保证 authenticate 正常返回时这个 goroutine 也会跟着退出，不会
+	// 泄漏。
 	watcherDone := make(chan struct{})
 	defer close(watcherDone)
 	go func() {
@@ -374,6 +379,10 @@ func (c *Client) authenticate(ctx context.Context, conn *websocket.Conn, token s
 		case <-watcherDone:
 		}
 	}()
+
+	if err := conn.WriteMessage(websocket.BinaryMessage, wire.Encode(wire.OpAuth, body)); err != nil {
+		return fmt.Errorf("发送认证包失败: %w", err)
+	}
 
 	// 等待认证回复
 	if err := conn.SetReadDeadline(time.Now().Add(authTimeout)); err != nil {
@@ -496,7 +505,7 @@ func (c *Client) handleMessage(ctx context.Context, msg []byte) {
 // 只是在事件产生的同一时刻做一次旁路观察。owner 是这次设置的归属
 // 令牌（PkLink 传自己那一轮的 *pkRound），配合 clearEventHookIfOwner
 // 使用，防止过期的清理动作摘掉新一轮已经装上的钩子。
-func (c *Client) setEventHook(owner any, fn func(event.Event)) {
+func (c *Client) setEventHook(owner *pkRound, fn func(event.Event)) {
 	c.mu.Lock()
 	c.onEvent = fn
 	c.onEventOwner = owner
@@ -511,7 +520,7 @@ func (c *Client) setEventHook(owner any, fn func(event.Event)) {
 // 这一步，无条件清除会把新一轮正在用的钩子也摘掉，导致新一轮的
 // myAudience 从此停止更新。用 owner 令牌判断"这把钩子还是不是我挂的"，
 // 不是我挂的就什么都不做。
-func (c *Client) clearEventHookIfOwner(owner any) {
+func (c *Client) clearEventHookIfOwner(owner *pkRound) {
 	c.mu.Lock()
 	if c.onEventOwner == owner {
 		c.onEvent = nil

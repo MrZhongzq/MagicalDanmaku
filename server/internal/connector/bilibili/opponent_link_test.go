@@ -585,45 +585,45 @@ func TestNoLeakAcrossRepeatedPKRounds(t *testing.T) {
 
 // ---------- Critical-1 回归：注册必须先于阻塞工作 ----------
 
-// TestStartPKDuringHostShutdownDoesNotLeak 覆盖 Critical-1：StartPK 曾经
-// 是「先建立连接/播种、后登记到 c.pkLink」，宿主 Run 若恰好在这个窗口内
-// 退出，Run 的 defer 读到的 c.pkLink 还是 nil，什么都不做，这一整场 PK
-// 永久变成孤儿——审查者用探针复现过。
+// TestStartPKDuringHostShutdownDoesNotLeak 测的是纵深防御，不是生产
+// 路径上唯一承重的那道防线——这一点必须先说清楚，否则容易被后人误读。
 //
-// 这条测试经过了两轮返工，记录下来是因为返工过程本身暴露了两个容易
-// 想当然的坑：
+// 【第三轮复审订正】真正扛住"宿主退出时 PK 连接变成孤儿"的，是
+// registerPKLink 里的 closed 检查，不是它在 connect 内部被调用的
+// 先后位置：
 //
-//  1. 【复审第二轮指出】早期版本在 c.StartPK(...) **返回之后**才
-//     cancel()。播种（seedAudiences）已经挪进后台 goroutine，StartPK
-//     本身变成微秒级的「登记 + 起 goroutine」，等它返回时登记早就完成
-//     了——那条写法测的其实是"StartPK 返回得快"，根本没把"宿主在登记
-//     完成之前退出"这个窗口真正置于风险之中。把 opponent_link.go 还原
-//     成旧语义（同步播种 + 登记挪到末尾）之后，那条测试 5/5 照样通过。
+//   - Run 的 defer 先在 c.mu 下把 closed 置成 true，再走 EndPK；
+//     registerPKLink 在同一把 c.mu 下把"读 closed + 写 pkLink"做成
+//     一次原子操作。两种加锁顺序穷尽了全部交错可能，结果都安全——
+//     这跟登记发生在 seedAudiences 之前还是之后完全无关。
+//   - 生产路径上这道防线甚至连"被绕过"的机会都没有：StartPK 全程
+//     持有 pkMu，EndPK（含 Run defer 触发的那次）也要先抢到 pkMu
+//     才能碰 pkLink，两者根本不可能在 connect() 内部产生交错。也就
+//     是说，在真实调用路径下，connect 内部"先播种再登记"还是"先
+//     登记再播种"对防泄漏是零贡献——它的价值在于 Important-3（不
+//     阻塞调用方的事件循环），不在于防泄漏。
 //
-//  2. 把 cancel() 改成跟 c.StartPK(...) 并发之后，仍然测不出来——排查
-//     发现 StartPK 整个函数体都包在 pkMu 里（concern-4 的修复），Run
-//     的 defer 里的 EndPK 一样要抢 pkMu 才能碰 pkLink：不管 connect
-//     内部把 registerPKLink 放在哪一步，Run 的 defer 都只能等 StartPK
-//     （含它内部完整的 connect 调用）彻底跑完、释放 pkMu 之后才能继续，
-//     两者不会在 connect 内部产生交叉。必须绕开 pkMu，直接调用
-//     newPkLink + link.connect（包内可见）才能把 registerPKLink 排序
-//     这件事本身置于风险之中。
+// 本测试之所以还能观察到"登记顺序"的影响，是因为它**故意绕开了
+// pkMu**、直接调 link.connect（connect 已经不导出，包外没有任何
+// 途径能这样调用）。第二轮曾经错误地下结论说"单独去掉 closed 检查
+// 也不会让测试变红，所以早登记本身就是充分条件"——那是样本太少
+// （几次而非几百次）得出的假结论：复审用约 200 次重跑，仅去掉 closed
+// 检查（保留早登记）复现出了约 1% 的红；只有同时"播种挪回同步 + 登记
+// 挪到阻塞工作之后 + 去掉 closed 检查"才能稳定 100% 复现。换句话说，
+// 早登记只是把交错窗口从"几秒（N+1 次 HTTP）"压缩到"几微秒"，从未
+// 真正消除它——不能把"压缩窗口"和"关闭窗口"混为一谈。
 //
-//  3. 绕开 pkMu 之后依然测不出来——这次是因为用的是宿主 Run 自己的
-//     ctx：ctx 一旦取消，per-opponent 的 Client.Run(linkCtx) 会通过 ctx
-//     传播自己退出，不管 registerPKLink 的登记时机对不对，这些连接和
-//     PkLink 自己的收尾协程本来就会正常收尾——ctx 传播这条路自己就把
-//     "看起来像是修复生效"的假象撑住了，跟登记时机无关。真正的原始缺陷
-//     场景是"调用方给 StartPK 传的 ctx 跟宿主生命周期不挂钩"（比如按
-//     每场 PK 派生的独立 ctx），这时候唯一能让这场 PK 被清理掉的机制
-//     就是 Run 的 defer 里那次 EndPK——如果登记晚了，defer 找不到它，
-//     旁边又没有 ctx 传播来兜底，才会真正泄漏。所以这里的 pkCtx 必须
-//     独立于宿主自己的 ctx。
+// closed 检查这道真正承重的防线，有确定性覆盖，但覆盖它的是**另一条**
+// 测试：TestStartPKAfterHostAlreadyClosedIsNoop（去掉 closed 检查后
+// 5/5 必定失败，见该测试注释）。这条测试留着，是为了在纵深防御的
+// 第二层（早登记缩小窗口）上也有验证，不是因为它测的是生产路径的
+// 唯一防线。
 //
-// 最终写法：pkCtx 独立于宿主 ctx；roomAudience 接口人为拖慢，把"同步
-// 播种"的窗口拉宽到跟调度时机无关，而不是赌一个纳秒级的巧合；
+// 测试写法本身（供理解代码用，不再是"防线在哪"的证据）：pkCtx 独立于
+// 宿主 ctx（否则 ctx 传播会自己把连接收干净，掩盖登记时机的影响）；
+// roomAudience 接口人为拖慢到 200ms，把交错窗口拉宽到跟调度时机无关；
 // link.connect(pkCtx, ...) 和 cancel()（只取消宿主自己的 ctx）从两个
-// 独立 goroutine 同时发起。
+// 独立 goroutine 同时发起，绕开 pkMu 的序列化。
 func TestStartPKDuringHostShutdownDoesNotLeak(t *testing.T) {
 	const slowSeedDelay = 200 * time.Millisecond
 
@@ -716,9 +716,13 @@ func TestStartPKDuringHostShutdownDoesNotLeak(t *testing.T) {
 	assertSettles(t, base)
 }
 
-// TestStartPKAfterHostAlreadyClosedIsNoop 覆盖 Critical-1 的另一半：
-// Run 已经完全退出（defer 已经跑完）之后才调用 StartPK——这次调用不该
-// 建立任何真实连接，也不该产生悬挂的 goroutine。
+// TestStartPKAfterHostAlreadyClosedIsNoop 覆盖 Critical-1 的另一半，
+// 也是 registerPKLink 里 closed 检查——生产路径上真正唯一承重的防线
+// ——的确定性覆盖（跟 TestStartPKDuringHostShutdownDoesNotLeak 分工：
+// 那条测的是纵深防御第二层，早登记缩小交错窗口；这条测的是这道检查
+// 本身，去掉它 5/5 必定失败，见「第三轮复审订正」的变异测试记录）：
+// Run 已经完全退出（defer 已经跑完，closed 已经是 true）之后才调用
+// StartPK——这次调用不该建立任何真实连接，也不该产生悬挂的 goroutine。
 func TestStartPKAfterHostAlreadyClosedIsNoop(t *testing.T) {
 	fs := newMultiRoomFakeServer(t, nil)
 	c := newPKHostClient(t, fs, "21452505")
