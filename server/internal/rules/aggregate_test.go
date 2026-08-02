@@ -321,8 +321,11 @@ func TestAggregateMinCountZeroAlwaysMerges(t *testing.T) {
 	}
 }
 
-func TestAggregateRollingWindowExtends(t *testing.T) {
-	// 滚动：每来一个事件就重置静默计时，持续有人时不断延后结算
+func TestAggregateWindowIsFixedNotRolling(t *testing.T) {
+	// 乙语义：窗口从首个事件起算，固定 Window 时长后结算；中途来的
+	// 事件不会推迟结算。这与旧版「静默计时、每来一个事件都把定时器
+	// 往后推」不同——旧版下第二个事件会把结算推迟到 130ms(50+80) 后，
+	// 本测试在 95ms 处检查，若仍是旧的滚动语义会看到 0 条。
 	c := &collector{}
 	agg := NewAggregator(AggregateSpec{
 		Window: 80 * time.Millisecond, By: AggregateByType,
@@ -331,22 +334,115 @@ func TestAggregateRollingWindowExtends(t *testing.T) {
 
 	agg.Add(enterEvent("1", "甲", 0))
 	time.Sleep(50 * time.Millisecond)
-	agg.Add(enterEvent("2", "乙", 0)) // 重置计时
-	time.Sleep(50 * time.Millisecond)
-	agg.Add(enterEvent("3", "丙", 0)) // 再次重置
+	agg.Add(enterEvent("2", "乙", 0)) // 若窗口会滚动，这里会把结算推迟
 
-	// 此刻已过 100ms，若非滚动早该结算了
-	if got := c.all(); len(got) != 0 {
-		t.Fatalf("滚动窗口应被不断延后，实际已产出 %d 条", len(got))
-	}
-
-	time.Sleep(150 * time.Millisecond) // 静默超过 window
+	time.Sleep(60 * time.Millisecond) // 累计已过 110ms，超过 Window(80ms) 30ms 余量
 	got := c.all()
 	if len(got) != 1 {
-		t.Fatalf("静默后应结算，实际 %d 条", len(got))
+		t.Fatalf("窗口应已到期（固定从首个事件起 80ms 结算），实际产出 %d 条", len(got))
 	}
-	if cnt, _ := LookupPath(got[0].Vars, "count"); cnt != 3 {
-		t.Errorf("count = %v, 期望三人合并", cnt)
+	if cnt, _ := LookupPath(got[0].Vars, "count"); cnt != 2 {
+		t.Errorf("count = %v，期望两个事件都落在首轮内合并为 2", cnt)
+	}
+}
+
+func TestAggregateNextEventReanchorsAfterWindowCloses(t *testing.T) {
+	// 乙语义：上一轮结束后，下一个到来的事件重新起锚，而不是按固定
+	// 时间网格切分（也不是永远不再结算）。
+	c := &collector{}
+	agg := NewAggregator(AggregateSpec{
+		Window: 60 * time.Millisecond, By: AggregateByType,
+	}, c.add)
+	defer agg.Close()
+
+	agg.Add(enterEvent("1", "甲", 0))
+	time.Sleep(90 * time.Millisecond) // 第一轮已到期结算
+	if got := c.all(); len(got) != 1 {
+		t.Fatalf("第一轮应已结算，实际 %d 条", len(got))
+	}
+
+	agg.Add(enterEvent("2", "乙", 0)) // 应重新起锚，而不是延续上一轮的锚点
+	time.Sleep(30 * time.Millisecond)
+	if got := c.all(); len(got) != 1 {
+		t.Fatalf("第二轮距其自身锚点尚未到期不应产出，实际 %d 条", len(got))
+	}
+	time.Sleep(50 * time.Millisecond) // 距第二轮锚点已过 80ms，超过 Window(60ms)
+	got := c.all()
+	if len(got) != 2 {
+		t.Fatalf("第二轮到期后应产出第 2 条，实际 %d 条", len(got))
+	}
+	if cnt, _ := LookupPath(got[1].Vars, "count"); cnt != 1 {
+		t.Errorf("第二轮 count = %v，期望 1", cnt)
+	}
+}
+
+func TestAggregateRealSampleTimestampsSplitIntoRounds(t *testing.T) {
+	// 用真实样本钉住乙语义：用户回报的 17 条盲盒相对时间戳（秒，从
+	// 第一条起）为
+	//   0,4,9,14,19,24,29,35,40,53,55,57,58,60,61,122,170
+	// 本任务只测窗口语义，用同一个键（同一 UID+礼物名）喂入，
+	// Window=10s。按「窗口从本轮首个事件起算，固定 Window 后结算，
+	// 关闭后下一个事件重新起锚」逐轮验算（[anchor, anchor+10) 半开
+	// 区间，到达时刻 >= 边界即出轮）：
+	//
+	//   R1 anchor=0  close=10  成员 0,4,9              下一条14>=10，出轮
+	//   R2 anchor=14 close=24  成员 14,19               下一条24，恰好等于
+	//                                                    边界（margin=0）
+	//   R3 anchor=24 close=34  成员 24,29               下一条35，margin
+	//                                                    仅 1s
+	//   R4 anchor=35 close=45  成员 35,40               下一条53，margin=8s
+	//   R5 anchor=53 close=63  成员 53,55,57,58,60,61    下一条122，安全
+	//   R6 anchor=122 close=132 成员 122                 下一条170，安全
+	//   R7 anchor=170           成员 170（用 Flush 结算，不等自然到期）
+	//
+	// 分轮结果 3+2+2+2+6+1+1=17，与原始数据一致。
+	//
+	// R2→R3 恰好卡在边界（margin=0）、R3→R4 只差 1s，这两处间隔在压缩
+	// 后的真实定时器测试里会变成纯粹的计时器抖动竞态，与本测试要钉住
+	// 的「窗口语义」无关。因此从偏移 24 起整体顺延 +3（消除卡边界的
+	// 竞态），从偏移 35 起再顺延 +3（累积 +6，把 1s 的余量放大到安全
+	// 范围）——顺延不改变同一轮内部的相对间隔，也不改变判轮结论。
+	// R5→R6、R6→R7 的巨大间隔（61s、48s）本就远超 Window，压缩测试时
+	// 没必要按比例保留，改为固定的安全间隔，同样不影响判轮结论。
+	//
+	// 调整后的偏移（样本秒，未乘真实时间尺度）：
+	//   0,4,9,14,19,27,32,41,46,59,61,63,64,66,67,74,89
+	const scale = 30 * time.Millisecond // 1 个样本秒 = 30ms 真实时间
+	window := 10 * scale                // 300ms
+
+	offsets := []int{0, 4, 9, 14, 19, 27, 32, 41, 46, 59, 61, 63, 64, 66, 67, 74, 89}
+	wantRoundSizes := []int{3, 2, 2, 2, 6, 1, 1}
+
+	c := &collector{}
+	agg := NewAggregator(AggregateSpec{Window: window, By: AggregateByType}, c.add)
+	defer agg.Close()
+
+	start := time.Now()
+	for _, off := range offsets {
+		target := time.Duration(off) * scale
+		if d := target - time.Since(start); d > 0 {
+			time.Sleep(d)
+		}
+		agg.Add(giftEvent("3546956351671045", "同一个人", "幸运盲盒", 1, 100))
+	}
+
+	// 第 7 轮刚起锚，不等它自然到期，直接结算。
+	agg.Flush()
+	// 留出余量，确保前几轮由定时器触发的结算 goroutine 已经跑完。
+	time.Sleep(80 * time.Millisecond)
+
+	got := c.all()
+	gotSizes := make([]int, len(got))
+	for i, tr := range got {
+		gotSizes[i] = len(tr.Events)
+	}
+	if len(got) != len(wantRoundSizes) {
+		t.Fatalf("轮数 = %d，期望 %d；实际每轮事件数 = %v，期望 %v", len(got), len(wantRoundSizes), gotSizes, wantRoundSizes)
+	}
+	for i := range wantRoundSizes {
+		if gotSizes[i] != wantRoundSizes[i] {
+			t.Errorf("第 %d 轮事件数 = %d，期望 %d（全部轮次：%v，期望 %v）", i+1, gotSizes[i], wantRoundSizes[i], gotSizes, wantRoundSizes)
+		}
 	}
 }
 
@@ -430,24 +526,26 @@ func TestPassthroughTriggerGiftsEmptyForNonGiftEvent(t *testing.T) {
 	}
 }
 
-func TestAggregateMaxWaitCapsRolling(t *testing.T) {
-	// 持续有人进场时，maxWait 兜底强制结算，避免永不触发
+func TestAggregateMaxWaitNoLongerDelaysFixedWindow(t *testing.T) {
+	// 乙语义下窗口本身有固定上界（Window），MaxWait 原本用于防止
+	// 「持续送礼、静默期永不到来」的场景已不存在：结算永远发生在
+	// Window 到期，不会被更大的 MaxWait 取值拖后。
+	//
+	// 注：这条测试取代了旧版的 TestAggregateMaxWaitCapsRolling——旧版
+	// 靠持续 Add 让静默计时永不到期，只能证明 MaxWait 兜底生效；乙语义
+	// 下窗口不再滚动，这个场景已经不存在，MaxWait 也就不再需要那份兜
+	// 底职责了。
 	c := &collector{}
 	agg := NewAggregator(AggregateSpec{
-		Window:  100 * time.Millisecond,
-		MaxWait: 150 * time.Millisecond,
-		By:      AggregateByType,
+		Window: 60 * time.Millisecond, MaxWait: 500 * time.Millisecond, By: AggregateByType,
 	}, c.add)
 	defer agg.Close()
 
-	// 每 50ms 来一个人，静默窗口永远不会到期
-	for i := 0; i < 6; i++ {
-		agg.Add(enterEvent(string(rune('1'+i)), "用户", 0))
-		time.Sleep(50 * time.Millisecond)
-	}
+	agg.Add(enterEvent("1", "甲", 0))
+	time.Sleep(90 * time.Millisecond) // 远小于 MaxWait(500ms)，但已超过 Window(60ms)
 
-	if got := c.all(); len(got) == 0 {
-		t.Fatal("maxWait 应强制结算，实际一条未出")
+	if got := c.all(); len(got) != 1 {
+		t.Fatalf("应在 Window 到期时结算，不受 MaxWait 更大取值影响，实际 %d 条", len(got))
 	}
 }
 

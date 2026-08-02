@@ -23,8 +23,7 @@ type Aggregator struct {
 
 	mu       sync.Mutex
 	buckets  map[string]*bucket // 键：事件类型 + UID（+ 礼物名）
-	idle     *time.Timer        // 静默计时，每来一个事件就重置
-	deadline *time.Timer        // 最长等待，从首个事件起只设一次
+	deadline *time.Timer        // 本轮窗口计时器，从本轮首个事件起只设一次
 	closed   bool
 }
 
@@ -47,7 +46,21 @@ func NewAggregator(spec AggregateSpec, out func(Trigger)) *Aggregator {
 	}
 }
 
-// Add 把事件投入当前窗口。首个事件会启动窗口计时。
+// Add 把事件投入当前窗口。
+//
+// 窗口固定从本轮首个事件起算：只在首个事件到达时设一次定时器，
+// Window 时长后到点即结算，之后来的事件不会推迟结算。这与旧版
+// 「静默计时」不同——旧版每来一个事件都把定时器往后推（Reset），
+// 导致连续送礼时窗口被无限延长、迟迟不结算（例如连送 9 个盲盒
+// 只会合并出 1 条答谢，而不是按 10 秒一轮切成多条）。
+//
+// 窗口关闭后缓冲区被清空，下一个到达的事件会重新起算一轮新窗口，
+// 而不是落回某个固定的时间网格。
+//
+// 关于 spec.MaxWait：乙语义下窗口本身就有固定上界（Window），
+// MaxWait 原本「防止持续送礼导致静默期永不到来」的用途已经不存在，
+// 这里不再使用它。它是否该从 AggregateSpec 中移除是 rule.go 那边的
+// 决策，不在本次改动范围内——详见任务报告。
 func (a *Aggregator) Add(ev event.Event) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -71,26 +84,14 @@ func (a *Aggregator) Add(ev event.Event) {
 		accumulateGift(b.vars, ev)
 	}
 
-	// 滚动：每来一个事件都把静默计时推后
-	if a.idle == nil {
-		a.idle = time.AfterFunc(a.spec.Window, a.onTimeout)
-	} else {
-		a.idle.Reset(a.spec.Window)
-	}
-
-	// 最长等待只在首个事件时设一次，防止持续进人导致永不结算。
-	// 未配置则不设上限，即纯滚动。
-	if a.spec.MaxWait > 0 && a.deadline == nil {
-		a.deadline = time.AfterFunc(a.spec.MaxWait, a.onTimeout)
+	// 窗口计时器只在本轮首个事件到达时设一次，后续事件不重置它。
+	if a.deadline == nil {
+		a.deadline = time.AfterFunc(a.spec.Window, a.onTimeout)
 	}
 }
 
-// stopTimersLocked 停掉两个计时器。调用者需持有锁。
+// stopTimersLocked 停掉窗口计时器。调用者需持有锁。
 func (a *Aggregator) stopTimersLocked() {
-	if a.idle != nil {
-		a.idle.Stop()
-		a.idle = nil
-	}
 	if a.deadline != nil {
 		a.deadline.Stop()
 		a.deadline = nil
