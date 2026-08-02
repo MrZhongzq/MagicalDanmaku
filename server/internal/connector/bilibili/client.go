@@ -104,6 +104,9 @@ type Client struct {
 	state       connector.State
 	hostIndex   int
 	deviceFixed bool // 是否已因风控补齐过设备字段
+
+	onEvent func(event.Event) // PK 期间的同步观察钩子，见 setEventHook
+	pkLink  *PkLink           // 当前进行中的 PK 对面连接管理器，无 PK 时为 nil
 }
 
 // 确保 Client 满足 Connector 接口。
@@ -149,6 +152,11 @@ func (c *Client) setState(s connector.State) {
 func (c *Client) Run(ctx context.Context) error {
 	defer func() {
 		c.setState(connector.StateClosed)
+		// 兜底清理：不管调用方有没有记得在 PK 结束时调用 EndPK，只要
+		// 宿主连接的 Run 退出（无论是正常收尾、异常掉线还是进程整体
+		// 退出），就不能再留下悬挂的对面连接——这正是本任务要堵住的
+		// 泄漏风险，不能只靠注释保证。
+		c.EndPK()
 		c.closeEventsOnce.Do(func() { close(c.events) })
 	}()
 
@@ -393,6 +401,12 @@ func (c *Client) handleMessage(ctx context.Context, msg []byte) {
 		return
 	}
 
+	// PK 期间 PkLink 会挂一个观察钩子来同步维护观众集合；只读一次快照，
+	// 不在每条事件上都重新加锁。钩子不改变下面的投递路径，纯旁路观察。
+	c.mu.RLock()
+	hook := c.onEvent
+	c.mu.RUnlock()
+
 	mapCtx := cmdmap.Context{RoomID: c.roomID, ReceivedAt: time.Now()}
 	for _, f := range frames {
 		// 心跳回复与认证回复不产生业务事件。
@@ -405,6 +419,9 @@ func (c *Client) handleMessage(ctx context.Context, msg []byte) {
 			continue
 		}
 		for _, ev := range evs {
+			if hook != nil {
+				hook(ev)
+			}
 			select {
 			case c.events <- ev:
 			case <-ctx.Done():
@@ -416,4 +433,52 @@ func (c *Client) handleMessage(ctx context.Context, msg []byte) {
 			}
 		}
 	}
+}
+
+// setEventHook 设置/清除一个同步事件观察钩子，目前只给 PkLink
+// 用来维护 PK 观众集合。钩子不改变事件投递路径（该丢的还是丢、该发的
+// 还是发），只是在事件产生的同一时刻做一次旁路观察；为 nil 时零开销。
+func (c *Client) setEventHook(fn func(event.Event)) {
+	c.mu.Lock()
+	c.onEvent = fn
+	c.mu.Unlock()
+}
+
+// StartPK 为 PK 的每一个对手房间各起一条弹幕连接，事件经返回的 PkLink
+// 统一交付。这不是 c 自身连接的一部分：对面下播/连不上/风控都只影响
+// PkLink 内部，c 的事件流和状态机完全不受影响。
+//
+// 调用方通常在观测到 PK_INFO（event.Battle.Members 非空）时调用一次；
+// 即使调用方忘了在 PK 结束时调用 EndPK，c.Run 退出时的兜底清理（见
+// Run 的 defer）也不会漏掉这场 PK 的连接。
+func (c *Client) StartPK(ctx context.Context, members []event.PkMember) *PkLink {
+	c.EndPK() // 防御性收尾：不允许两场 PK 的连接叠加
+
+	link := newPkLink(c)
+	link.Connect(ctx, members)
+
+	c.mu.Lock()
+	c.pkLink = link
+	c.mu.Unlock()
+	return link
+}
+
+// EndPK 断开当前 PK 期间连到对面房间的全部连接（PK 正常结束时调用）。
+// 幂等：没有进行中的 PK 时是安全的空操作。
+func (c *Client) EndPK() {
+	c.mu.Lock()
+	link := c.pkLink
+	c.pkLink = nil
+	c.mu.Unlock()
+
+	if link != nil {
+		link.Disconnect()
+	}
+}
+
+// PKLink 返回当前进行中的 PK 连接管理器，没有 PK 时为 nil。
+func (c *Client) PKLink() *PkLink {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.pkLink
 }

@@ -38,6 +38,11 @@ var defaultBaseURLs = map[string]string{
 	"roomOnline":  "https://api.live.bilibili.com/xlive/web-room/v1/index/getInfoByRoom",
 	"guardTotal":  "https://api.live.bilibili.com/xlive/app-room/v2/guardTab/topList",
 	"guardOnline": "https://api.live.bilibili.com/xlive/general-interface/v1/rank/queryContributionRank",
+	// roomAudience 用来播种 PK 连对面时的观众集合，取自原 C++ 项目
+	// getRoomCurrentAudiences（bili_liveservice.cpp:3341）——B 站没有真正
+	// 的「当前观众名单」接口，这是拿房间近期弹幕发送者 uid 当近似值的既有
+	// 做法，原样照抄语义。
+	"roomAudience": "https://api.live.bilibili.com/ajax/msg",
 }
 
 // riskControlCode 是 B 站的风控错误码。
