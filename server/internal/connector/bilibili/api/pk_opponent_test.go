@@ -189,6 +189,47 @@ func TestGuardOnlineInvalidLevelDoesNotConsumeDedup(t *testing.T) {
 	}
 }
 
+// TestGuardOnlineUIDAcceptsNumberOrString 覆盖 uid 字段可能是 JSON 数字、
+// 也可能是带引号字符串两种真实形态——guardUID 保留原始字面量当去重键，
+// 不管哪种形式都不该导致整页解码失败（用 int64 硬解码字符串会直接报错）。
+func TestGuardOnlineUIDAcceptsNumberOrString(t *testing.T) {
+	c, srv := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(guardOnlinePageJSON(2, `[
+			{"uid":1,"guard_level":1},
+			{"uid":"2","guard_level":2}
+		]`)))
+	})
+	c.SetBaseURL("guardOnline", srv.URL)
+
+	counts, err := c.GuardOnline(context.Background(), "33333", "22222222")
+	if err != nil {
+		t.Fatalf("GuardOnline 失败: %v，uid 是数字还是字符串都不该导致解码失败", err)
+	}
+	if counts.Governor != 1 || counts.Admiral != 1 {
+		t.Errorf("Governor/Admiral = %d/%d, 期望 1/1", counts.Governor, counts.Admiral)
+	}
+	if counts.Total() != 2 {
+		t.Errorf("Total() = %d, 期望 2", counts.Total())
+	}
+}
+
+// TestGuardOnlineCountAcceptsString 覆盖 data.count 也可能是带引号字符串
+// 的情况——flexibleCount 应该照样解析成整数参与翻页计算，不该整页失败。
+func TestGuardOnlineCountAcceptsString(t *testing.T) {
+	c, srv := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"code":0,"data":{"item":[{"uid":1,"guard_level":1}],"count":"1"}}`))
+	})
+	c.SetBaseURL("guardOnline", srv.URL)
+
+	counts, err := c.GuardOnline(context.Background(), "33333", "22222222")
+	if err != nil {
+		t.Fatalf("GuardOnline 失败: %v，count 是字符串形式也不该导致解码失败", err)
+	}
+	if counts.Total() != 1 {
+		t.Errorf("Total() = %d, 期望 1", counts.Total())
+	}
+}
+
 // TestGuardOnlineSinglePage 验证只有一页时不会多请求一次。
 func TestGuardOnlineSinglePage(t *testing.T) {
 	calls := 0

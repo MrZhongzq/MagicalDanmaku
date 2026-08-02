@@ -28,6 +28,15 @@ const (
 	riskControlBackoff       = 5 * time.Minute
 	eventBufferSize          = 256
 	authTimeout              = 10 * time.Second
+
+	// defaultOpponentSnapshotBudget 是 FetchOpponentSnapshots 的整体超时预算。
+	// 调用点是「PK 接通的一瞬间」，这是整场 PK 里最在乎播报延迟的时刻，
+	// 拖住它比拿不全数据更糟；同时短时间内密集打同一批接口正是 -352
+	// 风控的触发条件（见 riskControlCode），预算越松风控风险越高。
+	// 5 秒是权衡后的取值：单个 GetJSON 请求本身有 15s 超时兜底，5 秒足够
+	// 网络正常时三个接口（含 GuardOnline 的少量翻页）跑完，也足够在网络
+	// 变慢时尽早放弃、把没拿到的字段降级为未知，而不是让 PK 播报干等。
+	defaultOpponentSnapshotBudget = 5 * time.Second
 )
 
 // heartbeatBody 是心跳包的固定内容。
@@ -69,6 +78,12 @@ func WithLogger(l *slog.Logger) ClientOption {
 	return func(c *Client) { c.log = l }
 }
 
+// WithOpponentSnapshotBudget 设置 FetchOpponentSnapshots 的整体超时预算，
+// 主要供测试用小预算触发降级路径；生产环境一般用默认值即可。
+func WithOpponentSnapshotBudget(d time.Duration) ClientOption {
+	return func(c *Client) { c.opponentSnapshotBudget = d }
+}
+
 // Client 是 B 站直播间的事件流连接器，实现 connector.Connector。
 type Client struct {
 	roomID string
@@ -76,10 +91,11 @@ type Client struct {
 	dialer *websocket.Dialer
 	log    *slog.Logger
 
-	heartbeatInterval time.Duration
-	backoffMin        time.Duration
-	backoffMax        time.Duration
-	dialURLOverride   string
+	heartbeatInterval      time.Duration
+	backoffMin             time.Duration
+	backoffMax             time.Duration
+	dialURLOverride        string
+	opponentSnapshotBudget time.Duration
 
 	events          chan event.Event
 	closeEventsOnce sync.Once
@@ -96,15 +112,16 @@ var _ connector.Connector = (*Client)(nil)
 // NewClient 创建一个直播间连接器。
 func NewClient(roomID string, apiClient *api.Client, opts ...ClientOption) *Client {
 	c := &Client{
-		roomID:            roomID,
-		api:               apiClient,
-		dialer:            websocket.DefaultDialer,
-		log:               slog.Default(),
-		heartbeatInterval: defaultHeartbeatInterval,
-		backoffMin:        defaultBackoffMin,
-		backoffMax:        defaultBackoffMax,
-		events:            make(chan event.Event, eventBufferSize),
-		state:             connector.StateIdle,
+		roomID:                 roomID,
+		api:                    apiClient,
+		dialer:                 websocket.DefaultDialer,
+		log:                    slog.Default(),
+		heartbeatInterval:      defaultHeartbeatInterval,
+		backoffMin:             defaultBackoffMin,
+		backoffMax:             defaultBackoffMax,
+		opponentSnapshotBudget: defaultOpponentSnapshotBudget,
+		events:                 make(chan event.Event, eventBufferSize),
+		state:                  connector.StateIdle,
 	}
 	for _, o := range opts {
 		o(c)

@@ -1,10 +1,12 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net/url"
 	"strconv"
+	"strings"
 )
 
 // 以下参数取自原 C++ 项目 bili_liveservice.cpp 里真实调用过的取值，
@@ -76,17 +78,53 @@ type GuardOnlineCounts struct {
 // Total 返回三档之和，即「在线」的大航海总数。
 func (g GuardOnlineCounts) Total() int64 { return g.Governor + g.Admiral + g.Captain }
 
+// guardUID 保存 uid 字段的原始 JSON 字面量（数字去掉引号后长得和数字
+// 字符串一样，字符串去掉外层引号后还原成原始内容），只当一个不透明的
+// 去重键使用，从不参与算术。
+//
+// 不用 int64：B 站不同接口对 uid 是数字还是带引号字符串并不统一，硬编码
+// int64 遇到字符串会让整页解码失败（GuardOnline 直接 return error，字段
+// 降级为 nil——不崩，但白拿不到数据）。但也不能反过来图省事「解析失败
+// 就当 0」——如果真这么做，一旦响应里 uid 解析失败，所有成员的 UID 都会
+// 塌缩成同一个值 0，seenUIDs[0] 只会命中一次，会把整个房间的大航海错误
+// 地数成 1 个：一个看起来合理、实则彻底错误的数字，比「报错后降级」危险
+// 得多。保留原始字面量当字符串比较，两种表示形式都不会解码失败，也不会
+// 把「解析失败」悄悄等同于任何具体数值。
+type guardUID string
+
+func (u *guardUID) UnmarshalJSON(b []byte) error {
+	*u = guardUID(bytes.Trim(b, `"`))
+	return nil
+}
+
 // guardOnlineMember 是 queryContributionRank 接口 data.item[] 数组里
 // 一个成员的形状。这个接口本身就是「在线」高能榜（type=online_rank），
 // 不带 is_alive 字段，不需要也不能再按 is_alive 过滤一次。
 type guardOnlineMember struct {
-	UID        int64 `json:"uid"`
-	GuardLevel int   `json:"guard_level"`
+	UID        guardUID `json:"uid"`
+	GuardLevel int      `json:"guard_level"`
+}
+
+// flexibleCount 兼容 data.count 可能是数字也可能是带引号字符串两种形式。
+// 跟 guardUID 不同，这个字段要真正参与算术（算 pageCount），不能简单地
+// 当字符串收着；解析失败时返回 error（连带让 GuardOnline 整页失败、
+// 降级为未知），而不是悄悄当 0——0 会被当成「已经翻完了」，把「拿不到
+// 总数」误判成「数完了」，产出一个偏小但看着正常的数字。
+type flexibleCount int
+
+func (n *flexibleCount) UnmarshalJSON(b []byte) error {
+	s := strings.Trim(string(b), `"`)
+	v, err := strconv.Atoi(s)
+	if err != nil {
+		return fmt.Errorf("count 不是合法整数: %q: %w", s, err)
+	}
+	*n = flexibleCount(v)
+	return nil
 }
 
 type guardOnlinePage struct {
 	Item  []guardOnlineMember `json:"item"`
-	Count int                 `json:"count"` // 总条数，用于算总页数
+	Count flexibleCount       `json:"count"` // 总条数，用于算总页数
 }
 
 // GuardOnline 统计指定直播间当前在线的大航海人数，按等级分档。
@@ -109,7 +147,7 @@ type guardOnlinePage struct {
 //     page < pageCount 就继续。
 func (c *Client) GuardOnline(ctx context.Context, roomID, uid string) (GuardOnlineCounts, error) {
 	var counts GuardOnlineCounts
-	seenUIDs := make(map[int64]bool)
+	seenUIDs := make(map[guardUID]bool)
 	page := 1
 	// 用独立的请求计数器判断是否超过安全上限，不依赖 data.count 算出的
 	// pageCount——data.count 是服务端给的，不可信；即便它异常地一直很大，
@@ -139,7 +177,7 @@ func (c *Client) GuardOnline(ctx context.Context, roomID, uid string) (GuardOnli
 
 		addGuardOnlineCounts(&counts, seenUIDs, data.Item)
 
-		pageCount := (data.Count + guardOnlinePageSize - 1) / guardOnlinePageSize
+		pageCount := (int(data.Count) + guardOnlinePageSize - 1) / guardOnlinePageSize
 		if page >= pageCount {
 			break
 		}
@@ -148,7 +186,7 @@ func (c *Client) GuardOnline(ctx context.Context, roomID, uid string) (GuardOnli
 	return counts, nil
 }
 
-func addGuardOnlineCounts(counts *GuardOnlineCounts, seenUIDs map[int64]bool, members []guardOnlineMember) {
+func addGuardOnlineCounts(counts *GuardOnlineCounts, seenUIDs map[guardUID]bool, members []guardOnlineMember) {
 	for _, m := range members {
 		if m.GuardLevel <= 0 {
 			continue

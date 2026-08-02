@@ -32,7 +32,22 @@ type OpponentSnapshot struct {
 // init_info/match_info，那两个字段的真实语义是发起方/被匹配方，
 // 混用会在主播主动发起 PK 时把自己错认成对面（Task 4 的教训）。
 // members 可能多于两方（B 站支持多人 PK），逐个处理，不假设只有一个对手。
+//
+// 超时契约：调用方不需要自己给 ctx 挂 deadline——本函数内部会用
+// c.opponentSnapshotBudget（默认 defaultOpponentSnapshotBudget，可用
+// WithOpponentSnapshotBudget 调整）兜底一个总预算，覆盖全部对手、全部
+// 接口。即使传 context.Background()，最坏情况下（N 个对手 × 3 个接口，
+// GuardOnline 还可能翻页）也不会真的按 N×3×15s 的上限跑下去——预算耗尽
+// 后还没来得及跑的调用会立刻因 ctx 过期而失败，对应字段照常降级为 nil，
+// 不影响已经拿到的字段和已经查完的其他对手。
 func (c *Client) FetchOpponentSnapshots(ctx context.Context, members []event.PkMember) []OpponentSnapshot {
+	budget := c.opponentSnapshotBudget
+	if budget <= 0 {
+		budget = defaultOpponentSnapshotBudget
+	}
+	ctx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
+
 	snapshots := make([]OpponentSnapshot, 0, len(members))
 	for _, m := range members {
 		if m.RoomID == c.roomID {

@@ -3,10 +3,13 @@ package bilibili
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
+	"time"
 
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/connector/bilibili/api"
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/event"
@@ -37,13 +40,13 @@ func newSnapshotTestClient(t *testing.T, selfRoomID string, roomOnline map[strin
 				items += fmt.Sprintf(`{"uid":%d,"guard_level":3}`, i+1)
 			}
 			items += "]"
-			w.Write([]byte(`{"code":0,"data":{"item":` + items + `,"count":` + itoa(n) + `}}`))
+			w.Write([]byte(`{"code":0,"data":{"item":` + items + `,"count":` + strconv.FormatInt(n, 10) + `}}`))
 		case q.Has("roomid"): // guardTotal
 			total := guardTotal[q.Get("roomid")]
-			w.Write([]byte(`{"code":0,"data":{"info":{"num":` + itoa(total) + `}}}`))
+			w.Write([]byte(`{"code":0,"data":{"info":{"num":` + strconv.FormatInt(total, 10) + `}}}`))
 		default: // roomOnline
 			online := roomOnline[q.Get("room_id")]
-			w.Write([]byte(`{"code":0,"data":{"room_info":{"online":` + itoa(online) + `}}}`))
+			w.Write([]byte(`{"code":0,"data":{"room_info":{"online":` + strconv.FormatInt(online, 10) + `}}}`))
 		}
 	}))
 	t.Cleanup(srv.Close)
@@ -53,35 +56,9 @@ func newSnapshotTestClient(t *testing.T, selfRoomID string, roomOnline map[strin
 	apiClient.SetBaseURL("guardTotal", srv.URL)
 	apiClient.SetBaseURL("guardOnline", srv.URL)
 
-	c := NewClient(selfRoomID, apiClient, WithLogger(slog.New(slog.NewTextHandler(discardWriter{}, nil))))
+	c := NewClient(selfRoomID, apiClient, WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))))
 	return c, &calls
 }
-
-func itoa(n int64) string {
-	if n == 0 {
-		return "0"
-	}
-	neg := n < 0
-	if neg {
-		n = -n
-	}
-	var buf [20]byte
-	i := len(buf)
-	for n > 0 {
-		i--
-		buf[i] = byte('0' + n%10)
-		n /= 10
-	}
-	if neg {
-		i--
-		buf[i] = '-'
-	}
-	return string(buf[i:])
-}
-
-type discardWriter struct{}
-
-func (discardWriter) Write(p []byte) (int, error) { return len(p), nil }
 
 // TestFetchOpponentSnapshotsSkipsSelf 验证「对面」的唯一合法判定是
 // member.RoomID != c.roomID——绝不能用 init_info/match_info（Task 4 的教训）。
@@ -134,7 +111,8 @@ func TestFetchOpponentSnapshotsSkipsSelf(t *testing.T) {
 		t.Errorf("44444.Online = %v, 期望 200", b.Online)
 	}
 
-	// 三个对手 * 三个接口 = 6 次请求；不该因为多一方就漏查或错配。
+	// members 里有 3 条记录，但自己会被跳过，实际只有 2 个对手；
+	// 2 个对手 * 3 个接口 = 6 次请求，不该因为多一方就漏查或错配。
 	if *calls != 6 {
 		t.Errorf("请求次数 = %d, 期望 6", *calls)
 	}
@@ -163,7 +141,7 @@ func TestFetchOpponentSnapshotsDegradesOnPartialFailure(t *testing.T) {
 	apiClient.SetBaseURL("guardTotal", srv.URL)
 	apiClient.SetBaseURL("guardOnline", srv.URL)
 
-	c := NewClient("21452505", apiClient, WithLogger(slog.New(slog.NewTextHandler(discardWriter{}, nil))))
+	c := NewClient("21452505", apiClient, WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))))
 
 	members := []event.PkMember{
 		{RoomID: "33333", UID: "u33333"},
@@ -195,5 +173,57 @@ func TestFetchOpponentSnapshotsEmptyMembers(t *testing.T) {
 	snaps := c.FetchOpponentSnapshots(context.Background(), nil)
 	if len(snaps) != 0 {
 		t.Errorf("空 Members 应返回空快照，实际 %d 条", len(snaps))
+	}
+}
+
+// TestFetchOpponentSnapshotsRespectsBudget 证明 I-1 的修复：即使调用方像
+// 这里一样直接传 context.Background()（没有自己挂 deadline），
+// FetchOpponentSnapshots 也会在 c.opponentSnapshotBudget 到期后自行放弃，
+// 未完成的字段降级为 nil，而不是傻等慢接口把请求跑完——PK 接通的一瞬间
+// 等不起几十秒。
+//
+// roomOnline 接口被故意拖慢到 300ms，预算只给 50ms：正确实现应该在预算
+// 耗尽后很快返回（远小于 300ms），且 Online 字段留 nil；如果内部没有真的
+// 套上超时预算，这次调用会老老实实等满 300ms 拿到 Online=123，两条断言
+// 都会失败。
+func TestFetchOpponentSnapshotsRespectsBudget(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		switch {
+		case q.Has("switch"): // guardOnline：秒回
+			w.Write([]byte(`{"code":0,"data":{"item":[],"count":0}}`))
+		case q.Has("roomid"): // guardTotal：秒回
+			w.Write([]byte(`{"code":0,"data":{"info":{"num":1}}}`))
+		default: // roomOnline：故意拖慢，模拟网络抖动/接口卡顿
+			time.Sleep(300 * time.Millisecond)
+			w.Write([]byte(`{"code":0,"data":{"room_info":{"online":123}}}`))
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	apiClient := api.New(nil, api.WithHTTPClient(srv.Client()))
+	apiClient.SetBaseURL("roomOnline", srv.URL)
+	apiClient.SetBaseURL("guardTotal", srv.URL)
+	apiClient.SetBaseURL("guardOnline", srv.URL)
+
+	c := NewClient("21452505", apiClient,
+		WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
+		WithOpponentSnapshotBudget(50*time.Millisecond),
+	)
+
+	members := []event.PkMember{{RoomID: "33333", UID: "u33333"}}
+
+	start := time.Now()
+	snaps := c.FetchOpponentSnapshots(context.Background(), members)
+	elapsed := time.Since(start)
+
+	if elapsed > 250*time.Millisecond {
+		t.Fatalf("耗时 %v，超预算后应尽快返回，不该等满 300ms 的慢接口", elapsed)
+	}
+	if len(snaps) != 1 {
+		t.Fatalf("快照数量 = %d, 期望 1（超预算不该丢对手，只降级字段）", len(snaps))
+	}
+	if snaps[0].Online != nil {
+		t.Errorf("Online = %v, 期望 nil（超预算应降级，不该等到慢接口真的返回值）", *snaps[0].Online)
 	}
 }
