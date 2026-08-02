@@ -160,21 +160,53 @@ type Unknown struct {
 	Command string // 原始 CMD 名
 }
 
-func (Danmaku) isPayload()          {}
-func (Gift) isPayload()             {}
-func (GiftCombo) isPayload()        {}
-func (GuardBuy) isPayload()         {}
-func (SuperChat) isPayload()        {}
-func (SuperChatDelete) isPayload()  {}
-func (UserEnter) isPayload()        {}
-func (UserFollow) isPayload()       {}
-func (UserShare) isPayload()        {}
-func (UserLike) isPayload()         {}
-func (LiveStart) isPayload()        {}
-func (LiveStop) isPayload()         {}
-func (RoomChange) isPayload()       {}
-func (UserBlocked) isPayload()      {}
-func (OnlineRankUpdate) isPayload() {}
-func (RoomStatsUpdate) isPayload()  {}
-func (Battle) isPayload()           {}
-func (Unknown) isPayload()          {}
+// VisitMatchedBy 标记「串门」判定命中的是哪一个判据，供规则层/排查
+// 还原判断过程——同一个方向可能同时命中两个判据，这里记的是分支
+// 命中优先级下实际生效的那一个，不是"两个都试了一遍"的日志。
+type VisitMatchedBy string
+
+const (
+	VisitMatchedByFanMedal VisitMatchedBy = "fan_medal" // 戴着对方主播的粉丝勋章
+	VisitMatchedByAudience VisitMatchedBy = "audience"  // 命中 PK 期间维护的观众集合
+)
+
+// VisitFromOpponent 表示 PK 期间对面房间的人（观众或主播本人）跑来了
+// 本房间——方向 A，欢迎语气。触发它的原始事件（进房/弹幕/送礼……）
+// 通过 Event.Raw 保留，OpponentRoomID 是此人所属的对手房间号（多人 PK
+// 下可能有好几个对手，需要精确到具体是哪一个）。
+type VisitFromOpponent struct {
+	User           User
+	OpponentRoomID string
+	MatchedBy      VisitMatchedBy
+}
+
+// VisitToOpponent 表示 PK 期间本房间的观众跑去了对面房间——方向 B，
+// 原 C++ 对应位置的注释是「自己这边过去送礼物，居心何在！」，是提示/
+// 警示语气，不是欢迎，跟方向 A 语义相反。OpponentRoomID 是此人跑去的
+// 那个对手房间号。
+type VisitToOpponent struct {
+	User           User
+	OpponentRoomID string
+	MatchedBy      VisitMatchedBy
+}
+
+func (Danmaku) isPayload()           {}
+func (Gift) isPayload()              {}
+func (GiftCombo) isPayload()         {}
+func (GuardBuy) isPayload()          {}
+func (SuperChat) isPayload()         {}
+func (SuperChatDelete) isPayload()   {}
+func (UserEnter) isPayload()         {}
+func (UserFollow) isPayload()        {}
+func (UserShare) isPayload()         {}
+func (UserLike) isPayload()          {}
+func (LiveStart) isPayload()         {}
+func (LiveStop) isPayload()          {}
+func (RoomChange) isPayload()        {}
+func (UserBlocked) isPayload()       {}
+func (OnlineRankUpdate) isPayload()  {}
+func (RoomStatsUpdate) isPayload()   {}
+func (Battle) isPayload()            {}
+func (Unknown) isPayload()           {}
+func (VisitFromOpponent) isPayload() {}
+func (VisitToOpponent) isPayload()   {}

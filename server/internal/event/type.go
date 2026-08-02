@@ -32,4 +32,12 @@ const (
 	TypeBattle           Type = "battle"             // PK 大乱斗（P6 消费）
 	TypeManual           Type = "manual"             // 操作者从 WebUI 手动触发
 	TypeUnknown          Type = "unknown"            // 未识别的 CMD
+
+	// TypeVisitFromOpponent 和 TypeVisitToOpponent 是 PK 期间的「串门」
+	// 信号，两个方向语义相反，故意用两个独立的 Type 而不是一个「串门」
+	// 事件配布尔字段区分方向——漏判一个布尔就会把警示播成欢迎，成本
+	// 极低而后果尴尬，两个不同的 Type 让这类调用方写错的成本变成
+	// switch/if 里明摆着的类型不匹配。
+	TypeVisitFromOpponent Type = "pk_visit_from_opponent" // 对面的人跑来我方串门（欢迎语气）
+	TypeVisitToOpponent   Type = "pk_visit_to_opponent"   // 我方观众跑去对面串门（警示语气）
 )

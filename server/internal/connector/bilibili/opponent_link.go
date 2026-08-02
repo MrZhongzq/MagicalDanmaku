@@ -75,6 +75,15 @@ type pkRound struct {
 	cancel context.CancelFunc
 	events chan event.Event
 	done   chan struct{} // 清理彻底完成（goroutine 全部退出 + hook 摘除 + 通道关闭）后关闭
+
+	// opponentRoomIDs 是这一轮 PK 涉及的全部对手房间号，在 connect 里
+	// filterOpponents 算出 opponents 之后就同步写好、此后不再变——
+	// 串门判定（visit.go）的粉丝勋章判据要用它确认「这个勋章是不是
+	// 这一轮 PK 里某个对手主播的」，特意不用 opposite 观众集合的 key
+	// 代替：opposite 是 seedAudiences 那个独立 goroutine 异步播种的，
+	// 播种完成前查询会漏判，而粉丝勋章判据本该是不依赖任何异步播种、
+	// 立即可用的零成本信号，两者不能共用同一份可能还没就绪的状态。
+	opponentRoomIDs map[string]struct{}
 }
 
 // closedEventsPlaceholder 是没有进行中 PK 时 Events() 返回的占位通道：
@@ -128,9 +137,10 @@ func (p *PkLink) connect(ctx context.Context, members []event.PkMember) {
 
 	linkCtx, cancel := context.WithCancel(ctx)
 	round := &pkRound{
-		cancel: cancel,
-		events: make(chan event.Event, eventBufferSize),
-		done:   make(chan struct{}),
+		cancel:          cancel,
+		events:          make(chan event.Event, eventBufferSize),
+		done:            make(chan struct{}),
+		opponentRoomIDs: opponentRoomIDSet(opponents),
 	}
 
 	p.mu.Lock()
@@ -308,6 +318,16 @@ func filterOpponents(members []event.PkMember, selfRoomID string) []event.PkMemb
 	return out
 }
 
+// opponentRoomIDSet 把 opponents 列表转成一个便于 O(1) 判断归属的集合，
+// 供 pkRound.opponentRoomIDs 使用。
+func opponentRoomIDSet(opponents []event.PkMember) map[string]struct{} {
+	set := make(map[string]struct{}, len(opponents))
+	for _, m := range opponents {
+		set[m.RoomID] = struct{}{}
+	}
+	return set
+}
+
 // selfMemberUID 从 members 里找出「自己」那一项的 UID——PK_INFO 里这个
 // 值就是本房间主播的 uid，是 myAudience 该播种的值（简报原文「自己的
 // upUid」）。
@@ -449,28 +469,39 @@ func cloneSet(m map[string]struct{}) map[string]struct{} {
 // 类型。覆盖不到的类型（如 SuperChatDelete、RoomChange、Battle 本身）
 // 本来就没有「单个用户在互动」这个概念，返回空字符串，调用方自然跳过。
 func uidOf(ev event.Event) string {
+	user, ok := userOf(ev)
+	if !ok {
+		return ""
+	}
+	return user.UID
+}
+
+// userOf 从事件载荷里取完整的 User——串门判定（visit.go）除了 uid 还
+// 要看 Medal，跟 uidOf 覆盖的是同一批「带 User 字段」的事件类型，两者
+// 合并成一份 switch，不重复维护两份容易漏改其中一份的类型列表。
+func userOf(ev event.Event) (event.User, bool) {
 	switch p := ev.Payload.(type) {
 	case event.Danmaku:
-		return p.User.UID
+		return p.User, true
 	case event.Gift:
-		return p.User.UID
+		return p.User, true
 	case event.GiftCombo:
-		return p.User.UID
+		return p.User, true
 	case event.GuardBuy:
-		return p.User.UID
+		return p.User, true
 	case event.SuperChat:
-		return p.User.UID
+		return p.User, true
 	case event.UserEnter:
-		return p.User.UID
+		return p.User, true
 	case event.UserFollow:
-		return p.User.UID
+		return p.User, true
 	case event.UserShare:
-		return p.User.UID
+		return p.User, true
 	case event.UserLike:
-		return p.User.UID
+		return p.User, true
 	case event.UserBlocked:
-		return p.User.UID
+		return p.User, true
 	default:
-		return ""
+		return event.User{}, false
 	}
 }
