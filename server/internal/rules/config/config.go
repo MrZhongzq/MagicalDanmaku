@@ -9,7 +9,10 @@
 package config
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"time"
 
@@ -98,9 +101,22 @@ func Load(path string) (*Config, error) {
 //
 // 单条规则的校验在 spec.Rule.ToRule 里，这里只管配置树的形状。
 func Parse(data []byte) (*Config, error) {
+	// KnownFields(true)：未知字段直接报错，不静默忽略。
+	//
+	// 上面那句「配置写错却静默忽略，比直接报错更难排查」对未知字段
+	// 同样成立——yaml.Unmarshal 默认会把拼错的键当不存在，用户改了
+	// 半天配置发现「不生效」，而真正的原因只是少了一个字母。
+	//
+	// import 是一次性的迁移入口，在这里响亮地失败代价最小：用户当场
+	// 看到是哪一行错了，而不是导入成功之后再去猜为什么行为不对。
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
 	var raw spec.Config
-	if err := yaml.Unmarshal(data, &raw); err != nil {
-		return nil, fmt.Errorf("YAML 语法错误: %w", err)
+	if err := dec.Decode(&raw); err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil, fmt.Errorf("配置为空")
+		}
+		return nil, fmt.Errorf("YAML 解析失败: %w", err)
 	}
 	if len(raw.Accounts) == 0 {
 		return nil, fmt.Errorf("配置中没有任何账号")

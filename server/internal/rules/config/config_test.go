@@ -614,3 +614,35 @@ accounts:
 		t.Error("window 不大于 0 应当在加载时报错")
 	}
 }
+
+// 未知字段要报错，不能静默忽略。
+//
+// Parse 的文档注释写着「配置写错却静默忽略，比直接报错更难排查」，
+// 而 yaml.Unmarshal 默认恰恰会把拼错的键当不存在——用户改半天配置
+// 发现「不生效」，真正的原因只是少了一个字母。
+func TestParseRejectsUnknownField(t *testing.T) {
+	// windw 是 window 的常见拼错
+	const bad = `
+accounts:
+  - name: 小号
+    cookie: c
+    rooms:
+      - roomId: "123"
+        rules:
+          - name: 欢迎
+            on: [user_enter]
+            aggregate:
+              windw: 5s
+              by: type
+            do:
+              - type: danmaku
+                template: ["欢迎"]
+`
+	_, err := Parse([]byte(bad))
+	if err == nil {
+		t.Fatal("拼错的字段名应当报错，而不是被静默忽略")
+	}
+	if !strings.Contains(err.Error(), "windw") {
+		t.Errorf("错误信息应指出是哪个字段，实际: %v", err)
+	}
+}
