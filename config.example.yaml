@@ -106,6 +106,15 @@ accounts:
             on: [gift]
             # 按「用户+礼物」合并，连击会累加数量。
             # 只监听 gift 不监听 gift_combo——两者重复计数。
+            #
+            # when 里排除盲盒：盲盒也是 gift 事件，不排除的话它会被这条
+            # 通用规则按「爆出来的那个礼物」答谢一遍，再被下面的盲盒规则
+            # 答谢一遍——同一次投喂谢两次，而且第一次说的还是错的
+            #（用户送的是盲盒，不是里面爆出来的东西）。
+            when:
+              field: gift.isBlindBox
+              op: eq
+              value: false
             aggregate:
               window: 3s
               by: gift
@@ -114,6 +123,27 @@ accounts:
               - type: danmaku
                 template:
                   - '感谢 {{simplifyName .user.username}} 的 {{.gift.name}} x{{.gift.count}}！'
+
+          - name: 盲盒答谢
+            on: [gift]
+            # 盲盒单独一条规则，与常规礼物分开算盈亏。
+            #
+            # by: blindbox 是按「送礼人 + 盲盒类型」分组——同一个人交叉送
+            # 幸运盲盒与心动盲盒时，两者的盈亏必须分开统计，混在一起会得出
+            # 完全相反的结论（实测：混算「亏 56 电池」，分开是幸运赚 54、
+            # 心动亏 110）。
+            when:
+              field: gift.isBlindBox
+              op: eq
+              value: true
+            aggregate:
+              window: 10s
+              by: blindBox
+            cooldownGroup: thanks
+            do:
+              - type: danmaku
+                template:
+                  - '感谢 {{simplifyName .user.username}} 的 {{.blindBox.name}} x{{.blindBox.count}}，{{if gt .blindBox.profit 0}}赚了{{else}}亏了{{end}} {{.blindBox.profitYuan}} 元！'
 
           - name: 上舰答谢
             on: [guard_buy]
