@@ -343,3 +343,98 @@ func TestClientIgnoresHeartbeatReply(t *testing.T) {
 		t.Fatal("超时未收到事件")
 	}
 }
+
+// TestAuthenticateRespectsCtxCancellation 证明 authenticate 阶段现在
+// 会响应 ctx 取消，不会傻等固定的 authTimeout（10s）——这是 Important-4
+// 根因修复的直接证据：假服务器故意读完认证包之后永远不回认证回复（模拟
+// 对手卡在认证阶段：可能是异常、被风控、或者恶意），50ms 后取消 ctx，
+// 断言 authenticate 在远小于 authTimeout 的时间内就返回错误，而不是要
+// 等满 10 秒。
+//
+// 把这条测试的 ctx.Done() 分支临时注释掉（即还原成旧实现）重跑，会
+// 看到 authenticate 老老实实等满 authTimeout 才返回——这就是复审所说
+// 「pkTeardownGraceLimit 设得比 authTimeout 还大，形同虚设」的根因，
+// 本次修复之后这条路径的真实耗时应该是毫秒级，不再是 10 秒级。
+func TestAuthenticateRespectsCtxCancellation(t *testing.T) {
+	up := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := up.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		conn.ReadMessage() // 读认证包，读完之后故意永远不回认证回复
+		time.Sleep(20 * time.Second)
+	}))
+	t.Cleanup(srv.Close)
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("拨号失败: %v", err)
+	}
+	defer conn.Close()
+
+	c := NewClient("21452505", api.New(nil))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+
+	start := time.Now()
+	err = c.authenticate(ctx, conn, "tok")
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("ctx 取消后 authenticate 应该返回错误")
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("authenticate 耗时 %v，ctx 取消后应该在毫秒级返回，不该傻等 authTimeout（10s）", elapsed)
+	}
+}
+
+// TestClearEventHookIfOwnerDoesNotClobberNewerHook 覆盖 N-3：
+// finishRound 曾经无条件 setEventHook(nil)。如果 Disconnect 因为
+// pkTeardownGraceLimit 提前放弃等待、随后新一轮 PK 已经装上了自己的
+// 钩子，旧一轮的收尾协程这时候才姗姗来迟地跑到清钩子这一步——无条件
+// 清除会把新一轮正在用的钩子也摘掉，导致新一轮的 myAudience 从此停止
+// 更新。owner 令牌应该能防住这个：owner 已经不是当前钩子的主人时，
+// 清理动作什么都不该做。
+func TestClearEventHookIfOwnerDoesNotClobberNewerHook(t *testing.T) {
+	c := NewClient("21452505", api.New(nil))
+
+	// 用 new(int) 而不是 &struct{}{}：Go 对零大小分配的地址不保证唯一
+	// （运行时可能把所有 &struct{}{} 都指向同一个地址），拿它们当"两个
+	// 不同身份的令牌"本身就是错的，会让这条测试自己产生假阳性/假阴性。
+	ownerA := new(int) // 模拟旧一轮的 *pkRound
+	ownerB := new(int) // 模拟新一轮的 *pkRound
+
+	var calledB bool
+	c.setEventHook(ownerA, func(event.Event) {})
+	// 模拟"新一轮已经装上自己的钩子"，此时旧一轮的收尾协程才迟到执行。
+	c.setEventHook(ownerB, func(event.Event) { calledB = true })
+
+	c.clearEventHookIfOwner(ownerA) // 旧一轮尝试清理，owner 已经对不上了
+
+	c.mu.Lock()
+	hook := c.onEvent
+	c.mu.Unlock()
+	if hook == nil {
+		t.Fatal("owner 不匹配时清理动作不该清掉当前钩子，但钩子已经被清空")
+	}
+	hook(event.Event{})
+	if !calledB {
+		t.Error("当前钩子应该仍然是 ownerB 装的那个，但它没有被调用到")
+	}
+
+	// 新一轮自己清理，这次 owner 对得上，应该真的清掉。
+	c.clearEventHookIfOwner(ownerB)
+	c.mu.Lock()
+	hook = c.onEvent
+	c.mu.Unlock()
+	if hook != nil {
+		t.Error("owner 匹配时应该清掉当前钩子，但钩子仍然存在")
+	}
+}

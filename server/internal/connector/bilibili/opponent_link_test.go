@@ -214,8 +214,9 @@ func newPKHostClient(t *testing.T, fs *multiRoomFakeServer, roomID string, opts 
 				},
 			})
 		case strings.Contains(r.URL.Path, "audience"):
-			// PkLink.Connect 会同步播种观众集合，必须本地兜底，否则会
-			// 真的打到外网的 ajax/msg，把测试拖慢到预算超时（5s）。
+			// seedAudiences 在 connect 内部的独立 goroutine 里播种观众
+			// 集合，必须本地兜底，否则会真的打到外网的 ajax/msg，把
+			// 测试拖慢到预算超时（5s）。
 			w.Write([]byte(`{"code":0,"data":{"room":[]}}`))
 		default:
 			json.NewEncoder(w).Encode(map[string]any{
@@ -497,7 +498,7 @@ func TestPKAbnormalCtxCancelStillCleansUp(t *testing.T) {
 	// 异常结束：直接砍 PK 自己的 ctx，不调用 EndPK。
 	pkCancel()
 
-	// Disconnect 语义上应该能等到清理完成；这里通过 EndPK 再调用一次
+	// disconnect 语义上应该能等到清理完成；这里通过 EndPK 再调用一次
 	// 验证其幂等（此时清理可能已经由 ctx 取消触发完成）。
 	c.EndPK()
 
@@ -585,24 +586,51 @@ func TestNoLeakAcrossRepeatedPKRounds(t *testing.T) {
 // ---------- Critical-1 回归：注册必须先于阻塞工作 ----------
 
 // TestStartPKDuringHostShutdownDoesNotLeak 覆盖 Critical-1：StartPK 曾经
-// 是「先建立连接/播种、后登记到 c.pkLink」，宿主 Run 若恰好在播种耗时
-// 的窗口内退出，Run 的 defer 读到的 c.pkLink 还是 nil，EndPK 什么都不
-// 做，这一整场 PK（包括还在跑的慢播种请求和已经起来的对手连接）永久
-// 变成孤儿——审查者用探针复现过。
+// 是「先建立连接/播种、后登记到 c.pkLink」，宿主 Run 若恰好在这个窗口内
+// 退出，Run 的 defer 读到的 c.pkLink 还是 nil，什么都不做，这一整场 PK
+// 永久变成孤儿——审查者用探针复现过。
 //
-// 这里故意把 roomAudience 接口拖慢到远超测试实际等待的时长，模拟
-// 「播种尚未完成、宿主就退出」这个窗口：如果登记发生在阻塞工作之后
-// （旧实现），Run 会被迫等满这个人为拖慢的时长才能退出（或者更糟，
-// 永远不知道要收这场 PK）；如果登记发生在阻塞工作之前（当前实现），
-// Run 的 defer 能立刻找到并断开它，慢请求的 ctx 也会因此提前取消，
-// 不会真的等到那个人为拖慢的时长。
+// 这条测试经过了两轮返工，记录下来是因为返工过程本身暴露了两个容易
+// 想当然的坑：
+//
+//  1. 【复审第二轮指出】早期版本在 c.StartPK(...) **返回之后**才
+//     cancel()。播种（seedAudiences）已经挪进后台 goroutine，StartPK
+//     本身变成微秒级的「登记 + 起 goroutine」，等它返回时登记早就完成
+//     了——那条写法测的其实是"StartPK 返回得快"，根本没把"宿主在登记
+//     完成之前退出"这个窗口真正置于风险之中。把 opponent_link.go 还原
+//     成旧语义（同步播种 + 登记挪到末尾）之后，那条测试 5/5 照样通过。
+//
+//  2. 把 cancel() 改成跟 c.StartPK(...) 并发之后，仍然测不出来——排查
+//     发现 StartPK 整个函数体都包在 pkMu 里（concern-4 的修复），Run
+//     的 defer 里的 EndPK 一样要抢 pkMu 才能碰 pkLink：不管 connect
+//     内部把 registerPKLink 放在哪一步，Run 的 defer 都只能等 StartPK
+//     （含它内部完整的 connect 调用）彻底跑完、释放 pkMu 之后才能继续，
+//     两者不会在 connect 内部产生交叉。必须绕开 pkMu，直接调用
+//     newPkLink + link.connect（包内可见）才能把 registerPKLink 排序
+//     这件事本身置于风险之中。
+//
+//  3. 绕开 pkMu 之后依然测不出来——这次是因为用的是宿主 Run 自己的
+//     ctx：ctx 一旦取消，per-opponent 的 Client.Run(linkCtx) 会通过 ctx
+//     传播自己退出，不管 registerPKLink 的登记时机对不对，这些连接和
+//     PkLink 自己的收尾协程本来就会正常收尾——ctx 传播这条路自己就把
+//     "看起来像是修复生效"的假象撑住了，跟登记时机无关。真正的原始缺陷
+//     场景是"调用方给 StartPK 传的 ctx 跟宿主生命周期不挂钩"（比如按
+//     每场 PK 派生的独立 ctx），这时候唯一能让这场 PK 被清理掉的机制
+//     就是 Run 的 defer 里那次 EndPK——如果登记晚了，defer 找不到它，
+//     旁边又没有 ctx 传播来兜底，才会真正泄漏。所以这里的 pkCtx 必须
+//     独立于宿主自己的 ctx。
+//
+// 最终写法：pkCtx 独立于宿主 ctx；roomAudience 接口人为拖慢，把"同步
+// 播种"的窗口拉宽到跟调度时机无关，而不是赌一个纳秒级的巧合；
+// link.connect(pkCtx, ...) 和 cancel()（只取消宿主自己的 ctx）从两个
+// 独立 goroutine 同时发起。
 func TestStartPKDuringHostShutdownDoesNotLeak(t *testing.T) {
+	const slowSeedDelay = 200 * time.Millisecond
+
 	sess, err := auth.ParseSession("SESSDATA=x; bili_jct=tok; DedeUserID=42; buvid3=BV3")
 	if err != nil {
 		t.Fatalf("ParseSession 失败: %v", err)
 	}
-
-	const slowSeedDelay = 3 * time.Second
 
 	httpSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -615,7 +643,7 @@ func TestStartPKDuringHostShutdownDoesNotLeak(t *testing.T) {
 				},
 			})
 		case strings.Contains(r.URL.Path, "audience"):
-			// 故意拖慢，模拟播种尚未完成宿主就退出的窗口。
+			// 故意拖慢，把"同步播种"的窗口拉宽到远超调度抖动的量级。
 			time.Sleep(slowSeedDelay)
 			w.Write([]byte(`{"code":0,"data":{"room":[]}}`))
 		default:
@@ -640,32 +668,45 @@ func TestStartPKDuringHostShutdownDoesNotLeak(t *testing.T) {
 		WithBackoff(10*time.Millisecond, 30*time.Millisecond),
 	)
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(context.Background()) // 宿主 Run 自己的 ctx
 	runDone := make(chan struct{})
 	go func() { c.Run(ctx); close(runDone) }()
 	waitUntil(t, time.Second, func() bool { return fs.authCount() >= 1 })
 
 	base := goroutineBaseline(t)
 
-	link := c.StartPK(ctx, startPKMembers("21452505", "33333", "44444"))
-	// 不等待任何东西，立刻让宿主退出——这正是曾经导致漏登记的窗口：
-	// 此时后台的播种 goroutine 大概率还卡在那 3 秒的人为延迟里。
-	cancel()
+	// pkCtx 独立于宿主 ctx——这是让测试真正有效的关键，见函数注释第 3 点。
+	pkCtx := context.Background()
+	link := newPkLink(c)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		link.connect(pkCtx, startPKMembers("21452505", "33333", "44444"))
+	}()
+	go func() {
+		defer wg.Done()
+		cancel() // 只取消宿主自己的 ctx，不碰 pkCtx
+	}()
+	wg.Wait() // 建立 happens-before：下面读 link 是安全的
 
 	select {
 	case <-runDone:
 	case <-time.After(2 * time.Second):
-		t.Fatal("Run 迟迟不退出，怀疑被慢速播种请求拖住了" +
-			"（正确实现应该已经通过 ctx 取消让慢请求提前失败返回）")
+		t.Fatal("Run 迟迟不退出（怀疑被慢速播种请求拖住，正确实现不应该发生）")
 	}
 
+	// pkCtx 从未被取消，per-opponent 连接不会因为 ctx 传播自己退出——
+	// 唯一能让这场 PK 被清理掉的机制就是 Run 的 defer 里那次 EndPK
+	// 找到 registerPKLink 登记的 pkLink 并 disconnect。
 	select {
 	case _, ok := <-link.Events():
 		if ok {
 			t.Error("Run 退出后 link.Events() 仍在产出事件")
 		}
-	case <-time.After(time.Second):
-		t.Fatal("Run 退出后 link.Events() 应该已关闭，而不是继续阻塞")
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run 退出后 link.Events() 应该已关闭，而不是继续阻塞——" +
+			"说明 connect 与宿主退出发生竞态时，这一轮 PK 变成了孤儿")
 	}
 
 	if l := c.PKLink(); l != nil {
@@ -837,9 +878,15 @@ func TestPKSeedsAudienceSetsFromRecentDanmakuAndSelves(t *testing.T) {
 		{RoomID: "33333", UID: "u-opp-anchor"},
 	})
 
+	// 不能等 len(mine) > 0——seedAudiences 第一件事就是同步
+	// addMine(selfUID)，这个条件在 HTTP 请求发出去之前就已经成立，
+	// 等到的只是「自己主播已经播种」，不是「近期弹幕发送者真的播种
+	// 完了」。必须等真正来自 HTTP 的种子（"100"）落地，等一个必然
+	// 立刻成立的条件等于没等（复审实测过 -count=100 有 3~10% 失败率）。
 	waitUntil(t, time.Second, func() bool {
 		mine, _ := link.Audiences()
-		return len(mine) > 0
+		_, ok := mine["100"]
+		return ok
 	})
 
 	mine, opposite := link.Audiences()

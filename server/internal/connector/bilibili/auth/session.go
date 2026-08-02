@@ -153,8 +153,14 @@ func (s *Session) CookieHeader() string {
 	}
 	keys := s.order
 	if len(keys) != len(s.pairs) {
-		// 顺序信息不完整时退化为字典序，保证输出确定。
-		keys = keys[:0]
+		// 顺序信息不完整时退化为字典序，保证输出确定。这里必须 make 一份
+		// 全新的 slice，不能用 keys[:0] 复用 s.order 的底层数组再
+		// append/sort——那是在只持有读锁的情况下写共享状态，并发调用
+		// CookieHeader 会互相踩（复审指出的 N-4）。当前 len(order) ==
+		// len(pairs) 恒成立，这个分支本来就不可达，但"不可达"不代表
+		// "可以在锁语义上是错的"，加了 RWMutex 之后这条就是明确的
+		// 违规写法，照样要修。
+		keys = make([]string, 0, len(s.pairs))
 		for k := range s.pairs {
 			keys = append(keys, k)
 		}

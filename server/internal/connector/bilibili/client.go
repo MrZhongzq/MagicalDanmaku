@@ -105,9 +105,10 @@ type Client struct {
 	hostIndex   int
 	deviceFixed bool // 是否已因风控补齐过设备字段
 
-	onEvent func(event.Event) // PK 期间的同步观察钩子，见 setEventHook
-	pkLink  *PkLink           // 当前进行中的 PK 对面连接管理器，无 PK 时为 nil
-	closed  bool              // Run 的 defer 是否已经跑过；见 registerPKLink
+	onEvent      func(event.Event) // PK 期间的同步观察钩子，见 setEventHook
+	onEventOwner any               // 当前钩子的归属令牌，见 clearEventHookIfOwner
+	pkLink       *PkLink           // 当前进行中的 PK 对面连接管理器，无 PK 时为 nil
+	closed       bool              // Run 的 defer 是否已经跑过；见 registerPKLink
 
 	// pkMu 序列化 StartPK/EndPK 之间的调用（包括 Run 退出时兜底触发的
 	// 那次 EndPK）。文档化的调用方是单一事件循环，正常不会有并发调用，
@@ -169,7 +170,7 @@ func (c *Client) Run(ctx context.Context) error {
 		// 退出），就不能再留下悬挂的对面连接——这正是本任务要堵住的
 		// 泄漏风险，不能只靠注释保证。
 		//
-		// closed 先在 c.mu 下单独置位：StartPK 内部的 PkLink.Connect
+		// closed 先在 c.mu 下单独置位：StartPK 内部的 PkLink.connect
 		// 会在起任何连接前调用 registerPKLink 原子地「读 closed +
 		// 写 pkLink」；只要这个标志先置位，任何在此之后才走到
 		// registerPKLink 的 StartPK 调用都会看到 closed=true 并自己
@@ -177,7 +178,7 @@ func (c *Client) Run(ctx context.Context) error {
 		//
 		// 随后的 c.EndPK() 走 pkMu 序列化：如果这一刻恰好有别的
 		// goroutine 正在执行 StartPK（架构上这是并发的常态，不是使用者
-		// 违约），这里会等它那次调用完整跑完（很快，因为 Connect 的
+		// 违约），这里会等它那次调用完整跑完（很快，因为 connect 的
 		// 同步部分只是登记 + 起 goroutine，不再包含阻塞的播种 HTTP
 		// 调用）再继续——这就保证了「Run 已经跑完 defer、pkLink 还没来
 		// 得及登记」这个曾经真实存在的悬挂窗口（审查者用探针复现过）
@@ -279,7 +280,7 @@ func (c *Client) connectOnce(ctx context.Context) (established bool, err error) 
 	}
 	defer conn.Close()
 
-	if err := c.authenticate(conn, di.Token); err != nil {
+	if err := c.authenticate(ctx, conn, di.Token); err != nil {
 		return false, err
 	}
 
@@ -323,7 +324,16 @@ func (c *Client) fetchDanmuInfo(ctx context.Context) (*api.DanmuInfo, error) {
 }
 
 // authenticate 发送认证包并等待认证回复。
-func (c *Client) authenticate(conn *websocket.Conn, token string) error {
+//
+// ctx 取消时会立即关闭连接，不会傻等固定的 authTimeout（10s）——这跟
+// pump() 里对收包阶段的处理是同一个道理，只是认证阶段之前没有补上。
+// 复审指出的缺口：对手连接卡在认证阶段（对面不回认证包，可能是异常/
+// 恶意/网络抖动）时，PkLink.disconnect 靠 ctx 取消让子连接尽快退出，
+// 如果 authenticate 不感知 ctx，这个「尽快」在认证阶段就落空了，
+// 只能傻等 10 秒——pkTeardownGraceLimit 那道兜底上限本来是为了防止
+// 这类情况把宿主退出流程拖住，但如果这里从根上就不会卡 10 秒，那道
+// 上限就真的只是"理论上限"，不是"日常要付的代价"。
+func (c *Client) authenticate(ctx context.Context, conn *websocket.Conn, token string) error {
 	uid := int64(0)
 	buvid := ""
 	if sess := c.api.Session(); sess != nil {
@@ -351,6 +361,19 @@ func (c *Client) authenticate(conn *websocket.Conn, token string) error {
 	if err := conn.WriteMessage(websocket.BinaryMessage, wire.Encode(wire.OpAuth, body)); err != nil {
 		return fmt.Errorf("发送认证包失败: %w", err)
 	}
+
+	// ctx 取消时立即关闭连接，打断下面可能阻塞长达 authTimeout 的
+	// ReadMessage——watcherDone 保证 authenticate 正常返回时这个
+	// goroutine 也会跟着退出，不会泄漏。
+	watcherDone := make(chan struct{})
+	defer close(watcherDone)
+	go func() {
+		select {
+		case <-ctx.Done():
+			conn.Close()
+		case <-watcherDone:
+		}
+	}()
 
 	// 等待认证回复
 	if err := conn.SetReadDeadline(time.Now().Add(authTimeout)); err != nil {
@@ -468,12 +491,32 @@ func (c *Client) handleMessage(ctx context.Context, msg []byte) {
 	}
 }
 
-// setEventHook 设置/清除一个同步事件观察钩子，目前只给 PkLink
-// 用来维护 PK 观众集合。钩子不改变事件投递路径（该丢的还是丢、该发的
-// 还是发），只是在事件产生的同一时刻做一次旁路观察；为 nil 时零开销。
-func (c *Client) setEventHook(fn func(event.Event)) {
+// setEventHook 设置一个同步事件观察钩子，目前只给 PkLink 用来维护 PK
+// 观众集合。钩子不改变事件投递路径（该丢的还是丢、该发的还是发），
+// 只是在事件产生的同一时刻做一次旁路观察。owner 是这次设置的归属
+// 令牌（PkLink 传自己那一轮的 *pkRound），配合 clearEventHookIfOwner
+// 使用，防止过期的清理动作摘掉新一轮已经装上的钩子。
+func (c *Client) setEventHook(owner any, fn func(event.Event)) {
 	c.mu.Lock()
 	c.onEvent = fn
+	c.onEventOwner = owner
+	c.mu.Unlock()
+}
+
+// clearEventHookIfOwner 仅当当前钩子仍然属于 owner 时才摘除。
+//
+// 复审指出的坑：finishRound 曾经无条件 setEventHook(nil)。如果
+// disconnect 因为 pkTeardownGraceLimit 提前放弃等待而返回，随后新一轮
+// StartPK 装上了自己的钩子，旧一轮的收尾协程这时候才姗姗来迟地执行到
+// 这一步，无条件清除会把新一轮正在用的钩子也摘掉，导致新一轮的
+// myAudience 从此停止更新。用 owner 令牌判断"这把钩子还是不是我挂的"，
+// 不是我挂的就什么都不做。
+func (c *Client) clearEventHookIfOwner(owner any) {
+	c.mu.Lock()
+	if c.onEventOwner == owner {
+		c.onEvent = nil
+		c.onEventOwner = nil
+	}
 	c.mu.Unlock()
 }
 
@@ -483,7 +526,7 @@ func (c *Client) setEventHook(fn func(event.Event)) {
 //
 // 调用方通常在观测到 PK_INFO（event.Battle.Members 非空）时调用一次；
 // 即使调用方忘了在 PK 结束时调用 EndPK、甚至宿主 Run 已经退出，这次
-// 调用也不会产生悬挂连接——具体怎么保证的，见 PkLink.Connect 里
+// 调用也不会产生悬挂连接——具体怎么保证的，见 PkLink.connect 里
 // registerPKLink 那一段注释。
 //
 // 用 pkMu 跟 EndPK（含 Run 退出时兜底触发的那次）互斥：如果没有这把
@@ -499,7 +542,7 @@ func (c *Client) StartPK(ctx context.Context, members []event.PkMember) *PkLink 
 	c.endPKLocked() // 防御性收尾：不允许两场 PK 的连接叠加
 
 	link := newPkLink(c)
-	link.Connect(ctx, members)
+	link.connect(ctx, members)
 	return link
 }
 
@@ -519,7 +562,7 @@ func (c *Client) endPKLocked() {
 	c.mu.Unlock()
 
 	if link != nil {
-		link.Disconnect()
+		link.disconnect()
 	}
 }
 
@@ -534,7 +577,7 @@ func (c *Client) PKLink() *PkLink {
 // 已经关闭（Run 的 defer 已经跑完）。
 //
 // 这是堵住「先连接/播种、后登记，宿主退出兜底失效」这个窗口的关键：
-// 调用方（PkLink.Connect）必须在起任何连接、做任何阻塞工作之前就调用
+// 调用方（PkLink.connect）必须在起任何连接、做任何阻塞工作之前就调用
 // 这个方法。因为它跟 Run 的 defer 共用同一把 c.mu 做「读 closed +
 // 写 pkLink」这个组合操作，两个 goroutine 不管谁先谁后都不会漏——
 // 要么这里先跑完，Run 的 defer 稍后一定能读到刚登记的 link 并断开它；

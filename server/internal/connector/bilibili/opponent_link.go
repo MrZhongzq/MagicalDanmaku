@@ -8,11 +8,11 @@ import (
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/event"
 )
 
-// pkTeardownGraceLimit 是 Disconnect 兜底等待清理完成的硬上限。正常情况
+// pkTeardownGraceLimit 是 disconnect 兜底等待清理完成的硬上限。正常情况
 // 下清理在毫秒级完成；给上限是为了防一个慢角落：子连接可能卡在
 // authenticate()（client.go）里等对面服务器的认证回复——那段代码用的是
 // 固定 authTimeout 读超时，不接受 ctx，ctx 取消对它不生效，只能等读
-// 超时自己触发。Disconnect 常常同步跑在宿主 Client.Run 的 defer 里，
+// 超时自己触发。disconnect 常常同步跑在宿主 Client.Run 的 defer 里，
 // 不能因为一个（可能异常/被风控）对手服务器迟迟不回包，就把宿主整个
 // 退出流程拖住到无限久——超过这个上限就记录警告后放弃等待，让调用方
 // 尽快拿回控制权；子连接自己的 goroutine 仍然会在各自的读超时触发后
@@ -56,8 +56,8 @@ type PkLink struct {
 	// 哪个对手连接，也天然能对上号。
 }
 
-// pkRound 是一场 PK 期间全部对手连接共享的状态。每次 Connect 都会创建
-// 一个全新的 pkRound，Disconnect/异常退出后旧的 round 不会被复用——这样
+// pkRound 是一场 PK 期间全部对手连接共享的状态。每次 connect 都会创建
+// 一个全新的 pkRound，disconnect/异常退出后旧的 round 不会被复用——这样
 // 「PK 正常结束」和「PK 异常结束（ctx 被外部取消）」可以走同一套清理
 // 代码，不需要在两个地方各写一份、容易漏同步。
 type pkRound struct {
@@ -97,17 +97,17 @@ func (p *PkLink) Events() <-chan event.Event {
 	return p.round.events
 }
 
-// Connect 为 members 里每一个非自己的房间各起一条弹幕连接。
+// connect 为 members 里每一个非自己的房间各起一条弹幕连接。
 //
 // 只应该在「PK 接通」这一刻调用一次；如果上一场还没断开就再次调用，会
 // 先把上一场断干净、等它完全清理完，再开始新的一场——不允许两场 PK 的
-// 连接叠加，也不依赖调用方按规矩先调 Disconnect 再调 Connect。
+// 连接叠加，也不依赖调用方按规矩先调 disconnect 再调 connect。
 //
 // ctx 通常是宿主 Client.Run 自己的 ctx（或它的派生）：一旦这个 ctx 被
 // 取消（不管是因为调用方主动收尾，还是宿主连接/进程整体退出），全部
 // 对手连接都会跟着退出，不需要调用方额外做什么。
-func (p *PkLink) Connect(ctx context.Context, members []event.PkMember) {
-	p.Disconnect()
+func (p *PkLink) connect(ctx context.Context, members []event.PkMember) {
+	p.disconnect()
 
 	opponents := filterOpponents(members, p.host.roomID)
 	if len(opponents) == 0 {
@@ -133,7 +133,7 @@ func (p *PkLink) Connect(ctx context.Context, members []event.PkMember) {
 	// 之后，宿主若恰好在这个窗口内退出，defer 读到的 pkLink 还是 nil，
 	// 这一轮连接会永久变成孤儿——探针复现过。registerPKLink 跟 Run 的
 	// defer 共用同一把锁做「读 closed + 写 pkLink」，不管两个 goroutine
-	// 谁先谁后都不会漏；如果它告知宿主已经关闭，说明这次 Connect 本身
+	// 谁先谁后都不会漏；如果它告知宿主已经关闭，说明这次 connect 本身
 	// 就是「宿主已经退出后才发起」，直接自行收尾，不建立任何真实连接。
 	if p.host.registerPKLink(p) {
 		cancel()
@@ -141,7 +141,11 @@ func (p *PkLink) Connect(ctx context.Context, members []event.PkMember) {
 		return
 	}
 
-	p.host.setEventHook(p.observeMine)
+	// owner 用 round 自己的指针当归属令牌——finishRound 清钩子时会
+	// 拿它跟 host 当前记着的 owner 比对，防止一次迟到的清理（比如
+	// disconnect 因 pkTeardownGraceLimit 提前返回）把新一轮已经装上的
+	// 钩子误摘掉（N-3 修复，见 client.go clearEventHookIfOwner）。
+	p.host.setEventHook(round, p.observeMine)
 
 	var wg sync.WaitGroup
 
@@ -151,7 +155,7 @@ func (p *PkLink) Connect(ctx context.Context, members []event.PkMember) {
 	// 主房间的事件会在 PK 接通、弹幕礼物最密集的那一刻被晾在 256
 	// 缓冲的 c.events 里，超出缓冲就被 handleMessage 的 default 分支
 	// 直接丢弃。观众集合本来就是「有多少算多少」的降级语义，不需要在
-	// Connect 返回前就绪，放进独立 goroutine、并入 wg 一起等它退出。
+	// connect 返回前就绪，放进独立 goroutine、并入 wg 一起等它退出。
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -166,10 +170,10 @@ func (p *PkLink) Connect(ctx context.Context, members []event.PkMember) {
 		}(m)
 	}
 
-	// 收尾协程：不管 linkCtx 是被 Disconnect 显式取消，还是被调用方传入
+	// 收尾协程：不管 linkCtx 是被 disconnect 显式取消，还是被调用方传入
 	// 的父 ctx 间接取消（PK 异常结束、宿主 Run 退出走的都是这条路），
 	// 都在这一个地方做最终清理——这是唯一能同时兜住「正常结束」之外
-	// 全部退出路径的地方，Disconnect 本身只负责触发取消、然后等这里
+	// 全部退出路径的地方，disconnect 本身只负责触发取消、然后等这里
 	// 跑完。
 	go func() {
 		<-linkCtx.Done()
@@ -180,11 +184,15 @@ func (p *PkLink) Connect(ctx context.Context, members []event.PkMember) {
 
 // finishRound 是一场 PK 的最终清理：摘观众集合钩子、关闭事件通道、
 // 把 p.round 清空（如果它还指向这一轮——避免清掉后面新一轮已经装上的
-// round）、最后关闭 done 通知 Disconnect 已经断干净。不管是正常收尾
-// 途中的收尾协程调用它，还是 Connect 发现宿主已关闭时直接同步调用它，
+// round）、最后关闭 done 通知 disconnect 已经断干净。不管是正常收尾
+// 途中的收尾协程调用它，还是 connect 发现宿主已关闭时直接同步调用它，
 // 都走这一份代码，不重复写两遍容易漏同步的清理逻辑。
+//
+// clearEventHookIfOwner(round) 而不是无条件摘钩子：如果 disconnect
+// 因为 pkTeardownGraceLimit 提前放弃等待、随后新一轮已经装上了自己的
+// 钩子，这次迟到的清理不能把新一轮的钩子也摘了。
 func (p *PkLink) finishRound(round *pkRound) {
-	p.host.setEventHook(nil)
+	p.host.clearEventHookIfOwner(round)
 	close(round.events)
 
 	p.mu.Lock()
@@ -193,10 +201,10 @@ func (p *PkLink) finishRound(round *pkRound) {
 	}
 	p.mu.Unlock()
 
-	close(round.done) // 必须最后关，Disconnect 靠它判断"已经断干净"
+	close(round.done) // 必须最后关，disconnect 靠它判断"已经断干净"
 }
 
-// Disconnect 断开当前这一场 PK 的全部对手连接，等待清理真正完成
+// disconnect 断开当前这一场 PK 的全部对手连接，等待清理真正完成
 // （goroutine 退出、事件通道关闭、观众集合钩子摘除）才返回，但不会
 // 无限等下去——见 pkTeardownGraceLimit 的注释：子连接可能卡在不接受
 // ctx 的 authenticate() 读超时里，超过上限就放弃等待、记录警告后返回，
@@ -205,7 +213,7 @@ func (p *PkLink) finishRound(round *pkRound) {
 //
 // 幂等：没有进行中的 PK、或者这场 PK 已经因为 ctx 被外部取消而自行清理
 // 完毕，都是安全的空操作/快速返回——不要求调用方精确知道当前状态。
-func (p *PkLink) Disconnect() {
+func (p *PkLink) disconnect() {
 	p.mu.Lock()
 	round := p.round
 	p.mu.Unlock()
@@ -303,10 +311,14 @@ func selfMemberUID(members []event.PkMember, selfRoomID string) string {
 
 // ---------- 观众集合 ----------
 
-// seedAudiences 在对手连接建立前先播种两个观众集合，语义照抄原 C++
-// connectPkRoom/getRoomCurrentAudiences（bili_liveservice.cpp:3278-3365）：
-// 双方房间各拉一次「近期弹幕发送者」uid 当观众集合的近似值，再补上
-// 自己主播、对面主播本人。
+// seedAudiences 播种两个观众集合，语义照抄原 C++ connectPkRoom/
+// getRoomCurrentAudiences（bili_liveservice.cpp:3278-3365）：双方房间
+// 各拉一次「近期弹幕发送者」uid 当观众集合的近似值，再补上自己主播、
+// 对面主播本人。
+//
+// 这是在 connect 里的独立 goroutine 中调用的（Important-3 修复），不是
+// 同步跑在对手连接建立之前——种子集合本来就是「有多少算多少」的降级
+// 语义，不需要在对手连接真正建立前就绪，没必要为了这个去阻塞调用方。
 //
 // 三个 HTTP 调用都是「有多少算多少」的降级，不让任何一个失败拖住整场
 // PK 或让种子集合直接报错——PK 接通瞬间正是这类接口最容易超时/限流的

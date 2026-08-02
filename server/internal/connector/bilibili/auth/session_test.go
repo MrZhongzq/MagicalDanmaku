@@ -174,3 +174,31 @@ func TestSessionConcurrentAccessDoesNotCrash(t *testing.T) {
 		wg.Wait()
 	}
 }
+
+// TestCookieHeaderFallsBackToSortedOrderWhenOrderIncomplete 验证 N-4
+// 修复后降级分支（order/pairs 长度不一致时改走字典序）的输出仍然正确。
+//
+// 正常路径下 len(order) == len(pairs) 恒成立，这个分支本来就不会被
+// 触发——这里直接摆弄内部字段强制制造不一致来单独验证它。N-4 真正修的
+// 是这个分支「只持有读锁却在写共享 slice（keys[:0] 复用 s.order 的
+// 底层数组再 append/sort）」这个锁语义问题，不是它的输出逻辑；既然把
+// 实现从「复用 s.order」换成了「make 一份新的」，就要证明换完之后
+// 产出的 Cookie 头没有变化。并发安全性本身需要 -race 才能验证，这里
+// 验证不了，如实记录。
+func TestCookieHeaderFallsBackToSortedOrderWhenOrderIncomplete(t *testing.T) {
+	s, err := ParseSession("SESSDATA=xyz; bili_jct=tok; DedeUserID=42")
+	if err != nil {
+		t.Fatalf("ParseSession 失败: %v", err)
+	}
+
+	// 人为截短 order，制造 len(order) != len(pairs)。
+	s.order = s.order[:len(s.order)-1]
+
+	h := s.CookieHeader()
+
+	for _, want := range []string{"SESSDATA=xyz", "bili_jct=tok", "DedeUserID=42"} {
+		if !strings.Contains(h, want) {
+			t.Errorf("CookieHeader 缺少 %q，实际 %q", want, h)
+		}
+	}
+}
