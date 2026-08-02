@@ -1,0 +1,39 @@
+{
+  "cmd": "PK_INFO",
+  "data": {
+    "audience_open": true,
+    "members": [
+      {
+        "room_id": 21452505,
+        "uid": 11111111,
+        "uname": "本房主播",
+        "face": "http://i1.hdslb.com/bfs/face/aaa.jpg",
+        "is_winner": 0,
+        "votes": 10
+      },
+      {
+        "room_id": 33333,
+        "uid": 22222222,
+        "uname": "对面甲",
+        "face": "http://i1.hdslb.com/bfs/face/bbb.jpg",
+        "is_winner": 0,
+        "votes": 20
+      },
+      {
+        "room_id": 44444,
+        "uid": 33333333,
+        "uname": "对面乙",
+        "face": "http://i1.hdslb.com/bfs/face/ccc.jpg",
+        "is_winner": 1,
+        "votes": 30
+      }
+    ],
+    "pk_basic": {
+      "end_time": 1785660000,
+      "muti_pk_type": 3,
+      "pk_id": 398603999,
+      "start_time": 1785659700,
+      "template_id": "multi_conn_grid"
+    }
+  }
+}

@@ -1,0 +1,49 @@
+{
+  "cmd": "PK_INFO",
+  "data": {
+    "audience_open": false,
+    "members": [
+      {
+        "room_id": 21452505,
+        "uid": 11111111,
+        "uname": "本房主播",
+        "face": "http://i1.hdslb.com/bfs/face/aaa.jpg",
+        "golds": 6500,
+        "rank": 2,
+        "status": 3,
+        "is_winner": 0,
+        "votes": 65,
+        "votes_text": "65"
+      },
+      {
+        "room_id": 33333,
+        "uid": 22222222,
+        "uname": "对面主播",
+        "face": "http://i1.hdslb.com/bfs/face/bbb.jpg",
+        "golds": 115000,
+        "rank": 1,
+        "status": 3,
+        "is_winner": 1,
+        "votes": 1151,
+        "votes_text": "1151"
+      }
+    ],
+    "pk_basic": {
+      "biz_session_id": "17856582309593707039169644702",
+      "end_time": 1785658541,
+      "init_id": 21452505,
+      "init_uid": 11111111,
+      "muti_pk_type": 3,
+      "pk_id": 398603316,
+      "punish_end_time": 1785658601,
+      "score_mode": 0,
+      "season_id": 100,
+      "sprint_duration": 10,
+      "start_time": 1785658231,
+      "status": 101,
+      "sub_type": 8,
+      "template_id": "multi_conn_grid",
+      "type": 2
+    }
+  }
+}

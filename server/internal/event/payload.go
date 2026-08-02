@@ -129,9 +129,30 @@ type RoomStatsUpdate struct {
 	LikeCount *int64 // 点赞数
 }
 
-// Battle 是 PK 大乱斗相关事件，P0 只归一化不解释。
+// PkMember 是一场 PK 里的一方。
+//
+// 带 RoomID 是为了让规则层能拿 Event.RoomID 比对出「自己」和「对面」——
+// 协议层不知道调用方绑定的是哪个房间，这个过滤故意不在这里做。
+type PkMember struct {
+	RoomID   string
+	UID      string
+	Username string
+	Face     string
+	Votes    int64
+	IsWinner bool
+}
+
+// Battle 是 PK 大乱斗相关事件。
+//
+// Members 全量来自 PK_INFO.data.members[]，原样交出、一个不过滤；
+// 其余 PK_BATTLE_* 系列 CMD 不携带参战方明细，只归一化 SubCommand，
+// 解释权留给 P6（见 Raw）。
 type Battle struct {
-	SubCommand string // 原始 CMD 名，如 "PK_BATTLE_START_NEW"
+	SubCommand string     // 原始 CMD 名，如 "PK_BATTLE_START_NEW"
+	PkID       string     // 这场 PK 的 ID，来自 pk_basic.pk_id
+	Members    []PkMember // 参战方，可能多于两方；仅 PK_INFO 携带
+	StartTime  int64      // 秒级时间戳，来自 pk_basic.start_time
+	EndTime    int64      // 秒级时间戳，来自 pk_basic.end_time
 }
 
 // Unknown 是未识别的 CMD。
