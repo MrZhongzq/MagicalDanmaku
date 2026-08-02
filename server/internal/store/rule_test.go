@@ -29,7 +29,7 @@ func sampleRule() spec.Rule {
 		On:   []string{"user_enter"},
 		When: &spec.Condition{Field: "user.guardLevel", Op: ">", Value: 0},
 		Aggregate: &spec.Aggregate{
-			Window: spec.Duration(3 * time.Minute), MaxWait: spec.Duration(5 * time.Minute),
+			Window:   spec.Duration(3 * time.Minute),
 			MinCount: 4, By: "type",
 		},
 		CooldownGroup: "greeting",

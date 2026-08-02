@@ -44,12 +44,11 @@ export interface Condition {
  * Aggregate 对应 spec.Aggregate。
  *
  * 注意 `window` 与 `by` 在 Go 侧**没有** `omitempty`——它们始终会出现在
- * 序列化结果里，所以这里是必填字段，不加 `?`。`maxWait`/`minCount` 才是
+ * 序列化结果里，所以这里是必填字段，不加 `?`。`minCount` 才是
  * omitempty，可选。
  */
 export interface Aggregate {
   window: Duration
-  maxWait?: Duration
   minCount?: number
   by: string
 }

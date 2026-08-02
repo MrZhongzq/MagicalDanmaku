@@ -82,11 +82,8 @@ accounts:
               field: user.guardLevel
               op: '>'
               value: 0
-            # 合并窗口是滚动的：每来一个人就把结算时间往后推，
-            # 因此「3 分钟内陆续进场」会被算作同一批。
-            #
-            # maxWait 是必须的安全阀：热闹房间里总有人进场，静默期
-            # 永远不会到来，不设它就一直不结算。
+            # 合并窗口从本轮首个事件起算固定时长：不论期间又来多少人，
+            # 3 分钟一到就结算，不会被之后进场的人拖后。
             #
             # minCount 决定人少时的行为：不足 4 人则不合并，
             # 每人单独欢迎——一个人被说成「欢迎 某某」比合并句式自然。
@@ -96,7 +93,6 @@ accounts:
             # 窗口内按 UID 合并后取非空昵称。
             aggregate:
               window: 3m
-              maxWait: 5m
               minCount: 4
               by: type
             cooldownGroup: greeting

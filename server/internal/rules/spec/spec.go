@@ -70,7 +70,6 @@ type Condition struct {
 // Aggregate 是合并窗口的序列化形式。
 type Aggregate struct {
 	Window   Duration `yaml:"window"   json:"window"`
-	MaxWait  Duration `yaml:"maxWait"  json:"maxWait,omitempty"`
 	MinCount int      `yaml:"minCount" json:"minCount,omitempty"`
 	By       string   `yaml:"by"       json:"by"`
 }

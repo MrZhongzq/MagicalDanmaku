@@ -272,7 +272,6 @@ export interface EnterDraft {
   filter: EnterFilter
   groupMode: EnterGroupMode
   windowSeconds: number
-  maxWaitSeconds: number | null
   minCount: number
   pickMode: PickMode
   singleTemplates: string[]
@@ -285,7 +284,6 @@ export function defaultEnterDraft(): EnterDraft {
     filter: defaultEnterFilter(),
     groupMode: 'merge',
     windowSeconds: 180,
-    maxWaitSeconds: 600,
     minCount: 2,
     pickMode: 'random',
     singleTemplates: ['欢迎 {{.user.username}} 来到直播间~'],
@@ -296,14 +294,10 @@ export function defaultEnterDraft(): EnterDraft {
 function buildAggregateCommon(a: {
   by: string
   windowSeconds: number
-  maxWaitSeconds: number | null
   minCount: number
   applyMinCount: boolean
 }): Aggregate {
   const agg: Aggregate = { window: secondsToDuration(a.windowSeconds), by: a.by }
-  if (a.maxWaitSeconds !== null && a.maxWaitSeconds > 0) {
-    agg.maxWait = secondsToDuration(a.maxWaitSeconds)
-  }
   if (a.applyMinCount && a.minCount > 1) {
     agg.minCount = a.minCount
   }
@@ -325,7 +319,6 @@ export function buildEnterRule(draft: EnterDraft, roomId: string): Rule {
     aggregate: buildAggregateCommon({
       by: ENTER_GROUP_MODE_BY[draft.groupMode],
       windowSeconds: draft.windowSeconds,
-      maxWaitSeconds: draft.maxWaitSeconds,
       minCount: draft.minCount,
       applyMinCount: draft.groupMode === 'merge',
     }),
@@ -355,9 +348,6 @@ export function parseEnterDraft(rule: Rule | null): EnterDraft {
   if (agg) {
     draft.groupMode = ENTER_BY_TO_GROUP_MODE[agg.by] ?? 'merge'
     draft.windowSeconds = secondsFromDuration(agg.window, draft.windowSeconds)
-    draft.maxWaitSeconds = agg.maxWait
-      ? secondsFromDuration(agg.maxWait, draft.maxWaitSeconds ?? 0)
-      : null
     if (agg.minCount !== undefined) draft.minCount = agg.minCount
   }
 
@@ -393,7 +383,6 @@ export interface GiftDraft {
   enabled: boolean
   groupMode: GiftGroupMode
   windowSeconds: number
-  maxWaitSeconds: number | null
   minCount: number
   pickMode: PickMode
   templates: string[]
@@ -408,7 +397,6 @@ export function defaultGiftDraft(): GiftDraft {
     enabled: true,
     groupMode: 'merge',
     windowSeconds: 20,
-    maxWaitSeconds: 60,
     minCount: 2,
     pickMode: 'random',
     templates: ['感谢 {{join .users "、"}} 的 {{join .gifts "、"}}，您的支持就是对主播最大的鼓励'],
@@ -425,7 +413,6 @@ export function buildGiftRule(draft: GiftDraft): Rule {
     aggregate: buildAggregateCommon({
       by: GIFT_GROUP_MODE_BY[draft.groupMode],
       windowSeconds: draft.windowSeconds,
-      maxWaitSeconds: draft.maxWaitSeconds,
       minCount: draft.minCount,
       applyMinCount: draft.groupMode === 'merge',
     }),
@@ -449,9 +436,6 @@ export function parseGiftDraft(rule: Rule | null): GiftDraft {
   if (agg) {
     draft.groupMode = GIFT_BY_TO_GROUP_MODE[agg.by] ?? 'merge'
     draft.windowSeconds = secondsFromDuration(agg.window, draft.windowSeconds)
-    draft.maxWaitSeconds = agg.maxWait
-      ? secondsFromDuration(agg.maxWait, draft.maxWaitSeconds ?? 0)
-      : null
     if (agg.minCount !== undefined) draft.minCount = agg.minCount
   }
 
@@ -949,14 +933,6 @@ function dismissPartialFailure() {
               {{ enterDraft.groupMode === 'merge' ? '合并窗口（秒）' : '去重窗口（秒）' }}
             </span>
             <NInputNumber v-model:value="enterDraft.windowSeconds" :min="1" style="width: 140px" />
-            <span class="label">最长等待（秒，可选）</span>
-            <NInputNumber
-              v-model:value="enterDraft.maxWaitSeconds"
-              :min="0"
-              clearable
-              placeholder="不设上限"
-              style="width: 140px"
-            />
             <span class="label">最少合并人数</span>
             <NInputNumber
               v-model:value="enterDraft.minCount"
@@ -1025,14 +1001,6 @@ function dismissPartialFailure() {
               {{ giftDraft.groupMode === 'merge' ? '合并窗口（秒）' : '累加窗口（秒）' }}
             </span>
             <NInputNumber v-model:value="giftDraft.windowSeconds" :min="1" style="width: 140px" />
-            <span class="label">最长等待（秒，可选）</span>
-            <NInputNumber
-              v-model:value="giftDraft.maxWaitSeconds"
-              :min="0"
-              clearable
-              placeholder="不设上限"
-              style="width: 140px"
-            />
             <span class="label">最少合并人数</span>
             <NInputNumber
               v-model:value="giftDraft.minCount"

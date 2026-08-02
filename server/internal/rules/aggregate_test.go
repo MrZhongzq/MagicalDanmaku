@@ -525,33 +525,3 @@ func TestPassthroughTriggerGiftsEmptyForNonGiftEvent(t *testing.T) {
 		t.Errorf("非礼物事件的 gifts 应为空数组，实际 %v", gifts)
 	}
 }
-
-func TestAggregateMaxWaitNoLongerDelaysFixedWindow(t *testing.T) {
-	// 乙语义下窗口本身有固定上界（Window），MaxWait 原本用于防止
-	// 「持续送礼、静默期永不到来」的场景已不存在：结算永远发生在
-	// Window 到期，不会被更大的 MaxWait 取值拖后。
-	//
-	// 注：这条测试取代了旧版的 TestAggregateMaxWaitCapsRolling——旧版
-	// 靠持续 Add 让静默计时永不到期，只能证明 MaxWait 兜底生效；乙语义
-	// 下窗口不再滚动，这个场景已经不存在，MaxWait 也就不再需要那份兜
-	// 底职责了。
-	c := &collector{}
-	agg := NewAggregator(AggregateSpec{
-		Window: 60 * time.Millisecond, MaxWait: 500 * time.Millisecond, By: AggregateByType,
-	}, c.add)
-	defer agg.Close()
-
-	agg.Add(enterEvent("1", "甲", 0))
-	time.Sleep(90 * time.Millisecond) // 远小于 MaxWait(500ms)，但已超过 Window(60ms)
-
-	if got := c.all(); len(got) != 1 {
-		t.Fatalf("应在 Window 到期时结算，不受 MaxWait 更大取值影响，实际 %d 条", len(got))
-	}
-}
-
-func TestAggregateSpecValidateRejectsBadMaxWait(t *testing.T) {
-	s := AggregateSpec{Window: 5 * time.Second, MaxWait: time.Second, By: AggregateByType}
-	if err := s.Validate(); err == nil {
-		t.Error("maxWait 小于 window 应当报错")
-	}
-}

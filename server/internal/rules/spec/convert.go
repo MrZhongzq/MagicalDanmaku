@@ -82,7 +82,6 @@ func (r Rule) ToRule() (rules.Rule, error) {
 	if r.Aggregate != nil {
 		out.Aggregate = &rules.AggregateSpec{
 			Window:   time.Duration(r.Aggregate.Window),
-			MaxWait:  time.Duration(r.Aggregate.MaxWait),
 			MinCount: r.Aggregate.MinCount,
 			By:       rules.AggregateBy(r.Aggregate.By),
 		}

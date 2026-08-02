@@ -80,7 +80,7 @@ func TestRuleJSONRoundTrip(t *testing.T) {
 		"enabled": true,
 		"on": ["user_enter"],
 		"when": {"field": "user.guardLevel", "op": ">", "value": 0},
-		"aggregate": {"window": "3m", "maxWait": "5m", "minCount": 4, "by": "type"},
+		"aggregate": {"window": "3m", "minCount": 4, "by": "type"},
 		"cooldownGroup": "greeting",
 		"do": [{"type": "danmaku", "template": ["欢迎 {{join .users \"、\"}} 回家~"]}]
 	}`
@@ -112,7 +112,7 @@ func TestRuleJSONRoundTrip(t *testing.T) {
 	if d1.Name != d2.Name || d1.CooldownGroup != d2.CooldownGroup {
 		t.Errorf("往返后基本字段不一致: %+v vs %+v", d1, d2)
 	}
-	if d1.Aggregate.Window != d2.Aggregate.Window || d1.Aggregate.MaxWait != d2.Aggregate.MaxWait {
+	if d1.Aggregate.Window != d2.Aggregate.Window || d1.Aggregate.MinCount != d2.Aggregate.MinCount {
 		t.Errorf("往返后合并窗口不一致: %+v vs %+v", d1.Aggregate, d2.Aggregate)
 	}
 	if d1.When.Op != d2.When.Op {
@@ -380,7 +380,6 @@ func TestToRuleCarriesAggregateFields(t *testing.T) {
 		On:   []string{"user_enter"},
 		Aggregate: &spec.Aggregate{
 			Window:   spec.Duration(3 * time.Minute),
-			MaxWait:  spec.Duration(5 * time.Minute),
 			MinCount: 4,
 			By:       "type",
 		},
@@ -391,7 +390,6 @@ func TestToRuleCarriesAggregateFields(t *testing.T) {
 	}
 	want := rules.AggregateSpec{
 		Window:   3 * time.Minute,
-		MaxWait:  5 * time.Minute,
 		MinCount: 4,
 		By:       rules.AggregateByType,
 	}

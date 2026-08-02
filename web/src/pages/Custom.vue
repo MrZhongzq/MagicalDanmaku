@@ -285,7 +285,6 @@ export interface CustomRuleDraft {
   aggregateEnabled: boolean
   aggregateBy: string
   windowSeconds: number
-  maxWaitSeconds: number | null
   minCount: number
   cooldownEnabled: boolean
   cooldownSeconds: number
@@ -316,7 +315,6 @@ export function defaultCustomRuleDraft(): CustomRuleDraft {
     aggregateEnabled: false,
     aggregateBy: 'type',
     windowSeconds: 60,
-    maxWaitSeconds: null,
     minCount: 1,
     cooldownEnabled: false,
     cooldownSeconds: 60,
@@ -353,9 +351,6 @@ export function buildCustomRule(draft: CustomRuleDraft): Rule {
 
   if (draft.aggregateEnabled) {
     const agg: Aggregate = { window: secondsToDuration(draft.windowSeconds), by: draft.aggregateBy }
-    if (draft.maxWaitSeconds !== null && draft.maxWaitSeconds > 0) {
-      agg.maxWait = secondsToDuration(draft.maxWaitSeconds)
-    }
     if (draft.minCount > 1) agg.minCount = draft.minCount
     rule.aggregate = agg
   }
@@ -408,9 +403,6 @@ export function parseCustomRuleDraft(rule: RuleView): CustomRuleDraft {
     draft.aggregateEnabled = true
     draft.aggregateBy = rule.aggregate.by
     draft.windowSeconds = secondsFromDuration(rule.aggregate.window, draft.windowSeconds)
-    draft.maxWaitSeconds = rule.aggregate.maxWait
-      ? secondsFromDuration(rule.aggregate.maxWait, 0)
-      : null
     if (rule.aggregate.minCount !== undefined) draft.minCount = rule.aggregate.minCount
   }
 
@@ -799,14 +791,6 @@ function dismissPartialFailure() {
             />
             <span class="label">合并窗口（秒）</span>
             <NInputNumber v-model:value="draft.windowSeconds" :min="1" style="width: 120px" />
-            <span class="label">最长等待（秒，可选）</span>
-            <NInputNumber
-              v-model:value="draft.maxWaitSeconds"
-              :min="0"
-              clearable
-              placeholder="不设上限"
-              style="width: 120px"
-            />
             <span class="label">最少合并数量</span>
             <NInputNumber v-model:value="draft.minCount" :min="1" style="width: 100px" />
           </div>

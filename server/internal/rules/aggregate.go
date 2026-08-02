@@ -56,11 +56,6 @@ func NewAggregator(spec AggregateSpec, out func(Trigger)) *Aggregator {
 //
 // 窗口关闭后缓冲区被清空，下一个到达的事件会重新起算一轮新窗口，
 // 而不是落回某个固定的时间网格。
-//
-// 关于 spec.MaxWait：乙语义下窗口本身就有固定上界（Window），
-// MaxWait 原本「防止持续送礼导致静默期永不到来」的用途已经不存在，
-// 这里不再使用它。它是否该从 AggregateSpec 中移除是 rule.go 那边的
-// 决策，不在本次改动范围内——详见任务报告。
 func (a *Aggregator) Add(ev event.Event) {
 	a.mu.Lock()
 	defer a.mu.Unlock()

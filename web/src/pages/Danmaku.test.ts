@@ -253,14 +253,13 @@ describe('Danmaku 纯函数：build/parse 往返（组装成 spec.Rule 与从中
       name: ENTER_RULE_NAME,
       enabled: false,
       on: ['user_enter'],
-      aggregate: { window: '2m', maxWait: '5m', minCount: 4, by: 'type' },
+      aggregate: { window: '2m', minCount: 4, by: 'type' },
       do: [{ type: 'danmaku', template: ['已保存单人模板A', '已保存单人模板B'] }],
     }
     const draft = parseEnterDraft(savedRule)
     expect(draft.enabled).toBe(false)
     expect(draft.groupMode).toBe('merge')
     expect(draft.windowSeconds).toBe(120)
-    expect(draft.maxWaitSeconds).toBe(300)
     expect(draft.minCount).toBe(4)
     expect(draft.singleTemplates).toEqual(['已保存单人模板A', '已保存单人模板B'])
     // 已保存规则没有 templateMulti 字段（旧配置），回落默认值；pick 未写等同 "random"。
