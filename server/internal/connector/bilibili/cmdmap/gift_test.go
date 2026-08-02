@@ -84,6 +84,109 @@ func TestSendGiftGoldWithMedal(t *testing.T) {
 	}
 }
 
+// TestSendGiftBlindBoxNone 验证普通礼物（blind_gift: null）解析后 BlindBox 为 nil。
+func TestSendGiftBlindBoxNone(t *testing.T) {
+	evs, err := Map(testCtx(), loadSample(t, "SEND_GIFT_blindbox_none"))
+	if err != nil {
+		t.Fatalf("Map 失败: %v", err)
+	}
+	g := evs[0].Payload.(event.Gift)
+	if g.BlindBox != nil {
+		t.Errorf("普通礼物的 BlindBox 应为 nil，实际 %+v", g.BlindBox)
+	}
+}
+
+// TestSendGiftBlindBoxLucky 验证「幸运盲盒」样本的四个盲盒字段，
+// 并钉住 total_coin == BlindBox.Price * num 与 Gift.Price == BlindBox.TipPrice 两条断言。
+func TestSendGiftBlindBoxLucky(t *testing.T) {
+	evs, err := Map(testCtx(), loadSample(t, "SEND_GIFT_blindbox_lucky"))
+	if err != nil {
+		t.Fatalf("Map 失败: %v", err)
+	}
+	g := evs[0].Payload.(event.Gift)
+	if g.BlindBox == nil {
+		t.Fatal("盲盒礼物的 BlindBox 不应为 nil")
+	}
+	if g.BlindBox.Name != "幸运盲盒" {
+		t.Errorf("BlindBox.Name = %q", g.BlindBox.Name)
+	}
+	if g.BlindBox.GiftID != 35206 {
+		t.Errorf("BlindBox.GiftID = %d", g.BlindBox.GiftID)
+	}
+	if g.BlindBox.Price != 5000 {
+		t.Errorf("BlindBox.Price = %d", g.BlindBox.Price)
+	}
+	if g.BlindBox.TipPrice != 5200 {
+		t.Errorf("BlindBox.TipPrice = %d", g.BlindBox.TipPrice)
+	}
+	if g.TotalCoin != g.BlindBox.Price*g.Count {
+		t.Errorf("total_coin(%d) != BlindBox.Price(%d) * num(%d)", g.TotalCoin, g.BlindBox.Price, g.Count)
+	}
+	if g.Price != g.BlindBox.TipPrice {
+		t.Errorf("Gift.Price(%d) != BlindBox.TipPrice(%d)", g.Price, g.BlindBox.TipPrice)
+	}
+}
+
+// TestSendGiftBlindBoxHeartbeat 验证「心动盲盒」样本，同样钉住两条金额断言。
+func TestSendGiftBlindBoxHeartbeat(t *testing.T) {
+	evs, err := Map(testCtx(), loadSample(t, "SEND_GIFT_blindbox_heartbeat"))
+	if err != nil {
+		t.Fatalf("Map 失败: %v", err)
+	}
+	g := evs[0].Payload.(event.Gift)
+	if g.BlindBox == nil {
+		t.Fatal("盲盒礼物的 BlindBox 不应为 nil")
+	}
+	if g.BlindBox.Name != "心动盲盒" {
+		t.Errorf("BlindBox.Name = %q", g.BlindBox.Name)
+	}
+	if g.BlindBox.GiftID != 32251 {
+		t.Errorf("BlindBox.GiftID = %d", g.BlindBox.GiftID)
+	}
+	if g.BlindBox.Price != 15000 {
+		t.Errorf("BlindBox.Price = %d", g.BlindBox.Price)
+	}
+	if g.BlindBox.TipPrice != 16000 {
+		t.Errorf("BlindBox.TipPrice = %d", g.BlindBox.TipPrice)
+	}
+	if g.TotalCoin != g.BlindBox.Price*g.Count {
+		t.Errorf("total_coin(%d) != BlindBox.Price(%d) * num(%d)", g.TotalCoin, g.BlindBox.Price, g.Count)
+	}
+	if g.Price != g.BlindBox.TipPrice {
+		t.Errorf("Gift.Price(%d) != BlindBox.TipPrice(%d)", g.Price, g.BlindBox.TipPrice)
+	}
+}
+
+// TestSendGiftBlindBoxBearworm 验证「小熊虫盲盒」样本，同样钉住两条金额断言。
+func TestSendGiftBlindBoxBearworm(t *testing.T) {
+	evs, err := Map(testCtx(), loadSample(t, "SEND_GIFT_blindbox_bearworm"))
+	if err != nil {
+		t.Fatalf("Map 失败: %v", err)
+	}
+	g := evs[0].Payload.(event.Gift)
+	if g.BlindBox == nil {
+		t.Fatal("盲盒礼物的 BlindBox 不应为 nil")
+	}
+	if g.BlindBox.Name != "小熊虫盲盒" {
+		t.Errorf("BlindBox.Name = %q", g.BlindBox.Name)
+	}
+	if g.BlindBox.GiftID != 35800 {
+		t.Errorf("BlindBox.GiftID = %d", g.BlindBox.GiftID)
+	}
+	if g.BlindBox.Price != 9000 {
+		t.Errorf("BlindBox.Price = %d", g.BlindBox.Price)
+	}
+	if g.BlindBox.TipPrice != 9000 {
+		t.Errorf("BlindBox.TipPrice = %d", g.BlindBox.TipPrice)
+	}
+	if g.TotalCoin != g.BlindBox.Price*g.Count {
+		t.Errorf("total_coin(%d) != BlindBox.Price(%d) * num(%d)", g.TotalCoin, g.BlindBox.Price, g.Count)
+	}
+	if g.Price != g.BlindBox.TipPrice {
+		t.Errorf("Gift.Price(%d) != BlindBox.TipPrice(%d)", g.Price, g.BlindBox.TipPrice)
+	}
+}
+
 func TestComboSend(t *testing.T) {
 	evs, err := Map(testCtx(), loadSample(t, "COMBO_SEND_basic"))
 	if err != nil {

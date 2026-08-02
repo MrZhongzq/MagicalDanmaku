@@ -21,9 +21,23 @@ type Gift struct {
 	GiftID    int64
 	GiftName  string
 	Count     int64
-	CoinType  string // "gold" 金瓜子 / "silver" 银瓜子
-	TotalCoin int64  // 总价值，单位瓜子
-	Action    string // 动作描述，如「投喂」
+	CoinType  string    // "gold" 金瓜子 / "silver" 银瓜子
+	TotalCoin int64     // 总价值，单位瓜子
+	Price     int64     // 单价，单位瓜子；盲盒场景下恒等于 BlindBox.TipPrice（爆出礼物的价值）
+	Action    string    // 动作描述，如「投喂」
+	BlindBox  *BlindBox // 盲盒附加信息，为 nil 表示这不是盲盒
+}
+
+// BlindBox 是盲盒礼物的附加信息。为 nil 表示这不是盲盒。
+//
+// **金额单位都是 1/100 电池**——B 站原始报文就是这个单位
+// （幸运盲盒 50 电池，报文里是 5000）。存原始整数、只在展示层
+// 除以 100，中间用浮点算钱会累积误差。
+type BlindBox struct {
+	Name     string // 盲盒名称，如「幸运盲盒」
+	GiftID   int64  // 盲盒自身的礼物 ID
+	Price    int64  // 盲盒售价（单个），1/100 电池；Gift.TotalCoin == Price * Gift.Count
+	TipPrice int64  // 爆出礼物的价值，1/100 电池；恒等于 Gift.Price
 }
 
 // GiftCombo 是礼物连击汇总。

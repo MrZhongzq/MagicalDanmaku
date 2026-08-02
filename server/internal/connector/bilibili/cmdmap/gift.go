@@ -46,11 +46,27 @@ func mapSendGift(ctx Context, raw json.RawMessage) ([]event.Event, error) {
 		Count:     getInt64(data, "num"),
 		CoinType:  getString(data, "coin_type"),
 		TotalCoin: getInt64(data, "total_coin"),
+		Price:     getInt64(data, "price"),
 		Action:    getString(data, "action"),
+		BlindBox:  blindBoxFrom(data),
 	}
 
 	ts := timeFromUnixSec(getInt64(data, "timestamp"))
 	return []event.Event{NewEvent(ctx, event.TypeGift, ts, g, raw)}, nil
+}
+
+// blindBoxFrom 解析 blind_gift 字段。该字段为 null 表示这不是盲盒。
+func blindBoxFrom(data map[string]any) *event.BlindBox {
+	bg := getObject(data, "blind_gift")
+	if bg == nil {
+		return nil
+	}
+	return &event.BlindBox{
+		Name:     getString(bg, "original_gift_name"),
+		GiftID:   getInt64(bg, "original_gift_id"),
+		Price:    getInt64(bg, "original_gift_price"),
+		TipPrice: getInt64(bg, "gift_tip_price"),
+	}
 }
 
 // mapComboSend 解析礼物连击汇总消息。

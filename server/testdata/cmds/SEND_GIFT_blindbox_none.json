@@ -1,0 +1,20 @@
+{
+  "cmd": "SEND_GIFT",
+  "data": {
+    "uid": 44444444,
+    "uname": "路人己",
+    "face": "http://i1.hdslb.com/bfs/face/fff.jpg",
+    "giftId": 31164,
+    "giftName": "粉丝团灯牌",
+    "num": 1,
+    "coin_type": "gold",
+    "total_coin": 100,
+    "price": 100,
+    "action": "投喂",
+    "timestamp": 1785658744,
+    "guard_level": 0,
+    "batch_combo_id": "batch:gift:combo_id:fake:fake:31164:1785658744.7659",
+    "medal_info": {"medal_level": 1, "medal_name": "喵胡团", "anchor_roomid": 0, "target_id": 0, "guard_level": 0, "is_lighted": 1, "anchor_uname": ""},
+    "blind_gift": null
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "cmd": "SEND_GIFT",
+  "data": {
+    "uid": 33333333,
+    "uname": "路人戊",
+    "face": "http://i1.hdslb.com/bfs/face/eee.jpg",
+    "giftId": 35802,
+    "giftName": "一虫莫展",
+    "num": 1,
+    "coin_type": "gold",
+    "total_coin": 9000,
+    "price": 9000,
+    "action": "投喂",
+    "timestamp": 1785658382,
+    "guard_level": 3,
+    "batch_combo_id": "bcd65c6c-4077-460a-b780-8657e3f6c14b",
+    "medal_info": {"medal_level": 30, "medal_name": "桃夭21", "anchor_roomid": 9999, "target_id": 99999999, "guard_level": 3, "is_lighted": 1, "anchor_uname": ""},
+    "blind_gift": {
+      "blind_gift_config_id": 177,
+      "gift_action": "爆出",
+      "gift_tip_price": 9000,
+      "original_gift_id": 35800,
+      "original_gift_name": "小熊虫盲盒",
+      "original_gift_price": 9000
+    }
+  }
+}

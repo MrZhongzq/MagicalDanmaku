@@ -1,0 +1,27 @@
+{
+  "cmd": "SEND_GIFT",
+  "data": {
+    "uid": 22222222,
+    "uname": "路人丁",
+    "face": "http://i1.hdslb.com/bfs/face/ddd.jpg",
+    "giftId": 32128,
+    "giftName": "爱心抱枕",
+    "num": 1,
+    "coin_type": "gold",
+    "total_coin": 15000,
+    "price": 16000,
+    "action": "投喂",
+    "timestamp": 1785658315,
+    "guard_level": 3,
+    "batch_combo_id": "af82e5ec-7ce0-4060-86db-71510aeef4d5",
+    "medal_info": {"medal_level": 29, "medal_name": "DD果冻", "anchor_roomid": 9999, "target_id": 99999999, "guard_level": 3, "is_lighted": 1, "anchor_uname": ""},
+    "blind_gift": {
+      "blind_gift_config_id": 139,
+      "gift_action": "爆出",
+      "gift_tip_price": 16000,
+      "original_gift_id": 32251,
+      "original_gift_name": "心动盲盒",
+      "original_gift_price": 15000
+    }
+  }
+}

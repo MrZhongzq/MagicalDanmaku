@@ -1,0 +1,27 @@
+{
+  "cmd": "SEND_GIFT",
+  "data": {
+    "uid": 11111111,
+    "uname": "路人丙",
+    "face": "http://i1.hdslb.com/bfs/face/ccc.jpg",
+    "giftId": 35208,
+    "giftName": "星光铃铛",
+    "num": 1,
+    "coin_type": "gold",
+    "total_coin": 5000,
+    "price": 5200,
+    "action": "投喂",
+    "timestamp": 1785658260,
+    "guard_level": 3,
+    "batch_combo_id": "1e90b9e1-9878-45de-be4e-abe37d8cfb4b",
+    "medal_info": {"medal_level": 29, "medal_name": "DD果冻", "anchor_roomid": 9999, "target_id": 99999999, "guard_level": 3, "is_lighted": 1, "anchor_uname": ""},
+    "blind_gift": {
+      "blind_gift_config_id": 144,
+      "gift_action": "爆出",
+      "gift_tip_price": 5200,
+      "original_gift_id": 35206,
+      "original_gift_name": "幸运盲盒",
+      "original_gift_price": 5000
+    }
+  }
+}
