@@ -55,16 +55,34 @@ type PkLink struct {
 	round *pkRound // 当前进行中的 PK；没有 PK 时为 nil
 
 	audMu    sync.Mutex
-	mine     map[string]struct{}            // 我方观众 uid 集合
-	opposite map[string]map[string]struct{} // 对面观众 uid 集合，按对手房间号分开
+	mine     map[string]struct{}            // 我方观众 uid 集合（实时，PK 期间持续更新）
+	opposite map[string]map[string]struct{} // 对面观众 uid 集合，按对手房间号分开（实时，PK 期间持续更新）
 
-	// opposite 为什么按房间分开而不是拍平成一个集合：多人 PK 下每个
-	// 对手是不同的房间，播种（seedAudiences）时是逐个对手房间调
-	// ajax/msg 拿到的，这份「归属哪个对手」的信息只有在这一刻才完整；
-	// 一旦拍平合并，事后没法从合并结果里反推出某个 uid 到底是哪个
-	// 对手房间的观众，要重建就得重新打一遍接口。按房间分开保留成本
-	// 几乎为零，实时更新那一路（trackOpposite）本来就知道事件来自
-	// 哪个对手连接，也天然能对上号。
+	// mineSeed/oppositeSeed 是 seedAudiences 播种时冻结的快照，此后
+	// 不再更新（跟 mine/opposite 的实时更新是两码事）——审查发现的
+	// Critical-1/Important-2：串门判定（visit.go）里「排除掉 PK 前就
+	// 已经是常驻观众的人」这个逻辑，如果拿实时集合去查，会被同一条
+	// 事件自己的实时更新自我污染（runOpponent 在把事件转发给消费者
+	// 之前就先调用 trackOpposite 写实时集合，等消费者调 ClassifyVisit
+	// 时这个人已经被自己「刚刚」写进去了，排除条件因此恒成立/恒不
+	// 成立，整条判据在真实管道时序下失效）。原 C++ 里 oppositeAudience
+	// 也确实是这个语义——查过全部写入点（bili_liveservice.cpp:3289
+	// getRoomCurrentAudiences、3301 insert(pkUid)，清空在
+	// 3286/3850/3998），只在 PK 开始时播种，从不被对面实时事件流更新，
+	// 是一份冻结快照，不是实时集合。mineSeed 是 Go 这边新增方向 A
+	// 需要的对称量（原 C++ 没有方向 A），语义类推：排除掉 PK 前就已经
+	// 是我方常驻观众的人，不能用会被 observeMine 实时写入污染的 mine
+	// 代替。
+	mineSeed     map[string]struct{}
+	oppositeSeed map[string]map[string]struct{}
+
+	// opposite/oppositeSeed 为什么按房间分开而不是拍平成一个集合：
+	// 多人 PK 下每个对手是不同的房间，播种（seedAudiences）时是逐个
+	// 对手房间调 ajax/msg 拿到的，这份「归属哪个对手」的信息只有在这
+	// 一刻才完整；一旦拍平合并，事后没法从合并结果里反推出某个 uid
+	// 到底是哪个对手房间的观众，要重建就得重新打一遍接口。按房间分开
+	// 保留成本几乎为零，实时更新那一路（trackOpposite）本来就知道
+	// 事件来自哪个对手连接，也天然能对上号。
 }
 
 // pkRound 是一场 PK 期间全部对手连接共享的状态。每次 connect 都会创建
@@ -84,6 +102,17 @@ type pkRound struct {
 	// 播种完成前查询会漏判，而粉丝勋章判据本该是不依赖任何异步播种、
 	// 立即可用的零成本信号，两者不能共用同一份可能还没就绪的状态。
 	opponentRoomIDs map[string]struct{}
+
+	// opponentRoomIDsOrdered 跟 opponentRoomIDs 是同一份数据的两种视图：
+	// 前者给 O(1) 归属判断用，这个给需要确定性遍历顺序的场景用（直接
+	// 复用 opponents 切片顺序，也就是 PK_INFO.data.members[] 的原始
+	// 顺序，本身带业务含义）。串门判定方向 A 的观众集合判据要在多个
+	// 对手房间之间选一个「命中的是哪一个对手」，如果遍历 Go map（顺序
+	// 随机）会导致同一个人在多个对手房间都命中时，返回的 OpponentRoomID
+	// 在不同调用间不确定——这个字段不大（审查复核的 Minor-3）但会渗到
+	// 用户可见行为（Task 7 拿它取对面主播名播报），改成遍历这个有序
+	// 切片、命中第一个就返回，消除这个不确定性。
+	opponentRoomIDsOrdered []string
 }
 
 // closedEventsPlaceholder 是没有进行中 PK 时 Events() 返回的占位通道：
@@ -100,9 +129,11 @@ var closedEventsPlaceholder = func() chan event.Event {
 // WebSocket 连接——对手连接是完全独立的 Client 实例。
 func newPkLink(host *Client) *PkLink {
 	return &PkLink{
-		host:     host,
-		mine:     make(map[string]struct{}),
-		opposite: make(map[string]map[string]struct{}),
+		host:         host,
+		mine:         make(map[string]struct{}),
+		opposite:     make(map[string]map[string]struct{}),
+		mineSeed:     make(map[string]struct{}),
+		oppositeSeed: make(map[string]map[string]struct{}),
 	}
 }
 
@@ -137,10 +168,11 @@ func (p *PkLink) connect(ctx context.Context, members []event.PkMember) {
 
 	linkCtx, cancel := context.WithCancel(ctx)
 	round := &pkRound{
-		cancel:          cancel,
-		events:          make(chan event.Event, eventBufferSize),
-		done:            make(chan struct{}),
-		opponentRoomIDs: opponentRoomIDSet(opponents),
+		cancel:                 cancel,
+		events:                 make(chan event.Event, eventBufferSize),
+		done:                   make(chan struct{}),
+		opponentRoomIDs:        opponentRoomIDSet(opponents),
+		opponentRoomIDsOrdered: opponentRoomIDsOrdered(opponents),
 	}
 
 	p.mu.Lock()
@@ -328,6 +360,16 @@ func opponentRoomIDSet(opponents []event.PkMember) map[string]struct{} {
 	return set
 }
 
+// opponentRoomIDsOrdered 把 opponents 列表的房间号按原始顺序抽出来，
+// 供 pkRound.opponentRoomIDsOrdered 使用，见该字段注释。
+func opponentRoomIDsOrdered(opponents []event.PkMember) []string {
+	ordered := make([]string, len(opponents))
+	for i, m := range opponents {
+		ordered[i] = m.RoomID
+	}
+	return ordered
+}
+
 // selfMemberUID 从 members 里找出「自己」那一项的 UID——PK_INFO 里这个
 // 值就是本房间主播的 uid，是 myAudience 该播种的值（简报原文「自己的
 // upUid」）。
@@ -370,10 +412,10 @@ func selfMemberUID(members []event.PkMember, selfRoomID string) string {
 // 数据了，再把它接进来。
 func (p *PkLink) seedAudiences(ctx context.Context, selfUID string, opponents []event.PkMember) {
 	if selfUID != "" {
-		p.addMine(selfUID)
+		p.seedMine(selfUID)
 	}
 	for _, m := range opponents {
-		p.addOppositeRoom(m.RoomID, m.UID)
+		p.seedOppositeRoom(m.RoomID, m.UID)
 	}
 
 	budget := p.host.opponentSnapshotBudget
@@ -386,7 +428,7 @@ func (p *PkLink) seedAudiences(ctx context.Context, selfUID string, opponents []
 	if uids, err := p.host.api.RoomRecentDanmakuUIDs(seedCtx, p.host.roomID); err != nil {
 		p.host.log.Warn("播种己方观众集合失败，降级为仅有主播本人", "room", p.host.roomID, "err", err)
 	} else {
-		p.addMine(uids...)
+		p.seedMine(uids...)
 	}
 
 	for _, m := range opponents {
@@ -395,7 +437,7 @@ func (p *PkLink) seedAudiences(ctx context.Context, selfUID string, opponents []
 			p.host.log.Warn("播种对面观众集合失败，降级为仅有对面主播本人", "room", m.RoomID, "err", err)
 			continue
 		}
-		p.addOppositeRoom(m.RoomID, uids...)
+		p.seedOppositeRoom(m.RoomID, uids...)
 	}
 }
 
@@ -417,6 +459,12 @@ func (p *PkLink) trackOpposite(roomID string, ev event.Event) {
 	}
 }
 
+// addMine/addOppositeRoom 只写实时集合，专供 observeMine/trackOpposite
+// 这两个 PK 期间持续调用的实时钩子使用。播种（seedAudiences）必须走
+// 下面的 seedMine/seedOppositeRoom，两者不能混用——审查发现的
+// Critical-1/Important-2 根因就是播种和实时更新曾经共用同一份存储，
+// 导致「排除掉 PK 前就已经是常驻观众的人」这个判据被实时更新自我
+// 污染，见 PkLink 结构体上 mineSeed/oppositeSeed 字段的注释。
 func (p *PkLink) addMine(uids ...string) {
 	p.audMu.Lock()
 	defer p.audMu.Unlock()
@@ -439,6 +487,45 @@ func (p *PkLink) addOppositeRoom(roomID string, uids ...string) {
 		if u != "" {
 			set[u] = struct{}{}
 		}
+	}
+}
+
+// seedMine/seedOppositeRoom 只应该在 seedAudiences 播种时调用，同时
+// 写入冻结快照（mineSeed/oppositeSeed）和实时集合（mine/opposite）
+// ——种子本来就是实时集合最初的状态，此后 observeMine/trackOpposite
+// 才开始往实时集合里追加新的互动；冻结快照从此不再变，专供串门判定
+// （visit.go）里「这个人是不是 PK 前就已经是常驻观众」的排除逻辑用。
+func (p *PkLink) seedMine(uids ...string) {
+	p.audMu.Lock()
+	defer p.audMu.Unlock()
+	for _, u := range uids {
+		if u == "" {
+			continue
+		}
+		p.mineSeed[u] = struct{}{}
+		p.mine[u] = struct{}{}
+	}
+}
+
+func (p *PkLink) seedOppositeRoom(roomID string, uids ...string) {
+	p.audMu.Lock()
+	defer p.audMu.Unlock()
+	seedSet := p.oppositeSeed[roomID]
+	if seedSet == nil {
+		seedSet = make(map[string]struct{})
+		p.oppositeSeed[roomID] = seedSet
+	}
+	liveSet := p.opposite[roomID]
+	if liveSet == nil {
+		liveSet = make(map[string]struct{})
+		p.opposite[roomID] = liveSet
+	}
+	for _, u := range uids {
+		if u == "" {
+			continue
+		}
+		seedSet[u] = struct{}{}
+		liveSet[u] = struct{}{}
 	}
 }
 

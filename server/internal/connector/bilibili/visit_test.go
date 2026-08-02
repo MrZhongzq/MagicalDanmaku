@@ -12,17 +12,30 @@ import (
 
 // ---------- 测试辅助：直接摆弄 PkLink 内部状态，跳过真实网络连接 ----------
 //
-// ClassifyVisit 的判定逻辑只依赖 p.round/p.mine/p.opposite/p.host.roomID
-// 这几个字段，不涉及任何 goroutine/网络 I/O，所以这里不需要
-// opponent_link_test.go 里那一整套假服务器，直接手工构造 PkLink 状态
-// 更快、也更能聚焦在判定逻辑本身。
+// ClassifyVisit 的判定逻辑只依赖 p.round/p.mine/p.opposite/p.mineSeed/
+// p.oppositeSeed/p.host.roomID 这几个字段，不涉及任何 goroutine/网络
+// I/O，所以这里不需要 opponent_link_test.go 里那一整套假服务器，直接
+// 手工构造 PkLink 状态更快、也更能聚焦在判定逻辑本身。
+//
+// 第二轮审查的 Critical-1 明确指出：凡是要验证 mine/opposite 实时集合
+// 相关判据的测试，必须按真实管道的调用顺序摆弄状态（先
+// trackOpposite/observeMine，再 ClassifyVisit），不能绕开顺序直接摆
+// 数据——绕开顺序曾经让一个真实存在的缺陷（观众判据在真实管道下恒不
+// 成立）被测试误判成"已覆盖"。下面涉及 mine/opposite 的测试都遵循这
+// 个纪律；只跟 mineSeed/oppositeSeed（冻结快照，没有顺序敏感性）或
+// 粉丝勋章判据相关的测试不受这条约束。
 
 // newTestPkLinkWithRound 构造一个「PK 进行中」的 PkLink：host 绑定
-// selfRoomID，round.opponentRoomIDs 是 opponentRoomIDs。
+// selfRoomID，round.opponentRoomIDs/opponentRoomIDsOrdered 都是
+// opponentRoomIDs（保持调用方传入的顺序，供确定性测试用）。
 func newTestPkLinkWithRound(selfRoomID string, opponentRoomIDs ...string) *PkLink {
 	host := &Client{roomID: selfRoomID}
 	p := newPkLink(host)
-	p.round = &pkRound{opponentRoomIDs: opponentRoomIDSet(pkMembersOf(opponentRoomIDs))}
+	members := pkMembersOf(opponentRoomIDs)
+	p.round = &pkRound{
+		opponentRoomIDs:        opponentRoomIDSet(members),
+		opponentRoomIDsOrdered: opponentRoomIDsOrdered(members),
+	}
 	return p
 }
 
@@ -94,11 +107,15 @@ func TestClassifyVisitFromOpponentByFanMedal(t *testing.T) {
 	}
 }
 
+// TestClassifyVisitFromOpponentByAudienceSet 按真实管道顺序摆数据：
+// u1 是真实存在的对面观众，先在对面房间发过言（真实管道里 runOpponent
+// 会同步调用 trackOpposite，见 opponent_link.go），然后才跑来我方房间
+// 发言，此时应该命中判据 2。
 func TestClassifyVisitFromOpponentByAudienceSet(t *testing.T) {
 	p := newTestPkLinkWithRound("self", "opp")
-	p.addOppositeRoom("opp", "u1") // u1 是 PK 期间追踪到的对面观众
+	p.trackOpposite("opp", danmakuFrom("opp", "u1", nil)) // u1 先在对面说过话
 
-	ev := danmakuFrom("self", "u1", nil) // 没有戴任何粉丝牌
+	ev := danmakuFrom("self", "u1", nil) // 没有戴任何粉丝牌，现在跑来我方
 
 	got, ok := p.ClassifyVisit(ev)
 	if !ok {
@@ -113,6 +130,55 @@ func TestClassifyVisitFromOpponentByAudienceSet(t *testing.T) {
 	}
 	if payload.OpponentRoomID != "opp" {
 		t.Errorf("OpponentRoomID = %q, 期望 %q", payload.OpponentRoomID, "opp")
+	}
+}
+
+// TestClassifyVisitFromOpponentIgnoresOwnRegularWhoVisitedAndReturned
+// 是第二轮审查 Important-2 的回归测试：我方一个 PK 前就已经是常驻观众
+// 的人（种进 mineSeed），中途去对面串了个门（真实管道下 trackOpposite
+// 会把他计入对面观众的实时集合），回到我方房间发言——不应该被误判成
+// 「对面来的客人」。裁决：这条按冻结快照修（mineSeed 排除），不是简报
+// 与实现冲突，是上游 Task 6a 引入实时追踪导致的语义漂移。
+func TestClassifyVisitFromOpponentIgnoresOwnRegularWhoVisitedAndReturned(t *testing.T) {
+	p := newTestPkLinkWithRound("self", "opp")
+	p.seedMine("u1") // u1 是 PK 前就已经是我方的常驻观众（冻结快照）
+
+	// 真实管道：他中途去对面说了句话，runOpponent 转发给消费者之前
+	// 先调用 trackOpposite，把他计入对面观众的实时集合。
+	p.trackOpposite("opp", danmakuFrom("opp", "u1", nil))
+
+	// 现在他回到我方房间发言——真实管道下 client.go 的事件钩子
+	// observeMine 会在消费者拿到事件之前先跑一遍，把他也写进实时
+	// mine（这个动作本身不该影响判定，因为排除用的是 mineSeed）。
+	hostEv := danmakuFrom("self", "u1", nil)
+	p.observeMine(hostEv)
+
+	if got, ok := p.ClassifyVisit(hostEv); ok {
+		t.Fatalf("我方常驻观众回到我方房间，不应该被判定成「对面来的客人」，实际判定为 %+v", got)
+	}
+}
+
+// TestClassifyVisitFromOpponentDeterministicOpponentRoomIDAcrossMultipleOpponents
+// 是第二轮审查 Minor-3 的回归测试：多人 PK 下同一个人同时出现在两个
+// 对手房间的观众集合里时，OpponentRoomID 必须是确定的（取 PK_INFO 原始
+// 顺序里排在前面的那个），不能因为遍历 map 顺序随机而在多次调用间
+// 摇摆——重复跑几十次，结果必须每次都一样。
+func TestClassifyVisitFromOpponentDeterministicOpponentRoomIDAcrossMultipleOpponents(t *testing.T) {
+	p := newTestPkLinkWithRound("self", "oppA", "oppB") // 顺序：oppA 排第一
+	p.trackOpposite("oppA", danmakuFrom("oppA", "u1", nil))
+	p.trackOpposite("oppB", danmakuFrom("oppB", "u1", nil))
+
+	ev := danmakuFrom("self", "u1", nil)
+	for i := 0; i < 30; i++ {
+		got, ok := p.ClassifyVisit(ev)
+		if !ok {
+			t.Fatalf("第 %d 次调用应该命中", i)
+		}
+		payload := got.Payload.(event.VisitFromOpponent)
+		if payload.OpponentRoomID != "oppA" {
+			t.Fatalf("第 %d 次调用 OpponentRoomID = %q, 期望恒为 %q（PK_INFO 原始顺序里排第一的对手）",
+				i, payload.OpponentRoomID, "oppA")
+		}
 	}
 }
 
@@ -144,15 +210,24 @@ func TestClassifyVisitFromOpponentIgnoresNonAudienceStranger(t *testing.T) {
 
 // ---------- 方向 B：我方观众跑去对面房间（警示） ----------
 
+// TestClassifyVisitToOpponentByAudienceSet 是第二轮审查 Critical-1 的
+// 核心回归测试：必须按真实管道的调用顺序摆数据——runOpponent 转发事件
+// 给消费者之前会先同步调用 trackOpposite（opponent_link.go），也就是
+// 说等 ClassifyVisit 被调用时，u1 因为「这条正在判定的事件本身」已经
+// 被写进了 p.opposite 实时集合。旧实现（`!inOpposite` 查的是实时
+// 集合）在这个真实顺序下会被自我污染、恒判定为「已经是对面的人」，
+// 整条观众判据失效；改成查 p.oppositeSeed（冻结快照，trackOpposite
+// 不会写它）之后才能在这个真实顺序下正确工作。
 func TestClassifyVisitToOpponentByAudienceSet(t *testing.T) {
 	p := newTestPkLinkWithRound("self", "opp")
 	p.addMine("u1") // u1 是我方观众
 
 	ev := danmakuFrom("opp", "u1", nil) // 事件来自对面连接（RoomID=opp）
+	p.trackOpposite("opp", ev)          // 真实管道顺序：runOpponent 先 track 再转发
 
 	got, ok := p.ClassifyVisit(ev)
 	if !ok {
-		t.Fatal("我方观众出现在对面事件流里，应该判定为方向 B 的串门")
+		t.Fatal("按真实管道顺序，我方观众出现在对面事件流里，应该判定为方向 B 的串门")
 	}
 	if got.Type != event.TypeVisitToOpponent {
 		t.Errorf("Type = %v, 期望 %v", got.Type, event.TypeVisitToOpponent)
@@ -172,16 +247,19 @@ func TestClassifyVisitToOpponentByAudienceSet(t *testing.T) {
 // TestClassifyVisitToOpponentExcludesDualAudience 验证
 // !oppositeAudience.contains(uid) 那个否定条件不是多余的：对面的常驻
 // 观众可能同时也在我方集合里（两边都看），这种人不算「跑去对面串门」
-// ——他本来就是对面的人。
+// ——他本来就是对面的人。「常驻」是 PK 前就已经确立的事实，所以用
+// seedOppositeRoom（冻结快照）模拟，不是这条事件当场造成的实时归属
+// （那种情况见 TestClassifyVisitToOpponentByAudienceSet）。
 func TestClassifyVisitToOpponentExcludesDualAudience(t *testing.T) {
 	p := newTestPkLinkWithRound("self", "opp")
 	p.addMine("u1")
-	p.addOppositeRoom("opp", "u1") // 同一个人两边都在看
+	p.seedOppositeRoom("opp", "u1") // PK 前就已经是对面的常驻观众
 
 	ev := danmakuFrom("opp", "u1", nil)
+	p.trackOpposite("opp", ev) // 真实管道顺序：这条事件也会经过 trackOpposite
 
 	if _, ok := p.ClassifyVisit(ev); ok {
-		t.Fatal("既是我方观众又是对面常驻观众，不应该判定为串门")
+		t.Fatal("既是我方观众又是 PK 前就已经是对面的常驻观众，不应该判定为串门")
 	}
 }
 
@@ -194,6 +272,7 @@ func TestClassifyVisitToOpponentByFanMedal(t *testing.T) {
 
 	medal := &event.Medal{RoomID: "self"} // 戴着我方主播的粉丝牌
 	ev := danmakuFrom("opp", "u1", medal)
+	p.trackOpposite("opp", ev) // 真实管道顺序，证明粉丝牌判据不受实时集合污染影响
 
 	got, ok := p.ClassifyVisit(ev)
 	if !ok {
@@ -207,9 +286,10 @@ func TestClassifyVisitToOpponentByFanMedal(t *testing.T) {
 
 func TestClassifyVisitToOpponentIgnoresOpponentsOwnAudience(t *testing.T) {
 	p := newTestPkLinkWithRound("self", "opp")
-	p.addOppositeRoom("opp", "u1") // u1 只是对面的常驻观众，不是我方的
+	p.seedOppositeRoom("opp", "u1") // u1 是 PK 前就已经是对面的常驻观众，不是我方的
 
 	ev := danmakuFrom("opp", "u1", nil)
+	p.trackOpposite("opp", ev)
 
 	if _, ok := p.ClassifyVisit(ev); ok {
 		t.Fatal("对面自己的常驻观众不应该被判定为「我方观众跑来串门」")
@@ -279,15 +359,23 @@ func TestClassifyVisitIgnoresEventsWithoutUser(t *testing.T) {
 // 主播本人给本房间送了一个「粉丝团灯牌」。
 //
 // 这条样本专门用来验证一个只看代码推不出来、必须拿真实数据核对的
-// 细节：SEND_GIFT 的 medal_info.anchor_roomid 在真实报文里恒为 0
-// （原 C++ 在 bili_livecmds.cpp:2907 的注释也确认了这一点：「!注意：
-// 这个一直为0」），也就是说粉丝牌判据在送礼场景下天生失效，如果只
-// 实现判据 1（粉丝牌）不实现判据 2（观众集合），这个真实存在的案例
-// 会被漏判。样本里的 medal_info.anchor_roomid 特意保留原值 0，不用
-// 编造的非零值掩盖这个真实缺陷。
+// 细节：这一条真实样本里 SEND_GIFT 的 medal_info.anchor_roomid 是 0。
+//
+// 【第二轮审查订正】这里只能说「这一条真实样本实测是 0」，不能像上一版
+// 那样引用原 C++ bili_livecmds.cpp:2907 的注释「!注意：这个一直为0」
+// 来交叉印证——审查指出那条注释证明的是 C++ 自己读错了键名（它读的是
+// 带下划线的 medalInfo.value("anchor_room_id")，真实报文里的键是不带
+// 下划线的 anchor_roomid），C++ 那句"一直为0"只是「读一个不存在的键，
+// 拿到 JSON 默认值 0」的必然结果，跟真实 anchor_roomid 字段本身是否
+// 恒为 0 是两回事，不构成独立的第二个数据来源。这里的结论仅由这一条
+// n=1 的真实样本支撑，不是「两个独立来源互相印证」。不管原因是不是
+// B 站行为本身，这条真实样本证明的事实不变：粉丝牌判据在这次真实送礼
+// 场景里没有命中，如果只实现判据 1（粉丝牌）不实现判据 2（观众集合），
+// 这个真实存在的案例会被漏判。样本里的 medal_info.anchor_roomid 特意
+// 保留原值 0，不用编造的非零值掩盖这一点。
 func TestClassifyVisitGoldenSampleOpponentAnchorGiftsHostRoom(t *testing.T) {
-	const hostRoomID = "20001" // 桃酥Su-- 的房间号（脱敏，非真实值）
-	const oppRoomID = "30002"  // Q亦巧儿 的房间号（脱敏，非真实值）
+	const hostRoomID = "20001" // 收礼房间号（脱敏，非真实值）
+	const oppRoomID = "30002"  // 对面主播房间号（脱敏，非真实值）
 	const oppAnchorUID = "22223333"
 
 	raw, err := os.ReadFile(filepath.Join(
@@ -316,7 +404,7 @@ func TestClassifyVisitGoldenSampleOpponentAnchorGiftsHostRoom(t *testing.T) {
 	}
 
 	p := newTestPkLinkWithRound(hostRoomID, oppRoomID)
-	p.addOppositeRoom(oppRoomID, oppAnchorUID) // seedAudiences 会做的事：对手主播本人入对面观众集合
+	p.seedOppositeRoom(oppRoomID, oppAnchorUID) // seedAudiences 会做的事：对手主播本人入对面观众集合
 
 	got, ok := p.ClassifyVisit(giftEvent)
 	if !ok {

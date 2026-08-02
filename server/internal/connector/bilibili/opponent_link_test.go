@@ -883,7 +883,7 @@ func TestPKSeedsAudienceSetsFromRecentDanmakuAndSelves(t *testing.T) {
 	})
 
 	// 不能等 len(mine) > 0——seedAudiences 第一件事就是同步
-	// addMine(selfUID)，这个条件在 HTTP 请求发出去之前就已经成立，
+	// seedMine(selfUID)，这个条件在 HTTP 请求发出去之前就已经成立，
 	// 等到的只是「自己主播已经播种」，不是「近期弹幕发送者真的播种
 	// 完了」。必须等真正来自 HTTP 的种子（"100"）落地，等一个必然
 	// 立刻成立的条件等于没等（复审实测过 -count=100 有 3~10% 失败率）。
