@@ -23,9 +23,13 @@
  *      算法本身的局限，不是接口返回错了——已经在卡片提示里写明，不能
  *      让用户误以为这是精确的全局种类数。
  *
- * 盲盒盈亏那张卡片仍然悬空：聚合接口本身已经补上了（悬空清单第 14 条
- * 已解决），但 `event.Gift` 依然没有盲盒字段（悬空清单第 7、15 条），
- * 没有原始数据可聚合，算不出盈亏，卡片继续显示占位符。
+ * **P4-4 Task 7：盲盒盈亏卡片已接上真实数据，不再悬空**（悬空清单第
+ * 7/15 条）。`event.Gift.BlindBox` 早在 Task 1 就补上了，`store.stats.go`
+ * 的 `countExprs` 新增 `blind_box_profit`：对 `detail->'BlindBox'` 非
+ * null 的 gift 行按 `Price*Count - TotalCoin`（单位 1/100 电池）逐行
+ * 求和，不按礼物名分组——同一电池消耗量在不同盲盒池可能对应不同的
+ * 开出礼物，礼物名不是稳定的价值锚点，用户明确要求过必须按电池数量
+ * 统计。「元」的换算只在这里（展示层）做。
  *
  * 「最近活动预览」区块保留：它展示的是原始事件行（含用户、类型），
  * 统计卡片/明细表展示的是聚合数字，两者用途不同（“最近发生了什么”
@@ -43,7 +47,6 @@ import {
   NRadioGroup,
   NSpin,
   NStatistic,
-  NTag,
 } from 'naive-ui'
 import type { DataTableColumns } from 'naive-ui'
 import { ApiError, request } from '@/api'
@@ -52,8 +55,19 @@ import { useBindingsStore } from '@/stores/bindings'
 
 const bindings = useBindingsStore()
 
-/** 唯一合法的占位符——目前只有盲盒盈亏还在用它，其余卡片都是真实数字了。 */
+/** 唯一合法的占位符——只在 hasBuckets 为假（这段时间聚合不出任何分桶）时使用。 */
 const PLACEHOLDER = '—'
+
+/**
+ * formatBlindBoxProfit 把 1/100 电池的原始整数换算成「元」展示。
+ * 正数前缀 `+` 号强调「赚了」，负数 `toFixed` 自带负号不需要额外处理，
+ * 0 既不加号也不减号（不赔不赚）。
+ */
+function formatBlindBoxProfit(profitCentiBattery: number): string {
+  const yuan = profitCentiBattery / 100
+  const sign = yuan > 0 ? '+' : ''
+  return `${sign}${yuan.toFixed(2)} 元`
+}
 
 // ---- 维度切换：按场次 / 按日，现在真的会重新请求聚合接口 ----
 
@@ -119,6 +133,10 @@ const totals = computed(() => {
     giftKinds: sum((b) => b.giftKinds),
     guardCount: sum((b) => b.guardCount),
     liveSeconds: sum((b) => b.liveSeconds),
+    // blindBoxProfit 同样可以放心相加：跟 danmakuCount 等五项一样，是
+    // 各分桶（互不重叠的时间窗口）内已经算好的盈亏之和，不存在 giftKinds
+    // 那种「去重后跨分桶重复计入」的问题——盈亏是金额加总，不是去重计数。
+    blindBoxProfit: sum((b) => b.blindBoxProfit),
   }
 })
 
@@ -137,8 +155,6 @@ interface StatCardDef {
   label: string
   value: string
   hint: string
-  /** 目前只有盲盒盈亏还悬空——聚合接口本身已经补上了（原来的「双重」只剩一重）。 */
-  hanging?: boolean
 }
 
 /**
@@ -216,9 +232,10 @@ const STAT_CARDS = computed<StatCardDef[]>(() => [
   {
     key: 'blindBoxProfit',
     label: '盲盒盈亏',
-    value: PLACEHOLDER,
-    hint: '聚合接口已经补上了，但 event.Gift 依然没有盲盒字段，算不出盈亏，见悬空清单第 7、15 条',
-    hanging: true,
+    value: hasBuckets.value ? formatBlindBoxProfit(totals.value.blindBoxProfit) : PLACEHOLDER,
+    hint: hasBuckets.value
+      ? '本维度内全部盲盒送礼的盈亏之和（爆出礼物价值 − 实际花费），按每次消耗的电池数量原始值累加，不按礼物名分组'
+      : noBucketsHint.value,
   },
 ])
 
@@ -237,6 +254,11 @@ const bucketColumns = computed<DataTableColumns<StatsBucket>>(() => [
     title: '直播时长',
     key: 'liveSeconds',
     render: (row) => formatDuration(row.liveSeconds),
+  },
+  {
+    title: '盲盒盈亏',
+    key: 'blindBoxProfit',
+    render: (row) => formatBlindBoxProfit(row.blindBoxProfit),
   },
 ])
 
@@ -320,12 +342,10 @@ const previewColumns: DataTableColumns<PreviewRow> = [
     <template v-else>
       <NAlert type="info" title="两点需要注意" class="hanging-alert">
         下面的数字来自后端聚合接口（<code>GET /api/bindings/{id}/stats</code>），是真实统计值，
-        不再是占位符——除了「盲盒盈亏」，那张卡片仍标着<NTag type="warning" size="small"
-          >待后端支持</NTag
-        >。另外两点务必留意：①「直播时长」在这批改动之前的历史数据里没有开播/下播事件，
-        更早的日子会显示 0，<strong>不代表当时没开播</strong>；②「礼物种类」是各分桶种类数
-        之和，同一件礼物跨多个日子/场次出现会被重复计入，不是全局去重后的精确值。下面每张卡片
-        自己也带着一行小字说明，不必悬停就能看到。
+        不再是占位符——包括「盲盒盈亏」也是真实数字了。另外两点务必留意：①「直播时长」在这批
+        改动之前的历史数据里没有开播/下播事件，更早的日子会显示 0，<strong>不代表当时没开播</strong
+        >；②「礼物种类」是各分桶种类数之和，同一件礼物跨多个日子/场次出现会被重复计入，不是全局
+        去重后的精确值。下面每张卡片自己也带着一行小字说明，不必悬停就能看到。
       </NAlert>
 
       <div class="dimension-row">
@@ -365,9 +385,6 @@ const previewColumns: DataTableColumns<PreviewRow> = [
         <div class="stats-grid">
           <NCard v-for="card in STAT_CARDS" :key="card.key" class="stat-card" size="small">
             <NStatistic :label="card.label" :value="card.value" />
-            <NTag v-if="card.hanging" type="warning" size="small" class="hanging-tag">
-              待后端支持
-            </NTag>
             <div class="stat-hint">{{ card.hint }}</div>
           </NCard>
         </div>
@@ -449,9 +466,6 @@ const previewColumns: DataTableColumns<PreviewRow> = [
   margin-top: 8px;
   font-size: 12px;
   opacity: 0.7;
-}
-.hanging-tag {
-  margin-top: 8px;
 }
 .stats-error {
   color: var(--n-error-color, #d03050);

@@ -134,4 +134,12 @@ export interface StatsBucket {
   giftKinds: number
   guardCount: number
   liveSeconds: number
+  /**
+   * 本分桶内全部盲盒礼物的盈亏之和，单位 1/100 电池，可为负。按每一条
+   * 盲盒送礼事件的原始电池数量累加，不按礼物名分组——同一电池消耗量
+   * 在不同盲盒池可能对应不同的开出礼物，礼物名不是稳定的价值锚点。
+   * 「元」的换算只在展示层做（除以 100），后端一律给 1/100 电池的原始
+   * 整数，见 `server/internal/store/stats.go` 的 `StatsBucket.BlindBoxProfit`。
+   */
+  blindBoxProfit: number
 }

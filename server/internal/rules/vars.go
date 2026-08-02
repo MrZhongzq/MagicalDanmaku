@@ -99,10 +99,86 @@ func VarsFromEvent(ev event.Event) map[string]any {
 		v["rank"] = map[string]any{"count": int64(p.Count)}
 	case event.Battle:
 		v["battle"] = map[string]any{"subCommand": p.SubCommand}
+		v["pk"] = pkVars(p, ev.RoomID)
+	case event.VisitFromOpponent:
+		v["user"] = userVars(p.User)
+		v["visit"] = visitVars(p.OpponentRoomID, p.MatchedBy)
+	case event.VisitToOpponent:
+		v["user"] = userVars(p.User)
+		v["visit"] = visitVars(p.OpponentRoomID, p.MatchedBy)
 	case event.Unknown:
 		v["unknown"] = map[string]any{"command": p.Command}
 	}
 	return v
+}
+
+// pkVars 把 Battle.Members 展开成 PK 播报用得到的模板变量。
+//
+// 「对面」的判定按既定裁决在规则层做——拿本绑定的房间号（ev.RoomID）
+// 跟每个 member.RoomID 比对，绝不用 init_info/match_info，那两个字段
+// 的真实语义是发起方/被匹配方（Task 4 的教训，opponent_link.go 的
+// filterOpponents 是同一份裁决在连接器层的写法，这里照抄）。
+//
+// pkId/opponents 对任何 Battle 事件都写入，哪怕是空值/空列表——只有
+// PK_INFO 与 PKPipeline 合成的快照事件（bilibili.PKOpponentSnapshotSubCommand）
+// 才会真的带 Members，其余 PK_BATTLE_* CMD 上二者就是零值/空列表，
+// 不是「不存在」，模板里判断「是否在 PK 中」应该用 pk.pkId 是否非空，
+// 不该指望这两个字段缺失。opponent（单数，取第一个对手）是多人 PK
+// 之外最常见场景（1v1）的便利视图，模板写
+// {{.pk.opponent.uname}} 比 {{index .pk.opponents 0}} 自然得多。
+func pkVars(b event.Battle, selfRoomID string) map[string]any {
+	opponents := make([]map[string]any, 0, len(b.Members))
+	for _, m := range b.Members {
+		if m.RoomID == selfRoomID {
+			continue
+		}
+		opponents = append(opponents, pkOpponentVars(m))
+	}
+
+	pk := map[string]any{
+		"pkId":      b.PkID,
+		"opponents": opponents,
+	}
+	// opponent 只在至少有一个对手时才写入，对齐「可选字段不写零值」
+	// 的惯例——LookupPath 才能区分「还没进 PK / 没有对手」与
+	// 「对手的某个字段恰好是零值」。
+	if len(opponents) > 0 {
+		pk["opponent"] = opponents[0]
+	}
+	return pk
+}
+
+// pkOpponentVars 展开单个对手成员。Online/GuardTotal/GuardOnline 三个
+// 指针字段为 nil 时不写入——它们是 PK 接通瞬间的一次性快照
+// （FetchOpponentSnapshots），「快照还没就绪/接口失败」与「人数真的是
+// 0」必须在这里保持可区分，不能把 nil 塌缩成 0 写进去。
+func pkOpponentVars(m event.PkMember) map[string]any {
+	o := map[string]any{
+		"roomId":   m.RoomID,
+		"uid":      m.UID,
+		"uname":    m.Username,
+		"votes":    m.Votes,
+		"isWinner": m.IsWinner,
+	}
+	if m.Online != nil {
+		o["online"] = *m.Online
+	}
+	if m.GuardTotal != nil {
+		o["guardTotal"] = *m.GuardTotal
+	}
+	if m.GuardOnline != nil {
+		o["guardOnline"] = *m.GuardOnline
+	}
+	return o
+}
+
+// visitVars 展开串门信号事件共有的部分（VisitFromOpponent/
+// VisitToOpponent 除了 User 之外的字段形状完全相同）。
+func visitVars(opponentRoomID string, matchedBy event.VisitMatchedBy) map[string]any {
+	return map[string]any{
+		"opponentRoomId": opponentRoomID,
+		"matchedBy":      string(matchedBy),
+	}
 }
 
 // userVars 展开用户信息。零值的可选字段不写入。
@@ -290,8 +366,31 @@ func VariableCatalog() (common []Variable, byEvent map[event.Type][]Variable) {
 			{Path: "rank.count", Label: "高能榜总人数（未知时为 -1）"},
 		},
 		event.TypeBattle: {
-			{Path: "battle.subCommand", Label: "PK 原始 CMD 名（P0 只归一化不解释）"},
+			{Path: "battle.subCommand", Label: "PK 原始 CMD 名（P0 只归一化不解释；" +
+				"PKPipeline 合成的对面快照就绪事件固定为 PK_OPPONENT_SNAPSHOT，" +
+				"可用作 when 条件精确定位「PK 接通的这一瞬间」，避免每个 PK_BATTLE_* " +
+				"子状态都触发一遍播报）"},
+			{Path: "pk.pkId", Label: "这场 PK 的 ID，来自 pk_basic.pk_id；不在 PK 中或未携带明细的 CMD 上为空"},
+			{Path: "pk.opponents", Label: "全部对手列表（多人 PK 可能不止一个），" +
+				"按本绑定房间号与 member.roomId 比对筛出——不是发起方/被匹配方"},
+			{Path: "pk.opponent.roomId", Label: "对手（取第一个）直播间号", Optional: true},
+			{Path: "pk.opponent.uid", Label: "对手主播 UID", Optional: true},
+			{Path: "pk.opponent.uname", Label: "对手主播昵称", Optional: true},
+			{Path: "pk.opponent.votes", Label: "对手当前票数", Optional: true},
+			{Path: "pk.opponent.isWinner", Label: "对手是否是当前领先方", Optional: true},
+			{Path: "pk.opponent.online", Label: "对手直播间人数（PK 接通瞬间的一次性快照，" +
+				"接口失败或快照还未就绪时不存在，不要跟 0 混为一谈）", Optional: true},
+			{Path: "pk.opponent.guardTotal", Label: "对手大航海总数（同上，一次性快照）", Optional: true},
+			{Path: "pk.opponent.guardOnline", Label: "对手大航海在线数（同上，一次性快照）", Optional: true},
 		},
+		event.TypeVisitFromOpponent: append(append([]Variable{}, user...), []Variable{
+			{Path: "visit.opponentRoomId", Label: "来访者所属的对手直播间号"},
+			{Path: "visit.matchedBy", Label: "判定依据：fan_medal 粉丝勋章 / audience 观众集合"},
+		}...),
+		event.TypeVisitToOpponent: append(append([]Variable{}, user...), []Variable{
+			{Path: "visit.opponentRoomId", Label: "我方观众跑去的那个对手直播间号"},
+			{Path: "visit.matchedBy", Label: "判定依据：fan_medal 粉丝勋章 / audience 观众集合"},
+		}...),
 		event.TypeUnknown: {
 			{Path: "unknown.command", Label: "未识别事件的原始 CMD 名"},
 		},

@@ -57,16 +57,14 @@
  *   欢迎恒有合并窗口，天然安全，不需要额外的前端防呆。礼物答谢/轮播
  *   消息本页没有多人/单人两套模板的界面，`TemplateMulti` 不适用。
  *
- * ## 一处悬空（设计文档 §7.2 页面 4 / §13）
+ * ## P4-4 Task 7：盲盒单列已接通，不再悬空
  *
- * （原来数的是"四处"：一条"进房欢迎只欢迎佩戴粉丝牌的用户"经核实**已经
- * 打通**，见下方单独一节；P4-3 又接通了"模板轮询"与"单人/多人两套模板"
- * 两条，见上方新增说明。现在只剩一处。）
- *
- * 1. **盲盒单列**（§13.4）：`event.Gift` 没有任何盲盒字段
- *    （`server/internal/event/payload.go` 第 19-27 行），开关渲染但不生效。
- *    **需要用户在真实直播间刷一次盲盒、抓包确认报文形状**，
- *    这一步控制器代劳不了。
+ * `event.Gift.BlindBox`（P4-4 Task 1 补上）+ `AggregateByBlindBox`
+ * 聚合（Task 3）+ `blindBox.*` 模板变量（同上）三块能力早就绪，只是
+ * 一直没在这一页接出口子——现在 `giftDraft.blindBoxSeparate`/
+ * `blindBoxProfitTracking` 真的接进了 `buildBlindBoxRule` 组装出的
+ * 独立规则（`BLINDBOX_RULE_NAME`），不再是纯 UI 占位，见该函数与
+ * `buildGiftRule` 上方的注释。至此设计文档 §13 列的悬空项全部清零。
  *
  * ## 一处「以为悬空、实测已通」的纠正
  *
@@ -86,7 +84,7 @@
  * 便利性优化，不是功能缺口，因此没有计入悬空清单。
  */
 import type { Action, Aggregate, Condition, Rule, RuleView } from '@/api/rule-types'
-import { PK_RULE_NAME } from '@/components/PkPanel.vue'
+import { PK_RULE_NAME, PK_VISIT_RULE_NAME } from '@/components/PkPanel.vue'
 
 /** 进房欢迎规则的固定名字，前端靠它从规则列表里认领已保存的配置。 */
 export const ENTER_RULE_NAME = '内置/进房欢迎'
@@ -386,9 +384,19 @@ export interface GiftDraft {
   minCount: number
   pickMode: PickMode
   templates: string[]
-  /** 盲盒礼物单列一类，不并入常规——悬空项，event.Gift 无盲盒字段。 */
+  /**
+   * 盲盒礼物单列一类，不并入常规答谢——真实生效：勾选后通用答谢规则
+   * （GIFT_RULE_NAME）会加上 `when: gift.isBlindBox == false` 排除盲盒，
+   * 同时启用独立的 `BLINDBOX_RULE_NAME` 规则专门答谢盲盒，见
+   * `buildBlindBoxRule`。不勾选时盲盒仍旧混在通用答谢里，跟以前的
+   * 行为一致。
+   */
   blindBoxSeparate: boolean
-  /** 盲盒盈亏统计——同样悬空，且依赖前一项。 */
+  /**
+   * 盲盒盈亏统计——决定盲盒答谢模板是否带上盈亏信息（`blindBox.profit`/
+   * `profitYuan`）。只在 blindBoxSeparate 为 true 时才有实际效果
+   * （盲盒规则本身没启用，这项开不开都不会触发）。
+   */
   blindBoxProfitTracking: boolean
 }
 
@@ -405,8 +413,18 @@ export function defaultGiftDraft(): GiftDraft {
   }
 }
 
+/**
+ * buildGiftRule 组装通用礼物答谢规则。
+ *
+ * blindBoxSeparate 勾选时加一条 `when: gift.isBlindBox == false`——
+ * 不排除的话盲盒会被这条通用规则按「爆出来的那个礼物」答谢一遍，
+ * 再被 `buildBlindBoxRule` 按盲盒身份答谢第二遍，同一次投喂谢两次，
+ * 而且第一次说的还是错的（用户送的是盲盒，不是里面爆出来的东西）——
+ * 与 `config.example.yaml` 里「通用礼物答谢」示范规则的排除条件同一个
+ * 写法。
+ */
 export function buildGiftRule(draft: GiftDraft): Rule {
-  return {
+  const rule: Rule = {
     name: GIFT_RULE_NAME,
     enabled: draft.enabled,
     on: [GIFT_ON],
@@ -424,27 +442,88 @@ export function buildGiftRule(draft: GiftDraft): Rule {
       },
     ],
   }
+  if (draft.blindBoxSeparate) {
+    rule.when = { field: 'gift.isBlindBox', op: 'eq', value: false }
+  }
+  return rule
 }
 
-export function parseGiftDraft(rule: Rule | null): GiftDraft {
-  const draft = defaultGiftDraft()
-  if (!rule) return draft
+/** 盲盒答谢规则的固定名字——与进房欢迎/礼物答谢等其余内置规则同一套按 name 认领的机制。 */
+export const BLINDBOX_RULE_NAME = '内置/盲盒答谢'
+const BLINDBOX_ON = 'gift'
 
-  draft.enabled = rule.enabled ?? true
+/**
+ * 两条固定模板，分别对应「带盈亏」/「不带盈亏」——这里不用 TemplateList
+ * 给用户自由editable，是因为 `parseBlindBoxDraft` 要靠精确匹配这两个
+ * 字符串反推 blindBoxProfitTracking 这个布尔值（规则本身没有单独一个
+ * 字段记录这个开关，只能从模板内容反推）。真给用户开放自由编辑的话，
+ * 保存后重新加载这个开关会因为文本对不上而丢失状态。
+ */
+const BLIND_BOX_TEMPLATE_WITH_PROFIT =
+  '感谢 {{simplifyName .user.username}} 的 {{.blindBox.name}} x{{.blindBox.count}}，' +
+  '{{if gt .blindBox.profit 0}}赚了{{else}}亏了{{end}} {{.blindBox.profitYuan}} 元！'
+const BLIND_BOX_TEMPLATE_WITHOUT_PROFIT =
+  '感谢 {{simplifyName .user.username}} 开出了 {{.blindBox.count}} 次 {{.blindBox.name}}！'
 
-  const agg = rule.aggregate
-  if (agg) {
-    draft.groupMode = GIFT_BY_TO_GROUP_MODE[agg.by] ?? 'merge'
-    draft.windowSeconds = secondsFromDuration(agg.window, draft.windowSeconds)
-    if (agg.minCount !== undefined) draft.minCount = agg.minCount
+/**
+ * buildBlindBoxRule 组装盲盒答谢规则，语义照抄 `config.example.yaml`
+ * 里的示范规则：`when: gift.isBlindBox == true` + `aggregate: {by:
+ * blindBox}`（键=类型+uid+盲盒名称，交叉送不同盲盒必须分开统计，见
+ * `server/internal/rules/aggregate.go` AggregateByBlindBox 的注释）。
+ * 复用礼物答谢的合并窗口秒数，不单开一个输入框——没有必要为一个联动
+ * 特性单独占一块界面。
+ */
+export function buildBlindBoxRule(draft: GiftDraft): Rule {
+  return {
+    name: BLINDBOX_RULE_NAME,
+    enabled: draft.blindBoxSeparate,
+    on: [BLINDBOX_ON],
+    when: { field: 'gift.isBlindBox', op: 'eq', value: true },
+    aggregate: buildAggregateCommon({
+      by: 'blindBox',
+      windowSeconds: draft.windowSeconds,
+      minCount: 1,
+      applyMinCount: false,
+    }),
+    do: [
+      {
+        type: 'danmaku',
+        template: [
+          draft.blindBoxProfitTracking ? BLIND_BOX_TEMPLATE_WITH_PROFIT : BLIND_BOX_TEMPLATE_WITHOUT_PROFIT,
+        ],
+      },
+    ],
   }
+}
 
+/** parseBlindBoxDraft 从已保存的盲盒规则里还原两个开关，写回 draft（就地修改）。 */
+function parseBlindBoxDraft(draft: GiftDraft, rule: Rule | null) {
+  if (!rule) return
+  draft.blindBoxSeparate = rule.enabled ?? false
   const action = findDanmakuAction(rule.do)
-  if (action?.template && action.template.length > 0) {
-    draft.templates = action.template
+  draft.blindBoxProfitTracking = action?.template?.[0] === BLIND_BOX_TEMPLATE_WITH_PROFIT
+}
+
+/** parseGiftDraft 是 buildGiftRule/buildBlindBoxRule 的逆过程，供「认领」到已保存规则时用。 */
+export function parseGiftDraft(rule: Rule | null, blindBoxRule: Rule | null): GiftDraft {
+  const draft = defaultGiftDraft()
+  if (rule) {
+    draft.enabled = rule.enabled ?? true
+
+    const agg = rule.aggregate
+    if (agg) {
+      draft.groupMode = GIFT_BY_TO_GROUP_MODE[agg.by] ?? 'merge'
+      draft.windowSeconds = secondsFromDuration(agg.window, draft.windowSeconds)
+      if (agg.minCount !== undefined) draft.minCount = agg.minCount
+    }
+
+    const action = findDanmakuAction(rule.do)
+    if (action?.template && action.template.length > 0) {
+      draft.templates = action.template
+    }
+    draft.pickMode = parsePickMode(action?.pick)
   }
-  draft.pickMode = parsePickMode(action?.pick)
-  // 盲盒两个开关仍然没有后端字段承接，维持默认值——见文件头「一处悬空」说明。
+  parseBlindBoxDraft(draft, blindBoxRule)
   return draft
 }
 
@@ -628,16 +707,22 @@ export function parseGuardDraft(rule: Rule | null): SimpleThanksDraft {
 }
 
 /**
- * 本页管的七条内置规则名——合并保存时用来从「现有全部规则」里挑出该被
+ * 本页管的九条内置规则名——合并保存时用来从「现有全部规则」里挑出该被
  * 本页替换的那些。**必须与 `Custom.vue` 的 `BUILTIN_RULE_NAMES` 保持
- * 恰好相等**（钉在 `Custom.test.ts` 里）：不相等的话，将来加第八条内置
- * 规则若只改了这一侧，`Custom.vue` 会把它当自定义规则加载进草稿、并在
- * 保存时用草稿版本覆盖它——静默的数据错误，不报任何错。
+ * 恰好相等**（钉在 `Custom.test.ts` 里）：不相等的话，新增的内置规则若
+ * 只改了这一侧，`Custom.vue` 会把它当自定义规则加载进草稿、并在保存时
+ * 用草稿版本覆盖它——静默的数据错误，不报任何错。
+ *
+ * P4-4 Task 7 新增两条：`BLINDBOX_RULE_NAME`（盲盒单独答谢，
+ * `giftDraft.blindBoxSeparate` 接上真实规则）与 `PK_VISIT_RULE_NAME`
+ * （PK 串门欢迎，`PkPanel.vue` 的 `visitGreetingEnabled` 接上真实规则）。
  */
 export const OWNED_RULE_NAMES = [
   ENTER_RULE_NAME,
   GIFT_RULE_NAME,
+  BLINDBOX_RULE_NAME,
   PK_RULE_NAME,
+  PK_VISIT_RULE_NAME,
   BROADCAST_RULE_NAME,
   FOLLOW_RULE_NAME,
   SHARE_RULE_NAME,
@@ -676,6 +761,7 @@ import TemplateList from '@/components/TemplateList.vue'
 import PermissionWarning from '@/components/PermissionWarning.vue'
 import PkPanel, {
   buildPkRule,
+  buildPkVisitRule,
   defaultPkDraft,
   parsePkDraft,
   type PkDraft,
@@ -751,6 +837,7 @@ function currentDraftsSnapshot() {
 
 const builtEnterRule = computed(() => buildEnterRule(enterDraft, bindings.current?.roomId ?? ''))
 const builtGiftRule = computed(() => buildGiftRule(giftDraft))
+const builtBlindBoxRule = computed(() => buildBlindBoxRule(giftDraft))
 const builtBroadcastRule = computed(() => buildBroadcastRule(broadcastDraft))
 const builtFollowRule = computed(() => buildFollowRule(followDraft))
 const builtShareRule = computed(() => buildShareRule(shareDraft))
@@ -765,12 +852,14 @@ function onPkDraftUpdate(next: PkDraft) {
 // Custom.test.ts 钉住与 BUILTIN_RULE_NAMES 的相等性），<script setup>
 // 与它共享模块作用域，直接用即可，不需要再 import 或重新声明。
 
-/** buildAllRules 组装本页管的全部七条规则，保存时整批送去跟其余页面的规则合并。 */
+/** buildAllRules 组装本页管的全部九条规则，保存时整批送去跟其余页面的规则合并。 */
 function buildAllRules(): Rule[] {
   return [
     buildEnterRule(enterDraft, bindings.current?.roomId ?? ''),
     buildGiftRule(giftDraft),
+    buildBlindBoxRule(giftDraft),
     buildPkRule(pkDraft),
+    buildPkVisitRule(pkDraft),
     buildBroadcastRule(broadcastDraft),
     buildFollowRule(followDraft),
     buildShareRule(shareDraft),
@@ -792,8 +881,14 @@ async function loadRules() {
   try {
     const rules = await request<RuleView[]>('GET', `/api/bindings/${b.id}/rules`)
     Object.assign(enterDraft, parseEnterDraft(claimRule(rules, ENTER_RULE_NAME)))
-    Object.assign(giftDraft, parseGiftDraft(claimRule(rules, GIFT_RULE_NAME)))
-    Object.assign(pkDraft, parsePkDraft(claimRule(rules, PK_RULE_NAME)))
+    Object.assign(
+      giftDraft,
+      parseGiftDraft(claimRule(rules, GIFT_RULE_NAME), claimRule(rules, BLINDBOX_RULE_NAME)),
+    )
+    Object.assign(
+      pkDraft,
+      parsePkDraft(claimRule(rules, PK_RULE_NAME), claimRule(rules, PK_VISIT_RULE_NAME)),
+    )
     Object.assign(broadcastDraft, parseBroadcastDraft(claimRule(rules, BROADCAST_RULE_NAME)))
     Object.assign(followDraft, parseFollowDraft(claimRule(rules, FOLLOW_RULE_NAME)))
     Object.assign(shareDraft, parseShareDraft(claimRule(rules, SHARE_RULE_NAME)))
@@ -1043,29 +1138,30 @@ function dismissPartialFailure() {
             </NCheckbox>
             <NTooltip>
               <template #trigger>
-                <NTag type="warning" size="small">待后端支持</NTag>
+                <NTag type="info" size="small">独立规则「内置/盲盒答谢」</NTag>
               </template>
-              event.Gift（server/internal/event/payload.go）完全没有盲盒字段， B 站 SEND_GIFT
-              报文里的 blind_gift 对象还没解析。
-              需要用户真刷一次盲盒抓样本才能确定报文形状，这一步不是 纯写代码能解决的。
-              这个勾选也不会被保存——点了保存也不会写进后端，刷新页面或切换直播间后 会复位成未勾选。
+              勾选后通用礼物答谢会加一条 <code>gift.isBlindBox == false</code> 排除盲盒，
+              盲盒改由独立规则答谢（<code>when: gift.isBlindBox == true</code>，按
+              「送礼人 + 盲盒名称」分开聚合——交叉送不同盲盒会分别结算，不会混在一起算出
+              错误的盈亏）。不勾选则盲盒仍混在通用答谢里，跟以前一样。
             </NTooltip>
           </div>
           <div class="row">
             <NCheckbox v-model:checked="giftDraft.blindBoxProfitTracking">盲盒盈亏统计</NCheckbox>
             <NTooltip>
               <template #trigger>
-                <NTag type="warning" size="small">待后端支持</NTag>
+                <NTag type="info" size="small">决定盲盒答谢模板内容</NTag>
               </template>
-              依赖上一项的协议层补丁，同样需要真实样本；且盈亏必须按电池
-              数量统计而非礼物名，滚动合并时盈亏要跟着重算。这个勾选同样不会被保存，
-              刷新页面或切换直播间后会复位成未勾选。
+              勾选后盲盒答谢模板会带上本轮盈亏（1/100 电池换算成元，可能为负）；
+              不勾选则只播报开出的次数，不透露盈亏。只在上面「单独一类」也勾选时才会
+              真正触发——盲盒规则本身没启用的话，这项开不开都不会发弹幕。
             </NTooltip>
           </div>
 
           <NCollapse class="preview-collapse">
             <NCollapseItem title="预览将要生成的规则 JSON（本地草稿，尚未保存）" name="preview">
               <pre class="json-preview">{{ JSON.stringify(builtGiftRule, null, 2) }}</pre>
+              <pre class="json-preview">{{ JSON.stringify(builtBlindBoxRule, null, 2) }}</pre>
             </NCollapseItem>
           </NCollapse>
         </NCard>

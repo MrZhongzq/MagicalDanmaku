@@ -209,6 +209,102 @@ func TestVarsFromUserEnter(t *testing.T) {
 	}
 }
 
+// TestVarsFromBattlePkVarsFilterSelfAndExposeOpponent 验证「对面」的
+// 判定按既定裁决在规则层做——拿 ev.RoomID（本绑定房间号）跟每个
+// member.RoomID 比对：自己那一项必须被过滤掉，不出现在 pk.opponents
+// 里；对手的身份字段（uname/votes/isWinner）要能取到。
+func TestVarsFromBattlePkVarsFilterSelfAndExposeOpponent(t *testing.T) {
+	ev := event.Event{
+		Type: event.TypeBattle, RoomID: "self-room", Timestamp: time.Unix(1700000000, 0),
+		Payload: event.Battle{
+			PkID: "pk-42",
+			Members: []event.PkMember{
+				{RoomID: "self-room", UID: "self-uid", Username: "自己"},
+				{RoomID: "opp-room", UID: "opp-uid", Username: "对面主播", Votes: 65, IsWinner: true},
+			},
+		},
+	}
+	v := VarsFromEvent(ev)
+
+	if got, _ := LookupPath(v, "pk.pkId"); got != "pk-42" {
+		t.Errorf("pk.pkId = %v, 期望 pk-42", got)
+	}
+	if got, _ := LookupPath(v, "pk.opponent.roomId"); got != "opp-room" {
+		t.Errorf("pk.opponent.roomId = %v, 期望 opp-room（自己应被过滤，剩下的是对面）", got)
+	}
+	if got, _ := LookupPath(v, "pk.opponent.uname"); got != "对面主播" {
+		t.Errorf("pk.opponent.uname = %v", got)
+	}
+	if got, _ := LookupPath(v, "pk.opponent.votes"); got != int64(65) {
+		t.Errorf("pk.opponent.votes = %v", got)
+	}
+	if got, _ := LookupPath(v, "pk.opponent.isWinner"); got != true {
+		t.Errorf("pk.opponent.isWinner = %v", got)
+	}
+
+	opponents, ok := LookupPath(v, "pk.opponents")
+	if !ok {
+		t.Fatal("pk.opponents 应该存在")
+	}
+	list, ok := opponents.([]map[string]any)
+	if !ok || len(list) != 1 {
+		t.Fatalf("pk.opponents 应该恰好 1 个（自己被过滤），实际 %+v", opponents)
+	}
+}
+
+// TestVarsFromBattlePkOpponentSnapshotFieldsDistinguishUnknownFromZero
+// 是硬性约束的直接回归测试：「拿不到」（接口失败/还没抓到快照）和
+// 「真的是 0」必须在 pk.opponent.online/guardTotal/guardOnline 这几个
+// 变量上保持可区分——LookupPath 返回 (nil,false) 表示「不存在」，不能
+// 把 nil 指针塌缩成写进 map 的整数 0，那样规则作者写
+// {{.pk.opponent.online}} 会看到一个「看起来正常」的 0，而实际是「接口
+// 没拿到」。同一个事件里刻意让一个对手已知为 0、另一个未知，两者必须
+// 表现不同。
+func TestVarsFromBattlePkOpponentSnapshotFieldsDistinguishUnknownFromZero(t *testing.T) {
+	zero := int64(0)
+	ev := event.Event{
+		Type: event.TypeBattle, RoomID: "self-room", Timestamp: time.Unix(1700000000, 0),
+		Payload: event.Battle{
+			PkID: "pk-1",
+			Members: []event.PkMember{
+				{RoomID: "self-room", UID: "self-uid"},
+				// 对手的快照三个字段全部未知（nil）——接口失败或快照还没就绪。
+				{RoomID: "opp-unknown", UID: "u-unknown"},
+			},
+		},
+	}
+	v := VarsFromEvent(ev)
+	for _, path := range []string{"pk.opponent.online", "pk.opponent.guardTotal", "pk.opponent.guardOnline"} {
+		if _, ok := LookupPath(v, path); ok {
+			t.Errorf("%s 应该不存在（未知），不该被塌缩成 0", path)
+		}
+	}
+
+	// 换一个真的是 0 的场景：字段必须存在且等于 0，不能因为「不写零值」
+	// 的惯例被误伤——这里的 0 是真实数据，不是「不存在」。
+	evKnownZero := event.Event{
+		Type: event.TypeBattle, RoomID: "self-room", Timestamp: time.Unix(1700000000, 0),
+		Payload: event.Battle{
+			PkID: "pk-2",
+			Members: []event.PkMember{
+				{RoomID: "self-room", UID: "self-uid"},
+				{RoomID: "opp-zero", UID: "u-zero", Online: &zero, GuardTotal: &zero, GuardOnline: &zero},
+			},
+		},
+	}
+	v2 := VarsFromEvent(evKnownZero)
+	for _, path := range []string{"pk.opponent.online", "pk.opponent.guardTotal", "pk.opponent.guardOnline"} {
+		got, ok := LookupPath(v2, path)
+		if !ok {
+			t.Errorf("%s 应该存在（真实值是 0，不是未知）", path)
+			continue
+		}
+		if got != int64(0) {
+			t.Errorf("%s = %v, 期望 int64(0)", path, got)
+		}
+	}
+}
+
 func TestLookupPathMissingReturnsFalse(t *testing.T) {
 	v := VarsFromEvent(danmakuEvent())
 	for _, p := range []string{"不存在", "user.不存在", "text.深一层", ""} {
@@ -464,7 +560,38 @@ func TestVariableCatalogMatchesVarsFromEvent(t *testing.T) {
 		},
 		event.TypeBattle: {
 			Type: event.TypeBattle, RoomID: "1", Timestamp: time.Unix(1700000000, 0),
-			Payload: event.Battle{SubCommand: "PK_BATTLE_START_NEW"},
+			Payload: event.Battle{
+				SubCommand: "PK_OPPONENT_SNAPSHOT",
+				PkID:       "pk-1",
+				// 一个自己（RoomID="1"，必须被 pkVars 过滤掉）+ 一个对手，
+				// 对手三个快照字段都填满，让 pk.opponent.online/guardTotal/
+				// guardOnline 这组 Optional 字段也走到「实际产出」一侧被
+				// 验证——不填的话即便 catalog 声明了这几条路径，也永远不会
+				// 被真正核对到，跟 gifts/blindBox.* 当年漏掉的路数一样。
+				Members: func() []event.PkMember {
+					online, guardTotal, guardOnline := int64(100), int64(10), int64(3)
+					return []event.PkMember{
+						{RoomID: "1", UID: "self-uid", Username: "自己"},
+						{
+							RoomID: "2", UID: "opp-uid", Username: "对面主播",
+							Votes: 65, IsWinner: true,
+							Online: &online, GuardTotal: &guardTotal, GuardOnline: &guardOnline,
+						},
+					}
+				}(),
+			},
+		},
+		event.TypeVisitFromOpponent: {
+			Type: event.TypeVisitFromOpponent, RoomID: "1", Timestamp: time.Unix(1700000000, 0),
+			Payload: event.VisitFromOpponent{
+				User: fullUser, OpponentRoomID: "2", MatchedBy: event.VisitMatchedByAudience,
+			},
+		},
+		event.TypeVisitToOpponent: {
+			Type: event.TypeVisitToOpponent, RoomID: "1", Timestamp: time.Unix(1700000000, 0),
+			Payload: event.VisitToOpponent{
+				User: fullUser, OpponentRoomID: "2", MatchedBy: event.VisitMatchedByFanMedal,
+			},
 		},
 		event.TypeUnknown: {
 			Type: event.TypeUnknown, RoomID: "1", Timestamp: time.Unix(1700000000, 0),

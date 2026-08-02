@@ -38,6 +38,11 @@ var knownEventTypes = map[string]event.Type{
 	string(event.TypeRoomStatsUpdate):  event.TypeRoomStatsUpdate,
 	string(event.TypeBattle):           event.TypeBattle,
 	string(event.TypeUnknown):          event.TypeUnknown,
+
+	// PK 期间的串门信号——补上后规则才能订阅得到，缺一处就是「配了 on
+	// 却永远不触发」这种最难排查的沉默失败。
+	string(event.TypeVisitFromOpponent): event.TypeVisitFromOpponent,
+	string(event.TypeVisitToOpponent):   event.TypeVisitToOpponent,
 }
 
 // ToRule 把序列化形式转成领域模型并校验。

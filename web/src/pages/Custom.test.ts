@@ -183,7 +183,7 @@ async function mountCustom() {
 // 一、纯函数
 // ============================================================
 
-describe('isCustomRule：排除 Task 9/10 建立的七个内置规则名', () => {
+describe('isCustomRule：排除 Task 9/10/P4-4 Task 7 建立的九个内置规则名', () => {
   it.each(BUILTIN_RULE_NAMES)('%s 不算自定义规则', (name) => {
     expect(isCustomRule({ name, position: 0 })).toBe(false)
   })
@@ -192,17 +192,17 @@ describe('isCustomRule：排除 Task 9/10 建立的七个内置规则名', () =>
     expect(isCustomRule({ name: '舰长专属欢迎', position: 0 })).toBe(true)
   })
 
-  it('恰好七个内置名字（覆盖 Task 9/10 全部固定名）', () => {
-    expect(BUILTIN_RULE_NAMES).toHaveLength(7)
-    expect(new Set(BUILTIN_RULE_NAMES).size).toBe(7) // 互不相同
+  it('恰好九个内置名字（Task 9/10 的七个 + P4-4 Task 7 新增的盲盒答谢/PK串门欢迎）', () => {
+    expect(BUILTIN_RULE_NAMES).toHaveLength(9)
+    expect(new Set(BUILTIN_RULE_NAMES).size).toBe(9) // 互不相同
   })
 
   // ---- 全分支终审第 6 条：钉住两份规则名列表的相等性 ----
   //
   // Danmaku.vue 的 OWNED_RULE_NAMES 与 Custom.vue 的 BUILTIN_RULE_NAMES
-  // 今天完全一致，但没有任何测试钉住。将来加第八条内置规则时若只改
-  // Danmaku 一侧，Custom.vue 会把它当自定义规则加载进草稿、并在保存时
-  // 用草稿版本覆盖它——静默的数据错误，不报任何错。
+  // 今天完全一致，但没有任何测试钉住。将来加新内置规则时若只改 Danmaku
+  // 一侧，Custom.vue 会把它当自定义规则加载进草稿、并在保存时用草稿
+  // 版本覆盖它——静默的数据错误，不报任何错。
   it('Danmaku.vue 的 OWNED_RULE_NAMES 与本页 BUILTIN_RULE_NAMES 必须恰好构成对全体内置规则的一个划分', () => {
     expect(new Set(OWNED_RULE_NAMES)).toEqual(new Set(BUILTIN_RULE_NAMES))
   })
@@ -604,7 +604,7 @@ describe('Custom 页：条件开关控制 ConditionTree 是否出现', () => {
 })
 
 describe('Custom 页：排除通用规则——真功能（spec.Rule.Suppress）', () => {
-  it('多选框候选项是七个内置规则名；选中后规则 JSON 预览里出现 suppress 字段', async () => {
+  it('多选框候选项是全部内置规则名；选中后规则 JSON 预览里出现 suppress 字段', async () => {
     setupStores()
     stubFetch({ rules: [] })
     const wrapper = await mountCustom()

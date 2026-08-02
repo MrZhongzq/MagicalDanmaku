@@ -58,6 +58,42 @@ func TestQueryStatsByDay(t *testing.T) {
 	if row["guardCount"].(float64) != 1 {
 		t.Errorf("guardCount = %v, 期望 1", row["guardCount"])
 	}
+	if row["blindBoxProfit"].(float64) != 0 {
+		t.Errorf("blindBoxProfit = %v, 期望 0（这批样本没有盲盒礼物）", row["blindBoxProfit"])
+	}
+}
+
+// TestQueryStatsByDayBlindBoxProfit 验证盲盒盈亏字段经完整 HTTP 层
+// 下发——统计页盲盒盈亏卡片直接读的就是这个字段（悬空清单第 7/15 条）。
+func TestQueryStatsByDayBlindBoxProfit(t *testing.T) {
+	srv, st := newTestServer(t)
+	c := loginAs(t, srv, st, "张三", false)
+	bid := mustBindingFor(t, st, "张三", "小号", "123")
+	grantEventRead(t, st, "张三", "小号", "123")
+
+	seedActivity(t, st, bid,
+		store.ActivityRow{Kind: store.ActivityEvent, EventType: "gift",
+			Detail: []byte(`{"GiftName":"星光铃铛","Count":1,"Price":5200,"TotalCoin":5000,` +
+				`"BlindBox":{"Name":"幸运盲盒","Price":5000,"TipPrice":5200}}`),
+			OccurredAt: seedTime},
+	)
+
+	resp := jsonRequest(t, c, "GET", srv.URL+"/api/bindings/"+itoa(bid)+"/stats?by=day", "")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("状态码 = %d", resp.StatusCode)
+	}
+
+	var got []map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("解析报错: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("bucket 数 = %d, 期望 1: %+v", len(got), got)
+	}
+	if got[0]["blindBoxProfit"].(float64) != 200 {
+		t.Errorf("blindBoxProfit = %v, 期望 200（5200*1-5000）", got[0]["blindBoxProfit"])
+	}
 }
 
 // by 不传时默认按天分组

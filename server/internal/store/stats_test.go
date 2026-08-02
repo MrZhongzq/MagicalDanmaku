@@ -109,6 +109,71 @@ func TestQueryStatsByDayExcludesGiftCombo(t *testing.T) {
 	}
 }
 
+// TestQueryStatsByDaySumsBlindBoxProfitByBattery 验证盈亏是按每一条盲盒
+// 送礼事件的原始电池数量（Price*Count - TotalCoin）累加，不是按礼物名
+// 分组再取某一种——两条盲盒记录爆出的礼物名完全不同也要能正确累加，
+// 且非盲盒的普通礼物（BlindBox 为 JSON null）完全不计入。
+func TestQueryStatsByDaySumsBlindBoxProfitByBattery(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	accID := mustAccount(t, s, "小号")
+
+	if err := s.InsertActivity(ctx, []ActivityRow{
+		// 幸运盲盒：50 电池成本(5000)，爆出的礼物单价 52 电池(5200)*1 —— 赚 200
+		{AccountID: accID, Kind: ActivityEvent, EventType: "gift",
+			Detail: []byte(`{"GiftName":"星光铃铛","Count":1,"Price":5200,"TotalCoin":5000,` +
+				`"BlindBox":{"Name":"幸运盲盒","Price":5000,"TipPrice":5200}}`),
+			OccurredAt: statsFixedTime},
+		// 心动盲盒：另一个礼物名，30 电池成本(3000)，爆出的单价 10 电池(1000)*1 —— 亏 2000
+		{AccountID: accID, Kind: ActivityEvent, EventType: "gift",
+			Detail: []byte(`{"GiftName":"棒棒糖","Count":1,"Price":1000,"TotalCoin":3000,` +
+				`"BlindBox":{"Name":"心动盲盒","Price":3000,"TipPrice":1000}}`),
+			OccurredAt: statsFixedTime.Add(time.Minute)},
+		// 普通礼物（非盲盒）：不应计入盈亏，哪怕总价很大
+		{AccountID: accID, Kind: ActivityEvent, EventType: "gift",
+			Detail:     []byte(`{"GiftName":"小心心","Count":100,"Price":100,"TotalCoin":10000}`),
+			OccurredAt: statsFixedTime.Add(2 * time.Minute)},
+	}); err != nil {
+		t.Fatalf("写入报错: %v", err)
+	}
+
+	got, err := s.QueryStatsByDay(ctx, StatsQuery{AccountID: accID})
+	if err != nil {
+		t.Fatalf("按天聚合报错: %v", err)
+	}
+	b := statsBucketFor(t, got, "2026-07-31")
+	const want = 200 - 2000 // 两条盲盒记录按电池数量相加，与礼物名无关
+	if b.BlindBoxProfit != want {
+		t.Errorf("BlindBoxProfit = %d, 期望 %d（幸运赚 200、心动亏 2000，按电池数量分别累加）",
+			b.BlindBoxProfit, want)
+	}
+}
+
+// TestQueryStatsByDayBlindBoxProfitZeroWithoutBlindBoxGifts 验证没有任何
+// 盲盒记录的分桶盈亏是真实的 0（SQL SUM 对空集合返回 NULL，必须
+// COALESCE 成 0，否则 Scan 会因类型不匹配报错，调用方也拿不到一个能直接
+// 展示的数字）。
+func TestQueryStatsByDayBlindBoxProfitZeroWithoutBlindBoxGifts(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	accID := mustAccount(t, s, "小号")
+
+	if err := s.InsertActivity(ctx, []ActivityRow{
+		{AccountID: accID, Kind: ActivityEvent, EventType: "danmaku", OccurredAt: statsFixedTime},
+	}); err != nil {
+		t.Fatalf("写入报错: %v", err)
+	}
+
+	got, err := s.QueryStatsByDay(ctx, StatsQuery{AccountID: accID})
+	if err != nil {
+		t.Fatalf("按天聚合报错: %v", err)
+	}
+	b := statsBucketFor(t, got, "2026-07-31")
+	if b.BlindBoxProfit != 0 {
+		t.Errorf("BlindBoxProfit = %d, 期望 0", b.BlindBoxProfit)
+	}
+}
+
 // RecordAction 把触发它的事件类型也写进 event_type 列（同一条时间线上
 // 看因果），统计不能把这类 kind=action 的行当成业务事件数进去。
 func TestQueryStatsByDayExcludesActionRows(t *testing.T) {
@@ -235,6 +300,45 @@ func TestQueryStatsBySessionPairsStartAndStop(t *testing.T) {
 	}
 	if sess.LiveSeconds != int64(2*time.Hour/time.Second) {
 		t.Errorf("LiveSeconds = %d, 期望 %d", sess.LiveSeconds, int64(2*time.Hour/time.Second))
+	}
+}
+
+// TestQueryStatsBySessionSumsBlindBoxProfit 验证 by=session 走的是单行
+// 聚合（aggregateEventCounts），跟 by=day 的 GROUP BY 是两条不同的 SQL
+// 路径，盲盒盈亏的口径必须在两条路径上保持一致——不是只改了 GROUP BY
+// 那一份就算数。
+func TestQueryStatsBySessionSumsBlindBoxProfit(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	accID := mustAccount(t, s, "小号")
+	b, err := s.UpsertBinding(ctx, accID, "123")
+	if err != nil {
+		t.Fatalf("创建绑定报错: %v", err)
+	}
+
+	start := statsFixedTime
+	stop := start.Add(time.Hour)
+	if err := s.InsertActivity(ctx, []ActivityRow{
+		{AccountID: accID, BindingID: &b.ID, Kind: ActivityEvent, EventType: "live_start", OccurredAt: start},
+		{AccountID: accID, BindingID: &b.ID, Kind: ActivityEvent, EventType: "gift",
+			Detail: []byte(`{"GiftName":"星光铃铛","Count":2,"Price":5200,"TotalCoin":10000,` +
+				`"BlindBox":{"Name":"幸运盲盒","Price":5000,"TipPrice":5200}}`),
+			OccurredAt: start.Add(time.Minute)},
+		{AccountID: accID, BindingID: &b.ID, Kind: ActivityEvent, EventType: "live_stop", OccurredAt: stop},
+	}); err != nil {
+		t.Fatalf("写入报错: %v", err)
+	}
+
+	got, err := s.QueryStatsBySession(ctx, StatsQuery{AccountID: accID, BindingID: b.ID})
+	if err != nil {
+		t.Fatalf("按场次聚合报错: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("场次数 = %d, 期望 1: %+v", len(got), got)
+	}
+	const want = 5200*2 - 10000 // 400
+	if got[0].BlindBoxProfit != want {
+		t.Errorf("BlindBoxProfit = %d, 期望 %d", got[0].BlindBoxProfit, want)
 	}
 }
 

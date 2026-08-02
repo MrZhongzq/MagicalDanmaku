@@ -311,6 +311,7 @@ func TestToRuleMapsAllKnownEventTypes(t *testing.T) {
 		event.TypeUserLike, event.TypeLiveStart, event.TypeLiveStop,
 		event.TypeRoomChange, event.TypeUserBlocked, event.TypeOnlineRankUpdate,
 		event.TypeRoomStatsUpdate, event.TypeBattle, event.TypeUnknown,
+		event.TypeVisitFromOpponent, event.TypeVisitToOpponent,
 	} {
 		r, err := spec.Rule{
 			Name: "x",

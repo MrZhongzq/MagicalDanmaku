@@ -540,7 +540,13 @@ func runRun(args []string) error {
 		wg.Add(2)
 		go func(rt *roomRuntime, c *bilibili.Client, bindingID int64) {
 			defer wg.Done()
-			for ev := range c.Events() {
+			// 消费 PKPipeline 合流后的通道，不直接消费 c.Events()：这一步
+			// 把 StartPK/EndPK/FetchOpponentSnapshots/ClassifyVisit 接进了
+			// 实时事件流（P4-4 Task 7）——PKPipeline 内部把「读事件」和
+			// 「PK 相关的网络调用」拆到了不同 goroutine，这里拿到的仍然是
+			// 一个普通的 <-chan event.Event，用法与直接消费 c.Events() 时
+			// 完全一致，只是多了 PK 期间合成的快照事件与串门信号事件。
+			for ev := range bilibili.NewPKPipeline(c).Run(ctx) {
 				// rt.Engine() 每次都要重新取：热重载会把 rt.engine 换成
 				// 新引擎，若在循环外缓存一次就等于把旧引擎闭包捕获死了，
 				// 重载之后事件会继续打在已经 Close 掉的旧引擎上。

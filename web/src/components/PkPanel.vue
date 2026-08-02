@@ -2,48 +2,53 @@
 /**
  * PkPanel 是「PK 播报」功能块（弹幕姬页下半部分之一，设计文档 §7.2）。
  *
- * ## 为什么整块都要标「待后端支持」
+ * ## P4-4 Task 7：两块都已接上真实数据，不再悬空
  *
- * 后端 `event.Battle`（`server/internal/event/payload.go` 第 119-121 行）
- * 目前只有一个字段：
+ * 曾经整块悬空的前提——`event.Battle` 只有一个 `SubCommand` 字段、串门
+ * 判定没有事件类型可挂——已经被 P4-4 前几个任务解决：
  *
- * ```go
- * type Battle struct {
- *     SubCommand string // 原始 CMD 名，如 "PK_BATTLE_START_NEW"
- * }
- * ```
+ * - `event.PkMember` 现在带 `RoomID/UID/Username/Face/Votes/IsWinner`
+ *   与 PK 接通瞬间抓取的 `Online/GuardTotal/GuardOnline` 一次性快照
+ *   （`server/internal/event/payload.go`），`rules.VarsFromEvent` 把它们
+ *   展开成 `pk.pkId`/`pk.opponents`/`pk.opponent.*`
+ *   （`server/internal/rules/vars.go`）。
+ * - `bilibili.PKPipeline`（Task 7 新增）把 `StartPK`/
+ *   `FetchOpponentSnapshots` 接进了实时事件流：PK 接通时异步建立对面
+ *   连接、抓一次快照，就绪后合成一条 `battle.subCommand ==
+ *   "PK_OPPONENT_SNAPSHOT"` 的事件——`buildPkRule` 的 `when` 条件就锁
+ *   定这一刻，不在 PK_BATTLE_* 系列几十次状态流转上都播一遍。
+ * - `event.TypeVisitFromOpponent`/`TypeVisitToOpponent` 是两个独立事件
+ *   类型（欢迎 vs 警示，语义相反，见各自注释），已登记进规则层的三处
+ *   （`spec/convert.go`/`vars.go`/`meta_handler.go`）。串门欢迎只播「对面
+ *   来访」这一个方向（`pk_visit_from_opponent`）——警示方向没有对应的
+ *   播报 UI，用户从未要求过要把警示语也自动发出去，保留手动/自定义规则
+ *   的空间。
  *
- * 用户要的「PK 接通那一瞬间截取对面数据——主播昵称、直播间人数、大航海
- * 总数、大航海在线数」一个都没解析；`rules.VarsFromEvent`
- * （`server/internal/rules/vars.go` 第 87-88 行）对应给模板的变量也只有
- * `battle.subCommand` 一项。PK 串门欢迎（对面观众过来时用单独欢迎语）
- * 还要知道「这个进场事件的来源是不是对面直播间」，但 `event.UserEnter`
- * 完全没有来源房间标识，甚至连挂在哪个事件类型上都不确定。
- *
- * 这与「随机 vs 轮询」那种「能跑，只是退化」不同：这里是「界面能画，
- * 后端完全没有数据」，所以本文件里的字段名（`battle.opponentName` 等）
- * 都是**占位示例**，用来说明"打算怎么做"，不是已经确定的真实报文形状。
- * 这一点必须由用户在真实 PK 场景抓包后才能定案（设计文档 §13.5），
- * 控制器凭现有信息编不出来。
- *
- * ## 「PK 匹配信息」与「PK 串门欢迎」在数据模型上不对等
- *
- * `buildPkRule` 只组装「PK 匹配信息」那部分（`on: ['battle']` +
- * 播报模板）——这部分好歹对应着一个已存在的事件类型。「PK 串门欢迎」
- * 连触发事件类型都定不下来（现有的 `user_enter` 不带来源信息，不能
- * 直接拿它当"对面观众进场"用），所以 `visitGreetingEnabled`/
- * `visitTemplates` 两个字段**不写进任何规则**，只是纯粹的草稿 UI 状态，
- * 供评审看这块设想的形状。
+ * `matchTemplates`/`visitTemplates` 都会被保存进各自的内置规则
+ * （`PK_RULE_NAME`/`PK_VISIT_RULE_NAME`），刷新页面或切换直播间不再丢失。
  */
 import type { Rule } from '@/api/rule-types'
 
-/** PK 播报规则的固定名字，与「进房欢迎」「礼物答谢」用同一套按 name 认领的机制。 */
+/** PK 播报（匹配信息）规则的固定名字，与「进房欢迎」「礼物答谢」用同一套按 name 认领的机制。 */
 export const PK_RULE_NAME = '内置/PK播报'
+/** PK 串门欢迎规则的固定名字。 */
+export const PK_VISIT_RULE_NAME = '内置/PK串门欢迎'
 
 const PK_ON = 'battle'
+const PK_VISIT_ON = 'pk_visit_from_opponent'
+
+/**
+ * PK_SNAPSHOT_SUBCOMMAND **必须**跟后端
+ * `bilibili.PKOpponentSnapshotSubCommand`（`server/internal/connector/
+ * bilibili/pk_pipeline.go`）的字面量完全一致——这不是协议里真实存在的
+ * B 站 CMD 名，是 PKPipeline 自己合成、专门标记「PK 接通那一瞬间的对面
+ * 快照已经就绪」的一个标记值。两边任何一边改了字面量而另一边没跟上，
+ * 表现是 PK 播报规则从此再也不会触发，且不报任何错。
+ */
+const PK_SNAPSHOT_SUBCOMMAND = 'PK_OPPONENT_SNAPSHOT'
 
 export interface PkDraft {
-  /** 整块的开关。默认关——这块目前保存了也不会生效，不该假装它已经能用。 */
+  /** 「PK 匹配信息」整块的开关。 */
   enabled: boolean
 
   /** 播报对面主播昵称。 */
@@ -71,8 +76,8 @@ export function defaultPkDraft(): PkDraft {
     announceGuardTotal: true,
     announceGuardOnline: false,
     matchTemplates: [
-      '对面主播是 {{.battle.opponentName}}，直播间 {{.battle.opponentRoomCount}} 人在线，' +
-        '大航海 {{.battle.opponentGuardTotal}} 位，一起加油！',
+      '对面主播是 {{.pk.opponent.uname}}，直播间 {{.pk.opponent.online}} 人在线，' +
+        '大航海 {{.pk.opponent.guardTotal}} 位，一起加油！',
     ],
     visitGreetingEnabled: false,
     visitTemplates: ['欢迎对面直播间的朋友 {{.user.username}} 来串门认识一下~'],
@@ -80,37 +85,71 @@ export function defaultPkDraft(): PkDraft {
 }
 
 /**
- * buildPkRule 组装出的规则**只覆盖「PK 匹配信息」**，且字段形状是占位的：
- * `battle.opponentName` 等在 `rules.VarsFromEvent` 里并不存在，真渲染时
- * 会被 `tmplGet` 兜底成空字符串（`server/internal/rules/template.go` 的
- * `rewriteFieldChains`/`tmplGet`），不会报错，但也不会显示真实数据。
- * 之所以仍然拼出来，是为了让评审者在预览 JSON 里看清楚"打算怎么做"。
+ * buildPkRule 组装「PK 匹配信息」规则。
  *
- * `announceXxx` 四个勾选目前**不参与**模板组装——后端还没有任何字段
- * 能承载"只播报其中几项"这种选择，四个勾选目前纯粹是给评审看控件形状，
- * 具体怎么落地（四个独立模板变量，还是别的）要等真实报文定下来再设计。
+ * `when` 锁定 PKPipeline 合成的快照就绪事件——用户原话「只截取 PK 接通
+ * 的那一瞬间的数据」，不该在一场 PK 的几十次状态流转（PK_INFO/
+ * PK_BATTLE_PRE/PK_BATTLE_PROCESS/...）上都播一遍。
+ *
+ * `announceXxx` 四个勾选**不参与组装**——它们只决定 `defaultPkDraft()`
+ * 默认模板里出现哪些字段（默认模板包含前三项、不含
+ * `announceGuardOnline` 默认关闭对应的那个字段），模板本身是自由文本
+ * （`TemplateList`），保存的是用户最终编辑的结果，不会被这四个勾选
+ * 事后重新拼接覆盖——这与进房欢迎「佩戴粉丝牌」那种直接拼 `when` 条件
+ * 的自动化程度不同，是因为后端从未有过「选择性隐藏某几个字段」这种
+ * 机制，模板引擎只按用户写的文本渲染。
  */
 export function buildPkRule(draft: PkDraft): Rule {
   return {
     name: PK_RULE_NAME,
     enabled: draft.enabled,
     on: [PK_ON],
+    when: { field: 'battle.subCommand', op: 'eq', value: PK_SNAPSHOT_SUBCOMMAND },
     do: [{ type: 'danmaku', template: draft.matchTemplates.filter((t) => t.trim() !== '') }],
   }
 }
 
-/** parsePkDraft 是 buildPkRule 的逆过程，供「认领」到已保存规则时用。 */
-export function parsePkDraft(rule: Rule | null): PkDraft {
-  const draft = defaultPkDraft()
-  if (!rule) return draft
-
-  draft.enabled = rule.enabled ?? true
-  const action = rule.do?.find((a) => a.type === 'danmaku')
-  if (action?.template && action.template.length > 0) {
-    draft.matchTemplates = action.template
+/**
+ * buildPkVisitRule 组装「PK 串门欢迎」规则——只覆盖欢迎方向
+ * （`pk_visit_from_opponent`），警示方向（`pk_visit_to_opponent`，我方
+ * 观众跑去对面）没有对应的自动播报 UI，避免把两个语气相反的方向在
+ * 界面上混为一谈；需要监控警示方向的用户可以在「自定义弹幕姬」页自己
+ * 配一条 `on: pk_visit_to_opponent` 的规则。
+ */
+export function buildPkVisitRule(draft: PkDraft): Rule {
+  return {
+    name: PK_VISIT_RULE_NAME,
+    enabled: draft.visitGreetingEnabled,
+    on: [PK_VISIT_ON],
+    do: [{ type: 'danmaku', template: draft.visitTemplates.filter((t) => t.trim() !== '') }],
   }
-  // announceXxx 四项与 visitGreetingEnabled/visitTemplates 在后端没有
-  // 对应字段，加载已保存规则时无从恢复，维持默认值。
+}
+
+/**
+ * parsePkDraft 从两条已保存的规则里还原一份 PkDraft，供「认领」到已保存
+ * 配置时用。matchRule 对应 `PK_RULE_NAME`，visitRule 对应
+ * `PK_VISIT_RULE_NAME`——两条规则触发的事件类型不同（`battle` vs
+ * `pk_visit_from_opponent`），无法合并成一条规则各自配一半模板。
+ */
+export function parsePkDraft(matchRule: Rule | null, visitRule: Rule | null): PkDraft {
+  const draft = defaultPkDraft()
+
+  if (matchRule) {
+    draft.enabled = matchRule.enabled ?? true
+    const action = matchRule.do?.find((a) => a.type === 'danmaku')
+    if (action?.template && action.template.length > 0) {
+      draft.matchTemplates = action.template
+    }
+  }
+
+  if (visitRule) {
+    draft.visitGreetingEnabled = visitRule.enabled ?? false
+    const action = visitRule.do?.find((a) => a.type === 'danmaku')
+    if (action?.template && action.template.length > 0) {
+      draft.visitTemplates = action.template
+    }
+  }
+
   return draft
 }
 </script>
@@ -141,7 +180,8 @@ function patch(partial: Partial<PkDraft>) {
   emit('update:modelValue', { ...props.modelValue, ...partial })
 }
 
-const builtRule = computed(() => buildPkRule(props.modelValue))
+const builtMatchRule = computed(() => buildPkRule(props.modelValue))
+const builtVisitRule = computed(() => buildPkVisitRule(props.modelValue))
 </script>
 
 <template>
@@ -150,32 +190,27 @@ const builtRule = computed(() => buildPkRule(props.modelValue))
       <NSwitch :value="modelValue.enabled" @update:value="(v: boolean) => patch({ enabled: v })" />
     </template>
 
-    <NAlert type="warning" :bordered="false" class="pk-alert">
-      核心数据后端完全没解析：<code>event.Battle</code> 只有一个 <code>SubCommand</code> 字段， PK
-      接通瞬间的对面数据（主播昵称、人数、大航海）协议层拿不到，串门欢迎也没有
-      "来源房间"这个字段。<strong>但这不等于整块都不生效</strong>：右上角的总开关与下面的
-      播报模板会被正常保存，直播间真的发生 PK 时这条规则确实会触发并发出弹幕， 只是弹幕里
-      <code>battle.opponentXxx</code> 这类变量会渲染成空字符串（占位示例， 真实字段名待真实 PK
-      场景抓包确认后可能完全不同，设计文档 §13.5）。「PK 匹配信息」 四个勾选与「PK
-      串门欢迎」整块则是另一种更彻底的悬空——不会被保存，刷新页面或
-      切换直播间都会复位，具体见下面各自的提示。
+    <NAlert type="info" :bordered="false" class="pk-alert">
+      PK 接通瞬间会一次性截取对面数据（主播昵称、直播间人数、大航海总数/在线数），之后对面数据的
+      变化不再播报——「只截取 PK 接通的那一瞬间」。外部接口一时拿不到某个数字时该字段会渲染成空，
+      不会显示成「0 人在线」这种看起来正常实则错误的数字；PK 播报本身照常发出，不会因为一个字段
+      拿不到就整条不播。
     </NAlert>
 
     <h4>
       PK 匹配信息
       <NTooltip>
         <template #trigger>
-          <NTag type="warning" size="small">待后端支持</NTag>
+          <NTag type="success" size="small">已接入真实数据</NTag>
         </template>
-        需要真实样本：是。控制器无法凭现有信息确定 PK 报文里这些字段叫什么、在第几层，
-        必须先在真实直播间触发一次 PK 并抓包。上面四个勾选不会被保存——点了保存也不会写进
-        后端，刷新页面或切换直播间后会复位成默认勾选状态。<strong>这四个勾选还有第二层 悬空</strong
-        >：即便以后补齐了对面数据字段，"选择性播报其中几项"这个机制本身也还 没设计（后端目前
-        没有任何字段能承载"只播报被勾中的那几项"这种选择），抓包定下字段形状之后还要再设计
-        一版才能接上这四个勾选。下面的播报模板不同：模板文本本身会被保存（认领进
-        「内置/PK播报」这条规则，随整页保存写进数据库），但模板里
-        <code>battle.opponentXxx</code>
-        这类变量在后端不存在，真实触发时会渲染成空字符串——不是不发，是照常发一条内容 残缺的弹幕。
+        右上角总开关与下面的播报模板都会被保存。模板变量：<code>pk.opponent.uname</code>
+        （对面主播昵称）、<code>pk.opponent.online</code>（对面直播间人数）、
+        <code>pk.opponent.guardTotal</code>（对面大航海总数）、
+        <code>pk.opponent.guardOnline</code>（对面大航海在线数）、<code>pk.pkId</code>
+        （这场 PK 的 ID）。多人 PK 下 <code>pk.opponents</code> 是全部对手的列表，
+        <code>pk.opponent</code> 只是取第一个的便利写法。下面四个勾选只决定「恢复默认值」时
+        模板长什么样，不会在你编辑过模板之后反过来改写它——模板是自由文本，想加减字段直接改
+        文本即可。
       </NTooltip>
     </h4>
     <p class="hint">只截取 PK 接通的那一瞬间，之后对面数据的变化不再播报。</p>
@@ -216,12 +251,13 @@ const builtRule = computed(() => buildPkRule(props.modelValue))
       PK 串门欢迎
       <NTooltip>
         <template #trigger>
-          <NTag type="warning" size="small">待后端支持</NTag>
+          <NTag type="success" size="small">已接入真实数据</NTag>
         </template>
-        需要真实样本：是。且比上面那块缺得更彻底——连"这个进场事件来自对面直播间"
-        这件事本身该怎么判断都还没确认，可能需要新的事件类型，不只是补字段。这个开关与
-        模板同样完全不会被保存：点了保存也不会写进后端，刷新页面或切换直播间后开关会
-        复位成关闭、模板会复位成默认文案。
+        对面直播间的人（观众或主播本人）跑来我方时触发，事件类型
+        <code>pk_visit_from_opponent</code>，模板可用 <code>user.username</code> 等常规用户变量。
+        只覆盖「欢迎」这一个方向——「我方观众跑去对面」是语气相反的警示信号
+        （<code>pk_visit_to_opponent</code>），没有对应的自动播报开关，避免两种语气在这里被混为
+        一谈；需要监控警示方向可以去「自定义弹幕姬」页单独配一条规则。
       </NTooltip>
     </h4>
     <div class="row">
@@ -238,11 +274,9 @@ const builtRule = computed(() => buildPkRule(props.modelValue))
     />
 
     <NCollapse class="preview-collapse">
-      <NCollapseItem
-        title="预览将要生成的规则 JSON（仅覆盖 PK 匹配信息，串门欢迎不产出任何规则字段）"
-        name="preview"
-      >
-        <pre class="json-preview">{{ JSON.stringify(builtRule, null, 2) }}</pre>
+      <NCollapseItem title="预览将要生成的规则 JSON（PK 匹配信息 + PK 串门欢迎，各一条规则）" name="preview">
+        <pre class="json-preview">{{ JSON.stringify(builtMatchRule, null, 2) }}</pre>
+        <pre class="json-preview">{{ JSON.stringify(builtVisitRule, null, 2) }}</pre>
       </NCollapseItem>
     </NCollapse>
   </NCard>

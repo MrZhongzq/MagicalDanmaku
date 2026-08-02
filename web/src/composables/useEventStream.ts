@@ -11,7 +11,7 @@ export interface StreamEvent {
 
 /**
  * 后端会推的命名事件类型，与 `server/internal/event/type.go` 的
- * `Type` 常量逐一对应（共 19 种）。
+ * `Type` 常量逐一对应（共 21 种）。
  *
  * **这份清单必须跟 type.go 手动同步**，不是照抄某个旧文档：SSE 的
  * onmessage 只接默认（未命名）事件，而后端每条都带 `event: <type>`
@@ -38,6 +38,8 @@ const EVENT_TYPES = [
   'online_rank_update', // 高能榜变化
   'room_stats_update', // 房间统计数据变化
   'battle', // PK 大乱斗
+  'pk_visit_from_opponent', // PK 串门：对面来访（欢迎语气）
+  'pk_visit_to_opponent', // PK 串门：我方观众去对面（警示语气，跟上一个方向相反）
   'manual', // 操作者从 WebUI 手动触发
   'unknown', // 未识别的 CMD
 ]

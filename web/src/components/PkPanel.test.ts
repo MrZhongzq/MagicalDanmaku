@@ -1,56 +1,107 @@
 import { describe, expect, it } from 'vitest'
 import { mount } from '@vue/test-utils'
-import PkPanel, { PK_RULE_NAME, buildPkRule, defaultPkDraft, parsePkDraft } from './PkPanel.vue'
+import PkPanel, {
+  PK_RULE_NAME,
+  PK_VISIT_RULE_NAME,
+  buildPkRule,
+  buildPkVisitRule,
+  defaultPkDraft,
+  parsePkDraft,
+} from './PkPanel.vue'
 
-// PkPanel 是「PK 播报」整块——设计文档 §7.2 要的对面数据（主播昵称、
-// 直播间人数、大航海总数/在线数）与串门欢迎，后端 event.Battle
-// （server/internal/event/payload.go 第 119-121 行）目前只有一个
-// SubCommand 字符串字段，什么都取不到。这组测试要证明：
-//   1. 纯函数层面，buildPkRule 组装出的规则形状是对的（name/on 固定，
-//      只覆盖"PK 匹配信息"，不把 visit 相关字段塞进规则里）
-//   2. 组件层面，控件全部渲染且不 disabled（评审要看得到、点得动）
-//   3. 悬空标记（"待后端支持"标签）确实出现在两个子块上
+// PkPanel 是「PK 播报」整块——P4-4 Task 7 之前后端完全没有对面数据，
+// 这组测试当时只能证明「界面能画」。现在 event.PkMember 带真实的
+// Online/GuardTotal/GuardOnline 快照，rules.VarsFromEvent 把它们展开成
+// pk.opponent.*，PKPipeline 把 StartPK/FetchOpponentSnapshots 接进了
+// 实时事件流并合成一个「快照就绪」的标记事件；串门方向也有了独立的事件
+// 类型。这组测试改为证明：
+//   1. buildPkRule/buildPkVisitRule 组装出的规则用的是真实字段名，
+//      且分别绑定正确的触发条件（when 锁定快照就绪事件 / on 绑定欢迎
+//      方向的事件类型）
+//   2. 两条规则真的会被保存（parsePkDraft 能从两条已保存规则里完整
+//      还原草稿）
+//   3. 组件层面控件全部渲染且不 disabled，不再挂"待后端支持"标签
 
 describe('PkPanel 纯函数：build/parse 往返', () => {
-  it('buildPkRule 用固定 name 与 on: ["battle"]，do 里只装 matchTemplates', () => {
+  it('buildPkRule 用固定 name/on，when 锁定 PK 接通瞬间合成的快照事件，模板用真实字段', () => {
     const draft = defaultPkDraft()
     const rule = buildPkRule(draft)
     expect(rule.name).toBe(PK_RULE_NAME)
     expect(rule.on).toEqual(['battle'])
+    expect(rule.when).toEqual({
+      field: 'battle.subCommand',
+      op: 'eq',
+      value: 'PK_OPPONENT_SNAPSHOT',
+    })
     expect(rule.do).toEqual([{ type: 'danmaku', template: draft.matchTemplates }])
-    // 串门欢迎相关字段完全不出现在规则里——它们连触发事件类型都没定下来
-    expect(JSON.stringify(rule)).not.toContain('visit')
+    // 默认模板必须用真实字段名，不能是渲染不出东西的占位符
+    const tmpl = draft.matchTemplates.join('\n')
+    expect(tmpl).toContain('.pk.opponent.uname')
+    expect(tmpl).toContain('.pk.opponent.online')
+    expect(tmpl).toContain('.pk.opponent.guardTotal')
   })
 
-  it('parsePkDraft(null) 返回默认草稿', () => {
-    expect(parsePkDraft(null)).toEqual(defaultPkDraft())
+  it('buildPkVisitRule 只覆盖欢迎方向（pk_visit_from_opponent），不覆盖警示方向', () => {
+    const draft = defaultPkDraft()
+    draft.visitGreetingEnabled = true
+    const rule = buildPkVisitRule(draft)
+    expect(rule.name).toBe(PK_VISIT_RULE_NAME)
+    expect(rule.enabled).toBe(true)
+    expect(rule.on).toEqual(['pk_visit_from_opponent'])
+    expect(rule.on).not.toContain('pk_visit_to_opponent')
+    expect(rule.do).toEqual([{ type: 'danmaku', template: draft.visitTemplates }])
   })
 
-  it('parsePkDraft 还原 enabled 与 matchTemplates，announce 四项与 visit 两项保持默认（后端无对应字段）', () => {
-    const savedRule = {
+  it('buildPkVisitRule 的 enabled 直接反映 visitGreetingEnabled', () => {
+    const draft = defaultPkDraft()
+    expect(buildPkVisitRule(draft).enabled).toBe(false)
+    draft.visitGreetingEnabled = true
+    expect(buildPkVisitRule(draft).enabled).toBe(true)
+  })
+
+  it('parsePkDraft(null, null) 返回默认草稿', () => {
+    expect(parsePkDraft(null, null)).toEqual(defaultPkDraft())
+  })
+
+  it('parsePkDraft 从两条已保存规则里分别还原 enabled/模板，两条规则各自独立', () => {
+    const savedMatchRule = {
       name: PK_RULE_NAME,
       enabled: true,
       on: ['battle'],
       do: [{ type: 'danmaku', template: ['已保存的PK播报模板'] }],
     }
-    const draft = parsePkDraft(savedRule)
+    const savedVisitRule = {
+      name: PK_VISIT_RULE_NAME,
+      enabled: true,
+      on: ['pk_visit_from_opponent'],
+      do: [{ type: 'danmaku', template: ['已保存的串门欢迎模板'] }],
+    }
+    const draft = parsePkDraft(savedMatchRule, savedVisitRule)
     expect(draft.enabled).toBe(true)
     expect(draft.matchTemplates).toEqual(['已保存的PK播报模板'])
+    expect(draft.visitGreetingEnabled).toBe(true)
+    expect(draft.visitTemplates).toEqual(['已保存的串门欢迎模板'])
+  })
+
+  it('parsePkDraft 只有 matchRule 时 visit 部分保持默认（两条规则相互独立）', () => {
+    const savedMatchRule = {
+      name: PK_RULE_NAME,
+      enabled: true,
+      on: ['battle'],
+      do: [{ type: 'danmaku', template: ['x'] }],
+    }
+    const draft = parsePkDraft(savedMatchRule, null)
     const defaults = defaultPkDraft()
-    expect(draft.announceOpponentName).toBe(defaults.announceOpponentName)
-    expect(draft.announceRoomCount).toBe(defaults.announceRoomCount)
-    expect(draft.announceGuardTotal).toBe(defaults.announceGuardTotal)
-    expect(draft.announceGuardOnline).toBe(defaults.announceGuardOnline)
     expect(draft.visitGreetingEnabled).toBe(defaults.visitGreetingEnabled)
     expect(draft.visitTemplates).toEqual(defaults.visitTemplates)
   })
 })
 
-describe('PkPanel 组件：控件全部渲染，且不 disabled', () => {
-  it('两个"待后端支持"标签都出现（PK匹配信息、PK串门欢迎各一个）', () => {
+describe('PkPanel 组件：控件全部渲染，不再挂待后端支持标签', () => {
+  it('不再出现"待后端支持"标签', () => {
     const wrapper = mount(PkPanel, { props: { modelValue: defaultPkDraft() } })
     const tags = wrapper.findAll('.n-tag').filter((t) => t.text() === '待后端支持')
-    expect(tags.length).toBe(2)
+    expect(tags.length).toBe(0)
   })
 
   it('四个"对面数据"复选框、匹配模板输入框、串门欢迎开关与模板输入框都能交互', () => {
@@ -84,5 +135,14 @@ describe('PkPanel 组件：控件全部渲染，且不 disabled', () => {
     const patched = emitted![emitted!.length - 1][0] as ReturnType<typeof defaultPkDraft>
     expect(patched.announceOpponentName).toBe(false)
     expect(patched.matchTemplates).toEqual(draft.matchTemplates)
+  })
+
+  it('预览折叠区标题同时提到 PK 匹配信息与 PK 串门欢迎——两条规则各占一段预览', () => {
+    // NCollapseItem 默认折叠、内容不在初始渲染的 DOM 里，这里只断言
+    // 折叠区标题本身能反映"这里有两条规则"，具体的 JSON 内容由上面的
+    // buildPkRule/buildPkVisitRule 纯函数测试覆盖，不必展开折叠面板
+    // 重复断言一遍。
+    const wrapper = mount(PkPanel, { props: { modelValue: defaultPkDraft() } })
+    expect(wrapper.text()).toContain('PK 匹配信息 + PK 串门欢迎')
   })
 })

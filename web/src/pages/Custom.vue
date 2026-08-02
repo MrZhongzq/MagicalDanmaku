@@ -77,18 +77,26 @@ import { defaultLeafCondition, pruneCondition } from '@/components/ConditionTree
 import {
   ENTER_RULE_NAME,
   GIFT_RULE_NAME,
+  BLINDBOX_RULE_NAME,
   BROADCAST_RULE_NAME,
   FOLLOW_RULE_NAME,
   SHARE_RULE_NAME,
   GUARD_RULE_NAME,
 } from './Danmaku.vue'
-import { PK_RULE_NAME } from '@/components/PkPanel.vue'
+import { PK_RULE_NAME, PK_VISIT_RULE_NAME } from '@/components/PkPanel.vue'
 
-/** Task 9/10 建立的七个内置规则名——判定"是不是自定义规则"、"排除通用规则"多选框都靠它。 */
+/**
+ * Task 9/10 建立的内置规则名——判定"是不是自定义规则"、"排除通用规则"
+ * 多选框都靠它。P4-4 Task 7 从七条加到九条：`BLINDBOX_RULE_NAME`（盲盒
+ * 单独答谢）与 `PK_VISIT_RULE_NAME`（PK 串门欢迎）两个悬空项这次接上了
+ * 真实规则。
+ */
 export const BUILTIN_RULE_NAMES: string[] = [
   ENTER_RULE_NAME,
   GIFT_RULE_NAME,
+  BLINDBOX_RULE_NAME,
   PK_RULE_NAME,
+  PK_VISIT_RULE_NAME,
   BROADCAST_RULE_NAME,
   FOLLOW_RULE_NAME,
   SHARE_RULE_NAME,

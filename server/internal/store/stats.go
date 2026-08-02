@@ -34,19 +34,29 @@ type StatsQuery struct {
 // SEND_GIFT 是重复计数关系，两者都算就会让礼物数虚高。GiftKinds 是
 // 礼物名去重数，从 detail JSONB 的 GiftName 字段取（event.Gift 没有
 // json tag，序列化后键名就是 Go 字段名本身）。
+//
+// BlindBoxProfit 是这个分桶内全部盲盒礼物的盈亏之和，单位 1/100 电池
+// （见 event.BlindBox 的注释：幸运盲盒 50 电池，报文里是 5000）。单行
+// 盈亏 = Price*Count - TotalCoin（用户项目记忆里的口径：Price 是爆出
+// 礼物的单价，TotalCoin 是这次投喂实际花掉的），直接按每一条盲盒送礼
+// 事件的原始电池数量求和，不按礼物名分组——用户明确要求过盈亏必须按
+// 电池数量统计，不能按礼物名统计（同一电池消耗量在不同盲盒池可能对应
+// 不同的开出礼物，礼物名不是稳定的价值锚点）。「元」的换算留给展示层，
+// 这里连同其余金额字段一样存 1/100 电池的原始整数。
 type StatsBucket struct {
 	// Bucket 按分组方式含义不同：
 	//   by=day     "2026-08-01"（UTC 自然天）
 	//   by=session 该场次开始时刻的 RFC3339（开始时刻未知时是查询窗口
 	//              的 since，或整条时间线上该场次之前那次 live_stop 的
 	//              时刻——见 rawLiveSessions 的说明）
-	Bucket       string
-	DanmakuCount int64
-	EnterCount   int64
-	GiftCount    int64
-	GiftKinds    int64
-	GuardCount   int64
-	LiveSeconds  int64
+	Bucket         string
+	DanmakuCount   int64
+	EnterCount     int64
+	GiftCount      int64
+	GiftKinds      int64
+	GuardCount     int64
+	LiveSeconds    int64
+	BlindBoxProfit int64
 }
 
 // statsWhere 拼公共的 WHERE 片段：kind='event' 恒定（业务事件而非机器人
@@ -68,13 +78,29 @@ func statsWhere(accountID, bindingID int64) ([]string, []any) {
 	return where, args
 }
 
-// countExprs 是五个业务计数的 SQL 表达式，QueryStatsByDay（GROUP BY）与
+// countExprs 是六个业务计数的 SQL 表达式，QueryStatsByDay（GROUP BY）与
 // aggregateEventCounts（单行）共用，避免两处口径漂移。
+//
+// blind_box_profit 只对 detail->'BlindBox' 非 null 的 gift 行求和——
+// event.Gift 序列化后 BlindBox 字段要么是 JSON null（不是盲盒），要么
+// 是一个对象（是盲盒），JSONB 的 IS NOT NULL 天然区分这两种情况，不需要
+// 额外的标记字段。三个数字字段都用 ->> 取成文本再转 bigint：detail 是
+// event.Gift 整个结构体的原样 JSON，Price/Count/TotalCoin 键名与 Go
+// 字段名相同（没有 json tag）。COALESCE 是因为一个分桶如果压根没有盲盒
+// 行，SUM 会是 SQL NULL，不该让调用方看到「拿不到」——这里统计的是
+// 「这个时间段有没有盲盒」，没有就是真的 0，不是外部接口失败那种需要
+// 区分「未知」的场景（那类区分只用在 PK 对面快照上，见
+// connector/bilibili/opponent_snapshot.go）。
 const countExprs = `COUNT(*) FILTER (WHERE event_type = 'danmaku') AS danmaku_count,
 	COUNT(*) FILTER (WHERE event_type = 'user_enter') AS enter_count,
 	COUNT(*) FILTER (WHERE event_type = 'gift') AS gift_count,
 	COUNT(DISTINCT detail->>'GiftName') FILTER (WHERE event_type = 'gift') AS gift_kinds,
-	COUNT(*) FILTER (WHERE event_type = 'guard_buy') AS guard_count`
+	COUNT(*) FILTER (WHERE event_type = 'guard_buy') AS guard_count,
+	COALESCE(SUM(
+		CASE WHEN event_type = 'gift' AND detail->'BlindBox' IS NOT NULL
+			THEN (detail->>'Price')::bigint * (detail->>'Count')::bigint - (detail->>'TotalCoin')::bigint
+			ELSE 0 END
+	), 0) AS blind_box_profit`
 
 // QueryStatsByDay 按 UTC 自然天聚合业务事件计数。
 //
@@ -118,7 +144,7 @@ func (s *Store) QueryStatsByDay(ctx context.Context, q StatsQuery) ([]StatsBucke
 		var bucket time.Time
 		var b StatsBucket
 		if err := rows.Scan(&bucket, &b.DanmakuCount, &b.EnterCount,
-			&b.GiftCount, &b.GiftKinds, &b.GuardCount); err != nil {
+			&b.GiftCount, &b.GiftKinds, &b.GuardCount, &b.BlindBoxProfit); err != nil {
 			return nil, fmt.Errorf("store: 读取按天统计失败: %w", err)
 		}
 		b.Bucket = bucket.UTC().Format("2006-01-02")
@@ -176,20 +202,21 @@ func (s *Store) QueryStatsBySession(ctx context.Context, q StatsQuery) ([]StatsB
 			continue // 保险：正常配对不会出现，但顺序反了记 0 时长没有意义
 		}
 
-		danmaku, enter, gift, giftKinds, guard, err := s.aggregateEventCounts(
+		danmaku, enter, gift, giftKinds, guard, blindBoxProfit, err := s.aggregateEventCounts(
 			ctx, q.AccountID, q.BindingID, start, end)
 		if err != nil {
 			return nil, err
 		}
 
 		out = append(out, StatsBucket{
-			Bucket:       start.UTC().Format(time.RFC3339),
-			DanmakuCount: danmaku,
-			EnterCount:   enter,
-			GiftCount:    gift,
-			GiftKinds:    giftKinds,
-			GuardCount:   guard,
-			LiveSeconds:  int64(end.Sub(start).Seconds()),
+			Bucket:         start.UTC().Format(time.RFC3339),
+			DanmakuCount:   danmaku,
+			EnterCount:     enter,
+			GiftCount:      gift,
+			GiftKinds:      giftKinds,
+			GuardCount:     guard,
+			LiveSeconds:    int64(end.Sub(start).Seconds()),
+			BlindBoxProfit: blindBoxProfit,
 		})
 	}
 	return out, nil
@@ -197,7 +224,7 @@ func (s *Store) QueryStatsBySession(ctx context.Context, q StatsQuery) ([]StatsB
 
 // aggregateEventCounts 在 [since, until] 闭区间上做一次单行 SQL 聚合。
 func (s *Store) aggregateEventCounts(ctx context.Context, accountID, bindingID int64, since, until time.Time) (
-	danmaku, enter, gift, giftKinds, guard int64, err error) {
+	danmaku, enter, gift, giftKinds, guard, blindBoxProfit int64, err error) {
 	where, args := statsWhere(accountID, bindingID)
 	args = append(args, since)
 	where = append(where, fmt.Sprintf("occurred_at >= $%d", len(args)))
@@ -206,7 +233,7 @@ func (s *Store) aggregateEventCounts(ctx context.Context, accountID, bindingID i
 
 	sql := `SELECT ` + countExprs + ` FROM activity_logs WHERE ` + strings.Join(where, " AND ")
 	err = s.pool.QueryRow(ctx, sql, args...).
-		Scan(&danmaku, &enter, &gift, &giftKinds, &guard)
+		Scan(&danmaku, &enter, &gift, &giftKinds, &guard, &blindBoxProfit)
 	if err != nil {
 		err = fmt.Errorf("store: 聚合区间统计失败: %w", err)
 	}

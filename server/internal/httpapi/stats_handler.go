@@ -18,17 +18,21 @@ type statsView struct {
 	GiftKinds    int64  `json:"giftKinds"`
 	GuardCount   int64  `json:"guardCount"`
 	LiveSeconds  int64  `json:"liveSeconds"`
+	// BlindBoxProfit 单位 1/100 电池，可为负——「元」的换算只在前端做，
+	// 后端一律吐原始整数（见 store.StatsBucket.BlindBoxProfit 的注释）。
+	BlindBoxProfit int64 `json:"blindBoxProfit"`
 }
 
 func toStatsView(b store.StatsBucket) statsView {
 	return statsView{
-		Bucket:       b.Bucket,
-		DanmakuCount: b.DanmakuCount,
-		EnterCount:   b.EnterCount,
-		GiftCount:    b.GiftCount,
-		GiftKinds:    b.GiftKinds,
-		GuardCount:   b.GuardCount,
-		LiveSeconds:  b.LiveSeconds,
+		Bucket:         b.Bucket,
+		DanmakuCount:   b.DanmakuCount,
+		EnterCount:     b.EnterCount,
+		GiftCount:      b.GiftCount,
+		GiftKinds:      b.GiftKinds,
+		GuardCount:     b.GuardCount,
+		LiveSeconds:    b.LiveSeconds,
+		BlindBoxProfit: b.BlindBoxProfit,
 	}
 }
 

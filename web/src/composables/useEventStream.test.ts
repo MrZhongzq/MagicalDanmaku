@@ -95,6 +95,8 @@ describe('useEventStream', () => {
       'online_rank_update',
       'room_stats_update',
       'battle',
+      'pk_visit_from_opponent',
+      'pk_visit_to_opponent',
       'manual',
       'unknown',
     ]

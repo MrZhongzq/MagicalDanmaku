@@ -26,6 +26,7 @@ const {
   parseEnterDraft,
   buildGiftRule,
   parseGiftDraft,
+  BLINDBOX_RULE_NAME,
   defaultEnterDraft,
   defaultGiftDraft,
   secondsFromDuration,
@@ -48,7 +49,7 @@ const {
   defaultGuardDraft,
   GUARD_RULE_NAME,
 } = Danmaku
-const { PK_RULE_NAME } = await import('@/components/PkPanel.vue')
+const { PK_RULE_NAME, PK_VISIT_RULE_NAME } = await import('@/components/PkPanel.vue')
 const { useBindingsStore } = await import('@/stores/bindings')
 
 type RuleView = import('@/api/rule-types').RuleView
@@ -305,7 +306,7 @@ describe('Danmaku 纯函数：build/parse 往返（组装成 spec.Rule 与从中
       aggregate: { window: '15s', by: 'gift' },
       do: [{ type: 'danmaku', template: ['已保存答谢模板'] }],
     }
-    const draft = parseGiftDraft(savedRule)
+    const draft = parseGiftDraft(savedRule, null)
     expect(draft.groupMode).toBe('dedupeGift')
     expect(draft.windowSeconds).toBe(15)
     expect(draft.templates).toEqual(['已保存答谢模板'])
@@ -425,8 +426,8 @@ describe('Danmaku 页面：认领已保存配置（核心场景）', () => {
   })
 })
 
-describe('Danmaku 页面：一处悬空控件全部渲染，且都不 disabled', () => {
-  it('四处"待后端支持"标签都出现（P4-3 接通了轮询/多人模板后，只剩盲盒 x2 + PK x2）', async () => {
+describe('Danmaku 页面：P4-4 Task 7 之后不再有任何"待后端支持"标签', () => {
+  it('全页找不到"待后端支持"标签——盲盒 x2 与 PK x2 悬空项都已接上真实规则', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn().mockImplementation(() => Promise.resolve(ok([]))),
@@ -435,8 +436,7 @@ describe('Danmaku 页面：一处悬空控件全部渲染，且都不 disabled',
     const wrapper = await mountDanmaku()
 
     const tags = wrapper.findAll('.n-tag').filter((t) => t.text() === '待后端支持')
-    // 礼物答谢的盲盒单列、盲盒盈亏 = 2；PkPanel 的 PK匹配信息、PK串门欢迎 = 2
-    expect(tags.length).toBe(4)
+    expect(tags.length).toBe(0)
   })
 
   it('轮询单选框、多人模板输入框、盲盒复选框都能正常交互（不是 disabled）', async () => {
@@ -576,12 +576,74 @@ describe('Danmaku 页面：保存（Task 13 接上 useDraft）', () => {
 
       expect(putBody).not.toBeNull()
       const names = putBody!.map((r) => r.name)
-      // 核心断言：自定义弹幕姬页建的这条规则不属于弹幕姬页管的七个内置
+      // 核心断言：自定义弹幕姬页建的这条规则不属于弹幕姬页管的九个内置
       // 名字，保存时必须原样保留，不能被弹幕姬页的整组替换悄悄删掉。
       expect(names).toContain('舰长专属欢迎')
       expect(names).toContain(ENTER_RULE_NAME)
     },
   )
+
+  // P4-4 Task 7：盲盒单列开关与 PK 串门欢迎开关不再是纯 UI 装饰——
+  // 勾选后必须真的在保存的规则列表里带上一条 enabled:true 的独立规则，
+  // 否则用户点了勾选、以为已经生效，实际上后端什么都没收到。
+  it('勾选"盲盒礼物单独一类"并保存，PUT 请求体里出现 enabled:true 的盲盒答谢规则', async () => {
+    let putBody: RuleView[] | null = null
+    stubSaveFetch({
+      rules: [],
+      onPut: (body) => {
+        putBody = body as RuleView[]
+      },
+    })
+    setupStores()
+    const wrapper = await mountDanmaku()
+
+    const checkbox = wrapper.findAll('.n-checkbox').find((c) => c.text() === '盲盒礼物单独一类，不并入常规答谢')
+    await checkbox!.trigger('click')
+    await flushPromises()
+
+    const saveBtn = () => wrapper.findAll('button').find((b) => b.text() === '保存并生效')!
+    await saveBtn().trigger('click')
+    await flushPromises()
+
+    expect(putBody).not.toBeNull()
+    const blindBoxRule = putBody!.find((r) => r.name === BLINDBOX_RULE_NAME)
+    expect(blindBoxRule, 'PUT 请求体里应该有一条名为 BLINDBOX_RULE_NAME 的规则').toBeTruthy()
+    expect(blindBoxRule!.enabled).toBe(true)
+    expect(blindBoxRule!.on).toEqual(['gift'])
+
+    // 通用礼物答谢这时必须排除盲盒，否则同一次投喂会被两条规则各答谢一遍。
+    const giftRule = putBody!.find((r) => r.name === GIFT_RULE_NAME)
+    expect(giftRule!.when).toEqual({ field: 'gift.isBlindBox', op: 'eq', value: false })
+  })
+
+  it('打开"PK 串门欢迎"开关并保存，PUT 请求体里出现 enabled:true 的 PK 串门欢迎规则', async () => {
+    let putBody: RuleView[] | null = null
+    stubSaveFetch({
+      rules: [],
+      onPut: (body) => {
+        putBody = body as RuleView[]
+      },
+    })
+    setupStores()
+    const wrapper = await mountDanmaku()
+
+    // PkPanel 里"PK 串门欢迎"那一行的 NSwitch，靠它前面的说明文字定位。
+    const visitRow = wrapper.findAll('.row').find((r) => r.text().includes('对面观众串门时用单独欢迎语'))
+    expect(visitRow, '找不到 PK 串门欢迎那一行').toBeTruthy()
+    const toggle = visitRow!.find('.n-switch')
+    await toggle.trigger('click')
+    await flushPromises()
+
+    const saveBtn = () => wrapper.findAll('button').find((b) => b.text() === '保存并生效')!
+    await saveBtn().trigger('click')
+    await flushPromises()
+
+    expect(putBody).not.toBeNull()
+    const visitRule = putBody!.find((r) => r.name === PK_VISIT_RULE_NAME)
+    expect(visitRule, 'PUT 请求体里应该有一条名为 PK_VISIT_RULE_NAME 的规则').toBeTruthy()
+    expect(visitRule!.enabled).toBe(true)
+    expect(visitRule!.on).toEqual(['pk_visit_from_opponent'])
+  })
 
   it('第 1 步（PUT 写库）失败：弹出后端错误原文，dirty 保持真（改动没丢）', async () => {
     stubSaveFetch({
@@ -868,7 +930,7 @@ describe('Danmaku 页面：PK 播报子组件正确挂载并纳入 claimRule/dir
     expect(claimRule(rules, PK_RULE_NAME)).toEqual(rules[0])
   })
 
-  it('PkPanel 的"待后端支持"标签在整页里可见（PK匹配信息 + PK串门欢迎）', async () => {
+  it('PkPanel 的两个子块（PK匹配信息 + PK串门欢迎）都在整页里可见', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn().mockImplementation(() => Promise.resolve(ok([]))),

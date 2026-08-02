@@ -74,6 +74,7 @@ function statsBucket(overrides: Partial<Record<string, unknown>> = {}) {
     giftKinds: 0,
     guardCount: 0,
     liveSeconds: 0,
+    blindBoxProfit: 0,
     ...overrides,
   }
 }
@@ -151,17 +152,41 @@ describe('Stats 页', () => {
     expect(String(statsCall![0])).toContain('by=day')
   })
 
-  it('盲盒盈亏卡片仍标注「待后端支持」——聚合接口补上了，但 Gift 事件的盲盒字段还没有', async () => {
+  // P4-4 Task 7：盲盒盈亏卡片接上了真实数据（悬空清单第 7/15 条已解决），
+  // 全页不应再出现"待后端支持"标签，且卡片要显示按 1/100 电池换算成
+  // 「元」的真实数字，可正可负。
+  it('盲盒盈亏卡片显示真实换算后的元，不再是占位符或待后端支持标签', async () => {
     setupStore()
-    stubFetch({ statsByDay: [statsBucket()] })
+    stubFetch({ statsByDay: [statsBucket({ blindBoxProfit: 20050 })] })
     const wrapper = mount(Stats)
     await flushPromises()
 
     const grid = wrapper.find('.stats-grid')
     expect(grid.text()).toContain('盲盒盈亏')
-    expect(grid.text()).toContain('待后端支持')
-    // 双重悬空的旧文案已经不成立了（聚合接口已经补上），不该再出现
-    expect(wrapper.text()).not.toContain('双重悬空')
+    expect(grid.text()).not.toContain('待后端支持')
+    expect(wrapper.text()).not.toContain('待后端支持')
+    // 20050（1/100 电池）= 200.50 元，正数带 + 号
+    expect(grid.text()).toContain('+200.50 元')
+  })
+
+  it('盲盒盈亏为负时显示负号，不做绝对值处理（真实体现"亏了"）', async () => {
+    setupStore()
+    stubFetch({ statsByDay: [statsBucket({ blindBoxProfit: -5600 })] })
+    const wrapper = mount(Stats)
+    await flushPromises()
+
+    const grid = wrapper.find('.stats-grid')
+    expect(grid.text()).toContain('-56.00 元')
+  })
+
+  it('没有分桶数据时盲盒盈亏卡片显示占位符——不能把「算不出来」显示成「盈亏为 0」', async () => {
+    setupStore()
+    stubFetch({ statsByDay: [] })
+    const wrapper = mount(Stats)
+    await flushPromises()
+
+    const grid = wrapper.find('.stats-grid')
+    expect(grid.text()).toContain('—')
   })
 
   it('页面顶部说明数字来自真实聚合接口，并提示直播时长的历史缺口与礼物种类的求和限制', async () => {

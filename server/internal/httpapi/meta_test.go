@@ -91,6 +91,31 @@ func TestMetaEventTypesIncludesManual(t *testing.T) {
 	t.Error("元数据缺少事件类型 manual（手动操作），日志页筛选框里选不到它")
 }
 
+// TestMetaEventTypesIncludesPKVisitDirections 是 Task 7 三处登记之一：
+// 缺了这一处，规则页的 on 下拉框里选不到这两个类型，用户没法配出订阅
+// PK 串门信号的规则——即使规则层本身已经支持（spec/convert.go 的
+// knownEventTypes 也登记了它们）。
+func TestMetaEventTypesIncludesPKVisitDirections(t *testing.T) {
+	srv, st := newTestServer(t)
+	c := loginAs(t, srv, st, "张三", false)
+
+	got := fetchMeta(t, c, srv.URL+"/api/meta/event-types")
+	have := make(map[string]string, len(got))
+	for _, it := range got {
+		have[it.Value] = it.Label
+	}
+	for _, want := range []string{"pk_visit_from_opponent", "pk_visit_to_opponent"} {
+		label, ok := have[want]
+		if !ok {
+			t.Errorf("元数据缺少事件类型 %q", want)
+			continue
+		}
+		if label == "" {
+			t.Errorf("事件类型 %q 缺少中文说明", want)
+		}
+	}
+}
+
 func TestMetaActionTypes(t *testing.T) {
 	srv, st := newTestServer(t)
 	c := loginAs(t, srv, st, "张三", false)
