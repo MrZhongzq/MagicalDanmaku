@@ -107,6 +107,17 @@ type Client struct {
 
 	onEvent func(event.Event) // PK 期间的同步观察钩子，见 setEventHook
 	pkLink  *PkLink           // 当前进行中的 PK 对面连接管理器，无 PK 时为 nil
+	closed  bool              // Run 的 defer 是否已经跑过；见 registerPKLink
+
+	// pkMu 序列化 StartPK/EndPK 之间的调用（包括 Run 退出时兜底触发的
+	// 那次 EndPK）。文档化的调用方是单一事件循环，正常不会有并发调用，
+	// 但审查指出：(1) Run 的 defer 本身就会在另一个 goroutine 上调
+	// EndPK，并发是架构固有的，不是使用者违约；(2) 仓库里 StartPK 目前
+	// 只有测试在调，没有任何东西真正强制"只从一个 goroutine 调用"这条
+	// 假设。不用 mu 本身做这把锁，是因为 registerPKLink 需要在
+	// StartPK 已经持有序列化锁的情况下再拿 mu 读 closed/写 pkLink，
+	// 两把锁必须是不同的两个对象，否则同一 goroutine 重入会自锁死。
+	pkMu sync.Mutex
 }
 
 // 确保 Client 满足 Connector 接口。
@@ -152,10 +163,29 @@ func (c *Client) setState(s connector.State) {
 func (c *Client) Run(ctx context.Context) error {
 	defer func() {
 		c.setState(connector.StateClosed)
+
 		// 兜底清理：不管调用方有没有记得在 PK 结束时调用 EndPK，只要
 		// 宿主连接的 Run 退出（无论是正常收尾、异常掉线还是进程整体
 		// 退出），就不能再留下悬挂的对面连接——这正是本任务要堵住的
 		// 泄漏风险，不能只靠注释保证。
+		//
+		// closed 先在 c.mu 下单独置位：StartPK 内部的 PkLink.Connect
+		// 会在起任何连接前调用 registerPKLink 原子地「读 closed +
+		// 写 pkLink」；只要这个标志先置位，任何在此之后才走到
+		// registerPKLink 的 StartPK 调用都会看到 closed=true 并自己
+		// 放弃，不会真的建立连接。
+		//
+		// 随后的 c.EndPK() 走 pkMu 序列化：如果这一刻恰好有别的
+		// goroutine 正在执行 StartPK（架构上这是并发的常态，不是使用者
+		// 违约），这里会等它那次调用完整跑完（很快，因为 Connect 的
+		// 同步部分只是登记 + 起 goroutine，不再包含阻塞的播种 HTTP
+		// 调用）再继续——这就保证了「Run 已经跑完 defer、pkLink 还没来
+		// 得及登记」这个曾经真实存在的悬挂窗口（审查者用探针复现过）
+		// 彻底消失，两个 goroutine 无论谁先谁后都不会漏。
+		c.mu.Lock()
+		c.closed = true
+		c.mu.Unlock()
+
 		c.EndPK()
 		c.closeEventsOnce.Do(func() { close(c.events) })
 	}()
@@ -298,7 +328,10 @@ func (c *Client) authenticate(conn *websocket.Conn, token string) error {
 	buvid := ""
 	if sess := c.api.Session(); sess != nil {
 		uid, _ = strconv.ParseInt(sess.UID, 10, 64)
-		buvid = sess.BuVID3
+		// PK 场景下多个 Client 共享同一个 *Session，BuVID3 可能被另一个
+		// goroutine 的 EnsureDeviceFields 并发写，必须走线程安全的
+		// 访问方法，不能直接读字段（Critical-2 修复）。
+		buvid = sess.BuVID3()
 	}
 	roomID, _ := strconv.ParseInt(c.roomID, 10, 64)
 
@@ -449,23 +482,37 @@ func (c *Client) setEventHook(fn func(event.Event)) {
 // PkLink 内部，c 的事件流和状态机完全不受影响。
 //
 // 调用方通常在观测到 PK_INFO（event.Battle.Members 非空）时调用一次；
-// 即使调用方忘了在 PK 结束时调用 EndPK，c.Run 退出时的兜底清理（见
-// Run 的 defer）也不会漏掉这场 PK 的连接。
+// 即使调用方忘了在 PK 结束时调用 EndPK、甚至宿主 Run 已经退出，这次
+// 调用也不会产生悬挂连接——具体怎么保证的，见 PkLink.Connect 里
+// registerPKLink 那一段注释。
+//
+// 用 pkMu 跟 EndPK（含 Run 退出时兜底触发的那次）互斥：如果没有这把
+// 锁，两个几乎同时发生的 StartPK 调用会各自往 c.pkLink 写一次，后写
+// 的会静默覆盖先写的——先注册的那个 PkLink 从此失去引用，将来任何一次
+// EndPK 都不会再找到它，变成悬挂连接。文档化的调用约定是单一事件循环
+// 串行调用，正常不会触发这一路，但审查明确要求现在就补上，不留成
+// "调用方自觉遵守"。
 func (c *Client) StartPK(ctx context.Context, members []event.PkMember) *PkLink {
-	c.EndPK() // 防御性收尾：不允许两场 PK 的连接叠加
+	c.pkMu.Lock()
+	defer c.pkMu.Unlock()
+
+	c.endPKLocked() // 防御性收尾：不允许两场 PK 的连接叠加
 
 	link := newPkLink(c)
 	link.Connect(ctx, members)
-
-	c.mu.Lock()
-	c.pkLink = link
-	c.mu.Unlock()
 	return link
 }
 
 // EndPK 断开当前 PK 期间连到对面房间的全部连接（PK 正常结束时调用）。
 // 幂等：没有进行中的 PK 时是安全的空操作。
 func (c *Client) EndPK() {
+	c.pkMu.Lock()
+	defer c.pkMu.Unlock()
+	c.endPKLocked()
+}
+
+// endPKLocked 是 EndPK 的核心逻辑，调用方必须已经持有 c.pkMu。
+func (c *Client) endPKLocked() {
 	c.mu.Lock()
 	link := c.pkLink
 	c.pkLink = nil
@@ -481,4 +528,24 @@ func (c *Client) PKLink() *PkLink {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.pkLink
+}
+
+// registerPKLink 把 link 原子地登记为当前 PK，同时返回宿主此刻是否
+// 已经关闭（Run 的 defer 已经跑完）。
+//
+// 这是堵住「先连接/播种、后登记，宿主退出兜底失效」这个窗口的关键：
+// 调用方（PkLink.Connect）必须在起任何连接、做任何阻塞工作之前就调用
+// 这个方法。因为它跟 Run 的 defer 共用同一把 c.mu 做「读 closed +
+// 写 pkLink」这个组合操作，两个 goroutine 不管谁先谁后都不会漏——
+// 要么这里先跑完，Run 的 defer 稍后一定能读到刚登记的 link 并断开它；
+// 要么 Run 的 defer 先跑完（closed 已经是 true），这里会如实告知调用方
+// 「宿主已经关闭」，调用方应该立刻自行收尾、不再建立任何真实连接。
+func (c *Client) registerPKLink(link *PkLink) (hostClosed bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return true
+	}
+	c.pkLink = link
+	return false
 }

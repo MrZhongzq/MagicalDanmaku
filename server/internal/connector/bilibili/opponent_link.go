@@ -3,9 +3,21 @@ package bilibili
 import (
 	"context"
 	"sync"
+	"time"
 
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/event"
 )
+
+// pkTeardownGraceLimit 是 Disconnect 兜底等待清理完成的硬上限。正常情况
+// 下清理在毫秒级完成；给上限是为了防一个慢角落：子连接可能卡在
+// authenticate()（client.go）里等对面服务器的认证回复——那段代码用的是
+// 固定 authTimeout 读超时，不接受 ctx，ctx 取消对它不生效，只能等读
+// 超时自己触发。Disconnect 常常同步跑在宿主 Client.Run 的 defer 里，
+// 不能因为一个（可能异常/被风控）对手服务器迟迟不回包，就把宿主整个
+// 退出流程拖住到无限久——超过这个上限就记录警告后放弃等待，让调用方
+// 尽快拿回控制权；子连接自己的 goroutine 仍然会在各自的读超时触发后
+// 正常退出，不是真正意义上的无限泄漏，只是不再同步阻塞在这里等它。
+const pkTeardownGraceLimit = authTimeout + 5*time.Second
 
 // PkLink 管理 PK 期间到对手房间的若干条弹幕连接。
 //
@@ -32,8 +44,16 @@ type PkLink struct {
 	round *pkRound // 当前进行中的 PK；没有 PK 时为 nil
 
 	audMu    sync.Mutex
-	mine     map[string]struct{} // 我方观众 uid 集合
-	opposite map[string]struct{} // 对面观众 uid 集合（多个对手合并为一个集合，语义照抄原项目的二元划分）
+	mine     map[string]struct{}            // 我方观众 uid 集合
+	opposite map[string]map[string]struct{} // 对面观众 uid 集合，按对手房间号分开
+
+	// opposite 为什么按房间分开而不是拍平成一个集合：多人 PK 下每个
+	// 对手是不同的房间，播种（seedAudiences）时是逐个对手房间调
+	// ajax/msg 拿到的，这份「归属哪个对手」的信息只有在这一刻才完整；
+	// 一旦拍平合并，事后没法从合并结果里反推出某个 uid 到底是哪个
+	// 对手房间的观众，要重建就得重新打一遍接口。按房间分开保留成本
+	// 几乎为零，实时更新那一路（trackOpposite）本来就知道事件来自
+	// 哪个对手连接，也天然能对上号。
 }
 
 // pkRound 是一场 PK 期间全部对手连接共享的状态。每次 Connect 都会创建
@@ -62,7 +82,7 @@ func newPkLink(host *Client) *PkLink {
 	return &PkLink{
 		host:     host,
 		mine:     make(map[string]struct{}),
-		opposite: make(map[string]struct{}),
+		opposite: make(map[string]map[string]struct{}),
 	}
 }
 
@@ -93,6 +113,7 @@ func (p *PkLink) Connect(ctx context.Context, members []event.PkMember) {
 	if len(opponents) == 0 {
 		return
 	}
+	selfUID := selfMemberUID(members, p.host.roomID)
 
 	linkCtx, cancel := context.WithCancel(ctx)
 	round := &pkRound{
@@ -105,10 +126,38 @@ func (p *PkLink) Connect(ctx context.Context, members []event.PkMember) {
 	p.round = round
 	p.mu.Unlock()
 
-	p.seedAudiences(linkCtx, opponents)
+	// 必须在起任何连接、做任何阻塞工作（下面的播种 HTTP 调用）之前，
+	// 就把这一轮登记到宿主 Client 上——宿主 Run 的 defer 兜底清理靠
+	// host.pkLink 才能找到并断开这一轮。审查曾指出：如果登记发生在
+	// seedAudiences 那 N+1 次 HTTP 调用（预算最长 opponentSnapshotBudget）
+	// 之后，宿主若恰好在这个窗口内退出，defer 读到的 pkLink 还是 nil，
+	// 这一轮连接会永久变成孤儿——探针复现过。registerPKLink 跟 Run 的
+	// defer 共用同一把锁做「读 closed + 写 pkLink」，不管两个 goroutine
+	// 谁先谁后都不会漏；如果它告知宿主已经关闭，说明这次 Connect 本身
+	// 就是「宿主已经退出后才发起」，直接自行收尾，不建立任何真实连接。
+	if p.host.registerPKLink(p) {
+		cancel()
+		p.finishRound(round)
+		return
+	}
+
 	p.host.setEventHook(p.observeMine)
 
 	var wg sync.WaitGroup
+
+	// 播种观众集合是同步的 N+1 次 HTTP 调用（预算最长
+	// opponentSnapshotBudget，最坏几秒钟）。StartPK 的文档化调用方就是
+	// 消费 Client.Events() 的那个事件循环，如果在这里同步等它跑完，
+	// 主房间的事件会在 PK 接通、弹幕礼物最密集的那一刻被晾在 256
+	// 缓冲的 c.events 里，超出缓冲就被 handleMessage 的 default 分支
+	// 直接丢弃。观众集合本来就是「有多少算多少」的降级语义，不需要在
+	// Connect 返回前就绪，放进独立 goroutine、并入 wg 一起等它退出。
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		p.seedAudiences(linkCtx, selfUID, opponents)
+	}()
+
 	for _, m := range opponents {
 		wg.Add(1)
 		go func(m event.PkMember) {
@@ -124,23 +173,35 @@ func (p *PkLink) Connect(ctx context.Context, members []event.PkMember) {
 	// 跑完。
 	go func() {
 		<-linkCtx.Done()
-		wg.Wait() // 等全部对手的 Client.Run 真正返回，而不是刚发出取消信号
-
-		p.host.setEventHook(nil)
-		close(round.events)
-
-		p.mu.Lock()
-		if p.round == round {
-			p.round = nil
-		}
-		p.mu.Unlock()
-
-		close(round.done) // 必须最后关，Disconnect 靠它判断"已经断干净"
+		wg.Wait() // 等全部对手的 Client.Run、播种 goroutine 真正退出
+		p.finishRound(round)
 	}()
 }
 
-// Disconnect 断开当前这一场 PK 的全部对手连接，阻塞到全部清理真正完成
-// （goroutine 退出、事件通道关闭、观众集合钩子摘除）才返回。
+// finishRound 是一场 PK 的最终清理：摘观众集合钩子、关闭事件通道、
+// 把 p.round 清空（如果它还指向这一轮——避免清掉后面新一轮已经装上的
+// round）、最后关闭 done 通知 Disconnect 已经断干净。不管是正常收尾
+// 途中的收尾协程调用它，还是 Connect 发现宿主已关闭时直接同步调用它，
+// 都走这一份代码，不重复写两遍容易漏同步的清理逻辑。
+func (p *PkLink) finishRound(round *pkRound) {
+	p.host.setEventHook(nil)
+	close(round.events)
+
+	p.mu.Lock()
+	if p.round == round {
+		p.round = nil
+	}
+	p.mu.Unlock()
+
+	close(round.done) // 必须最后关，Disconnect 靠它判断"已经断干净"
+}
+
+// Disconnect 断开当前这一场 PK 的全部对手连接，等待清理真正完成
+// （goroutine 退出、事件通道关闭、观众集合钩子摘除）才返回，但不会
+// 无限等下去——见 pkTeardownGraceLimit 的注释：子连接可能卡在不接受
+// ctx 的 authenticate() 读超时里，超过上限就放弃等待、记录警告后返回，
+// 不能让一个慢/异常的对手连接把调用方（常常是宿主 Run 的 defer）
+// 拖住无限久。
 //
 // 幂等：没有进行中的 PK、或者这场 PK 已经因为 ctx 被外部取消而自行清理
 // 完毕，都是安全的空操作/快速返回——不要求调用方精确知道当前状态。
@@ -152,7 +213,12 @@ func (p *PkLink) Disconnect() {
 		return
 	}
 	round.cancel()
-	<-round.done
+	select {
+	case <-round.done:
+	case <-time.After(pkTeardownGraceLimit):
+		p.host.log.Warn("PK 连接清理超过等待上限，放弃同步等待，交由各自的读超时自行收尾",
+			"limit", pkTeardownGraceLimit)
+	}
 }
 
 // runOpponent 是单个对手连接的完整生命周期：起一个绑定该对手房间的
@@ -174,7 +240,7 @@ func (p *PkLink) runOpponent(ctx context.Context, m event.PkMember, out chan<- e
 	}()
 
 	for ev := range child.Events() {
-		p.trackOpposite(ev)
+		p.trackOpposite(m.RoomID, ev)
 		select {
 		case out <- ev:
 		case <-ctx.Done():
@@ -216,6 +282,25 @@ func filterOpponents(members []event.PkMember, selfRoomID string) []event.PkMemb
 	return out
 }
 
+// selfMemberUID 从 members 里找出「自己」那一项的 UID——PK_INFO 里这个
+// 值就是本房间主播的 uid，是 myAudience 该播种的值（简报原文「自己的
+// upUid」）。
+//
+// 绝不能退回去用 sess.UID（登录账号）：工具很可能是助播/小号账号登录、
+// 给别的主播的房间跑，这种情况下登录账号和本房间主播是两个人，混用
+// 会把错误的人算进「自己」的观众集合——这不是一个边界风险，是一个
+// 确定会用错的字段（审查发现的真实缺陷）。找不到自己（PK_INFO 数据
+// 异常/不完整，理论上不应该发生）时返回空字符串，播种就只播对手那
+// 一路，而不是悄悄退化成一个明知是错的值。
+func selfMemberUID(members []event.PkMember, selfRoomID string) string {
+	for _, m := range members {
+		if m.RoomID == selfRoomID {
+			return m.UID
+		}
+	}
+	return ""
+}
+
 // ---------- 观众集合 ----------
 
 // seedAudiences 在对手连接建立前先播种两个观众集合，语义照抄原 C++
@@ -233,12 +318,12 @@ func filterOpponents(members []event.PkMember, selfRoomID string) []event.PkMemb
 // 并入 myAudience。当前 Go 重写里还没有对应的本地弹幕历史缓存组件，
 // 这里不为这一个功能造一个新的缓存子系统；等未来哪个组件持有这份历史
 // 数据了，再把它接进来。
-func (p *PkLink) seedAudiences(ctx context.Context, opponents []event.PkMember) {
-	if sess := p.host.api.Session(); sess != nil && sess.UID != "" {
-		p.addMine(sess.UID)
+func (p *PkLink) seedAudiences(ctx context.Context, selfUID string, opponents []event.PkMember) {
+	if selfUID != "" {
+		p.addMine(selfUID)
 	}
 	for _, m := range opponents {
-		p.addOpposite(m.UID)
+		p.addOppositeRoom(m.RoomID, m.UID)
 	}
 
 	budget := p.host.opponentSnapshotBudget
@@ -260,7 +345,7 @@ func (p *PkLink) seedAudiences(ctx context.Context, opponents []event.PkMember) 
 			p.host.log.Warn("播种对面观众集合失败，降级为仅有对面主播本人", "room", m.RoomID, "err", err)
 			continue
 		}
-		p.addOpposite(uids...)
+		p.addOppositeRoom(m.RoomID, uids...)
 	}
 }
 
@@ -274,10 +359,11 @@ func (p *PkLink) observeMine(ev event.Event) {
 }
 
 // trackOpposite 是对面房间那一侧的持续更新，在 runOpponent 转发事件时
-// 同步调用。
-func (p *PkLink) trackOpposite(ev event.Event) {
+// 同步调用；roomID 就是这条事件所属的那个对手房间号，runOpponent 本来
+// 就知道，天然能对上号，不需要从事件内容里反推。
+func (p *PkLink) trackOpposite(roomID string, ev event.Event) {
 	if uid := uidOf(ev); uid != "" {
-		p.addOpposite(uid)
+		p.addOppositeRoom(roomID, uid)
 	}
 }
 
@@ -291,23 +377,34 @@ func (p *PkLink) addMine(uids ...string) {
 	}
 }
 
-func (p *PkLink) addOpposite(uids ...string) {
+func (p *PkLink) addOppositeRoom(roomID string, uids ...string) {
 	p.audMu.Lock()
 	defer p.audMu.Unlock()
+	set := p.opposite[roomID]
+	if set == nil {
+		set = make(map[string]struct{})
+		p.opposite[roomID] = set
+	}
 	for _, u := range uids {
 		if u != "" {
-			p.opposite[u] = struct{}{}
+			set[u] = struct{}{}
 		}
 	}
 }
 
 // Audiences 返回两个观众集合的快照副本，供调用方（P6 的偷塔/串门播报）
-// 只读查询。返回副本而不是内部 map 本身，避免调用方拿到的引用跟后续
-// 更新产生数据竞争。
-func (p *PkLink) Audiences() (mine, opposite map[string]struct{}) {
+// 只读查询。mine 是自己房间的观众 uid 集合；opposite 按对手房间号分开
+// （见 PkLink 类型注释里对这个结构的说明）。返回的都是副本，不是内部
+// map 本身，避免调用方拿到的引用跟后续更新产生数据竞争。
+func (p *PkLink) Audiences() (mine map[string]struct{}, opposite map[string]map[string]struct{}) {
 	p.audMu.Lock()
 	defer p.audMu.Unlock()
-	return cloneSet(p.mine), cloneSet(p.opposite)
+
+	oppCopy := make(map[string]map[string]struct{}, len(p.opposite))
+	for room, set := range p.opposite {
+		oppCopy[room] = cloneSet(set)
+	}
+	return cloneSet(p.mine), oppCopy
 }
 
 func cloneSet(m map[string]struct{}) map[string]struct{} {

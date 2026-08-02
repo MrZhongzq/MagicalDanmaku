@@ -49,9 +49,27 @@ func authRoomID(t *testing.T, pkt []byte) string {
 	return strconv.FormatInt(body.RoomID, 10)
 }
 
-// goroutineBaseline 在测试主体开始前拍一张 goroutine 数快照；测试结束时
-// 用 assertSettles 跟这张快照比对，证明没有悬挂 goroutine。用
-// runtime.GC() + 轮询等待，避免 GC/调度抖动导致的偶发误报。
+// waitForDistinctRooms 轮询直到假服务器已经观测到 rooms 里每一个房间号
+// 各自的认证包，证明「这些不同房间各自建立了连接」。不能用单纯数
+// fs.authCount() 是否达到某个总数替代：假服务器每 500ms 会主动断连，
+// 如果对手其实压根没连上，光宿主自己反复重连也能把总数刷上去，凑够
+// 数字并不能证明对手真的连上了——这是审查指出的一处弱断言。
+func waitForDistinctRooms(t *testing.T, fs *multiRoomFakeServer, rooms ...string) {
+	t.Helper()
+	waitUntil(t, time.Second, func() bool {
+		seen := make(map[string]bool, len(rooms))
+		for _, r := range fs.authedRooms() {
+			seen[r] = true
+		}
+		for _, want := range rooms {
+			if !seen[want] {
+				return false
+			}
+		}
+		return true
+	})
+}
+
 // goroutineBaseline 拍一张 goroutine 数快照。必须在 fs/httpSrv/Client 等
 // 测试基础设施都已建好、宿主也已经连上之后再调用——httptest.Server 自己
 // 的 accept 循环、http.Transport 的 keep-alive 连接读写协程只会在
@@ -240,19 +258,8 @@ func TestStartPKConnectsOneClientPerOpponent(t *testing.T) {
 	}
 	c.StartPK(ctx, members)
 
-	// 宿主自己 1 条 + 2 个对手各 1 条 = 3 条连接。
-	waitUntil(t, time.Second, func() bool { return fs.authCount() >= 3 })
-
-	rooms := fs.authedRooms()
-	seen := map[string]bool{}
-	for _, r := range rooms {
-		seen[r] = true
-	}
-	for _, want := range []string{"21452505", "33333", "44444"} {
-		if !seen[want] {
-			t.Errorf("未观测到房间 %s 的连接，已连接: %v", want, rooms)
-		}
-	}
+	// 宿主自己 + 2 个对手，各自都要建立连接。
+	waitForDistinctRooms(t, fs, "21452505", "33333", "44444")
 
 	c.EndPK()
 }
@@ -275,18 +282,8 @@ func TestStartPKSupportsMoreThanTwoOpponents(t *testing.T) {
 	}
 	c.StartPK(ctx, members)
 
-	// 宿主 1 条 + 三个对手各 1 条 = 4 条连接。
-	waitUntil(t, time.Second, func() bool { return fs.authCount() >= 4 })
-
-	rooms := map[string]bool{}
-	for _, r := range fs.authedRooms() {
-		rooms[r] = true
-	}
-	for _, want := range []string{"11111", "22222", "33333"} {
-		if !rooms[want] {
-			t.Errorf("对手房间 %s 应各自建一条连接", want)
-		}
-	}
+	// 宿主 + 三个对手，各自都要建立连接，不写死两条。
+	waitForDistinctRooms(t, fs, "21452505", "11111", "22222", "33333")
 
 	c.EndPK()
 }
@@ -468,7 +465,7 @@ func TestPKEndCleanlyDisconnectsAllOpponents(t *testing.T) {
 	base := goroutineBaseline(t)
 
 	c.StartPK(ctx, startPKMembers("21452505", "33333", "44444"))
-	waitUntil(t, time.Second, func() bool { return fs.authCount() >= 3 })
+	waitForDistinctRooms(t, fs, "21452505", "33333", "44444")
 
 	c.EndPK()
 	cancel()
@@ -495,7 +492,7 @@ func TestPKAbnormalCtxCancelStillCleansUp(t *testing.T) {
 
 	pkCtx, pkCancel := context.WithCancel(context.Background())
 	c.StartPK(pkCtx, startPKMembers("21452505", "33333", "44444"))
-	waitUntil(t, time.Second, func() bool { return fs.authCount() >= 3 })
+	waitForDistinctRooms(t, fs, "21452505", "33333", "44444")
 
 	// 异常结束：直接砍 PK 自己的 ctx，不调用 EndPK。
 	pkCancel()
@@ -533,7 +530,7 @@ func TestHostRunExitClosesPKLinkEvenWithoutEndPK(t *testing.T) {
 	base := goroutineBaseline(t)
 
 	link := c.StartPK(context.Background(), startPKMembers("21452505", "33333", "44444"))
-	waitUntil(t, time.Second, func() bool { return fs.authCount() >= 3 })
+	waitForDistinctRooms(t, fs, "21452505", "33333", "44444")
 
 	// 故意不调用 EndPK、也不去碰 PK 自己的 ctx，直接让宿主退出
 	// （模拟异常/主连接被上层关闭，调用方完全没顾上 PK 那一摊）。
@@ -568,7 +565,12 @@ func TestNoLeakAcrossRepeatedPKRounds(t *testing.T) {
 
 	for i := 0; i < 5; i++ {
 		c.StartPK(ctx, startPKMembers("21452505", "33333", "44444"))
-		waitUntil(t, time.Second, func() bool { return true }) // 让连接有机会建立
+		// 故意只是给连接一点建立的时间，不逐轮验证握手是否成功——
+		// fs.authedRooms()/authCount() 是跨全部历史连接累积的，一旦
+		// 第一轮真的连上过，后续轮次即使连接失败也会在累积视图里
+		// 显得"看起来连上了"，据此做逐轮断言只会是自欺欺人。这里要
+		// 测的是反复 Start/End 不积累 goroutine 泄漏，不是逐轮连通性，
+		// 连通性已经由前面几个测试单独验证过。
 		time.Sleep(30 * time.Millisecond)
 		c.EndPK()
 	}
@@ -580,12 +582,207 @@ func TestNoLeakAcrossRepeatedPKRounds(t *testing.T) {
 	assertSettles(t, base)
 }
 
+// ---------- Critical-1 回归：注册必须先于阻塞工作 ----------
+
+// TestStartPKDuringHostShutdownDoesNotLeak 覆盖 Critical-1：StartPK 曾经
+// 是「先建立连接/播种、后登记到 c.pkLink」，宿主 Run 若恰好在播种耗时
+// 的窗口内退出，Run 的 defer 读到的 c.pkLink 还是 nil，EndPK 什么都不
+// 做，这一整场 PK（包括还在跑的慢播种请求和已经起来的对手连接）永久
+// 变成孤儿——审查者用探针复现过。
+//
+// 这里故意把 roomAudience 接口拖慢到远超测试实际等待的时长，模拟
+// 「播种尚未完成、宿主就退出」这个窗口：如果登记发生在阻塞工作之后
+// （旧实现），Run 会被迫等满这个人为拖慢的时长才能退出（或者更糟，
+// 永远不知道要收这场 PK）；如果登记发生在阻塞工作之前（当前实现），
+// Run 的 defer 能立刻找到并断开它，慢请求的 ctx 也会因此提前取消，
+// 不会真的等到那个人为拖慢的时长。
+func TestStartPKDuringHostShutdownDoesNotLeak(t *testing.T) {
+	sess, err := auth.ParseSession("SESSDATA=x; bili_jct=tok; DedeUserID=42; buvid3=BV3")
+	if err != nil {
+		t.Fatalf("ParseSession 失败: %v", err)
+	}
+
+	const slowSeedDelay = 3 * time.Second
+
+	httpSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.Contains(r.URL.Path, "danmu"):
+			json.NewEncoder(w).Encode(map[string]any{
+				"code": 0,
+				"data": map[string]any{
+					"token":     "tok-abc",
+					"host_list": []map[string]any{{"host": "unused", "wss_port": 443}},
+				},
+			})
+		case strings.Contains(r.URL.Path, "audience"):
+			// 故意拖慢，模拟播种尚未完成宿主就退出的窗口。
+			time.Sleep(slowSeedDelay)
+			w.Write([]byte(`{"code":0,"data":{"room":[]}}`))
+		default:
+			json.NewEncoder(w).Encode(map[string]any{
+				"code": 0,
+				"data": map[string]any{"room_id": 21452505, "uid": 1, "live_status": 1},
+			})
+		}
+	}))
+	t.Cleanup(httpSrv.Close)
+
+	ac := api.New(sess, api.WithHTTPClient(httpSrv.Client()))
+	ac.SetBaseURL("roomInfo", httpSrv.URL+"/room")
+	ac.SetBaseURL("danmuInfo", httpSrv.URL+"/danmu")
+	ac.SetBaseURL("roomAudience", httpSrv.URL+"/audience")
+	ac.Signer().SetMixinKey("abcdefghijklmnopqrstuvwxyz012345")
+
+	fs := newMultiRoomFakeServer(t, nil)
+	c := NewClient("21452505", ac,
+		WithDialURLOverride(fs.wsURL()),
+		WithHeartbeatInterval(50*time.Millisecond),
+		WithBackoff(10*time.Millisecond, 30*time.Millisecond),
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	runDone := make(chan struct{})
+	go func() { c.Run(ctx); close(runDone) }()
+	waitUntil(t, time.Second, func() bool { return fs.authCount() >= 1 })
+
+	base := goroutineBaseline(t)
+
+	link := c.StartPK(ctx, startPKMembers("21452505", "33333", "44444"))
+	// 不等待任何东西，立刻让宿主退出——这正是曾经导致漏登记的窗口：
+	// 此时后台的播种 goroutine 大概率还卡在那 3 秒的人为延迟里。
+	cancel()
+
+	select {
+	case <-runDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run 迟迟不退出，怀疑被慢速播种请求拖住了" +
+			"（正确实现应该已经通过 ctx 取消让慢请求提前失败返回）")
+	}
+
+	select {
+	case _, ok := <-link.Events():
+		if ok {
+			t.Error("Run 退出后 link.Events() 仍在产出事件")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Run 退出后 link.Events() 应该已关闭，而不是继续阻塞")
+	}
+
+	if l := c.PKLink(); l != nil {
+		t.Error("宿主退出后 c.PKLink() 应该为 nil")
+	}
+
+	assertSettles(t, base)
+}
+
+// TestStartPKAfterHostAlreadyClosedIsNoop 覆盖 Critical-1 的另一半：
+// Run 已经完全退出（defer 已经跑完）之后才调用 StartPK——这次调用不该
+// 建立任何真实连接，也不该产生悬挂的 goroutine。
+func TestStartPKAfterHostAlreadyClosedIsNoop(t *testing.T) {
+	fs := newMultiRoomFakeServer(t, nil)
+	c := newPKHostClient(t, fs, "21452505")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	runDone := make(chan struct{})
+	go func() { c.Run(ctx); close(runDone) }()
+	waitUntil(t, time.Second, func() bool { return fs.authCount() >= 1 })
+
+	cancel()
+	<-runDone
+
+	base := goroutineBaseline(t)
+	before := fs.authCount()
+
+	link := c.StartPK(context.Background(), startPKMembers("21452505", "33333", "44444"))
+
+	time.Sleep(100 * time.Millisecond)
+	if got := fs.authCount(); got != before {
+		t.Errorf("宿主已退出后 StartPK 不应该建立任何新连接，连接次数从 %d 变成了 %d", before, got)
+	}
+
+	select {
+	case _, ok := <-link.Events():
+		if ok {
+			t.Error("宿主已关闭后 StartPK 返回的 link 不应该产出事件")
+		}
+	default:
+		t.Error("宿主已关闭后 link.Events() 应该已经关闭（能立刻读到零值），而不是继续阻塞")
+	}
+
+	if l := c.PKLink(); l != nil {
+		t.Error("宿主已关闭时 c.PKLink() 应该为 nil，不应该登记这次徒劳的 StartPK")
+	}
+
+	assertSettles(t, base)
+}
+
+// TestConcurrentStartPKDoesNotOrphanEarlierLink 覆盖驳回后的 concern-4：
+// 两个几乎同时发生的 StartPK 调用不该有一个静默失去引用变成孤儿。
+// 没有序列化的话，两次调用各自往 c.pkLink 写一次，后写的会覆盖先写的，
+// 先注册的那个 PkLink 从此再也不会被任何一次 EndPK 找到；pkMu 序列化
+// StartPK 之间的调用后，不管谁先谁后，落败的那一个都会在赢家的
+// StartPK 内部（endPKLocked）被干净地 EndPK 掉，不是被覆盖后放任不管。
+func TestConcurrentStartPKDoesNotOrphanEarlierLink(t *testing.T) {
+	fs := newMultiRoomFakeServer(t, nil)
+	c := newPKHostClient(t, fs, "21452505")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go c.Run(ctx)
+	waitUntil(t, time.Second, func() bool { return fs.authCount() >= 1 })
+
+	base := goroutineBaseline(t)
+
+	var wg sync.WaitGroup
+	links := make([]*PkLink, 2)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		links[0] = c.StartPK(ctx, startPKMembers("21452505", "33333"))
+	}()
+	go func() {
+		defer wg.Done()
+		links[1] = c.StartPK(ctx, startPKMembers("21452505", "44444"))
+	}()
+	wg.Wait()
+
+	current := c.PKLink()
+	if current != links[0] && current != links[1] {
+		t.Fatal("c.PKLink() 既不是 links[0] 也不是 links[1]")
+	}
+	orphan := links[0]
+	if current == links[0] {
+		orphan = links[1]
+	}
+
+	select {
+	case _, ok := <-orphan.Events():
+		if ok {
+			t.Error("落败的那个 PkLink 应该已经被 EndPK 掉，Events() 不该再产出事件")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("落败的那个 PkLink 应该已经关闭，而不是继续阻塞——说明它变成了孤儿")
+	}
+
+	c.EndPK()
+	cancel()
+	for range c.Events() {
+	}
+
+	assertSettles(t, base)
+}
+
 // ---------- 观众集合 ----------
 
 // TestPKSeedsAudienceSetsFromRecentDanmakuAndSelves 验证播种逻辑：
 // 双方房间各自的近期弹幕发送者 + 自己主播 + 对面主播都应该进各自的集合。
+//
+// DedeUserID（登录账号 uid，999999）故意跟 PK_INFO 里「自己」这一项的
+// UID（本房间主播 uid，"room-anchor-uid"）设成不同的值——工具很可能是
+// 助播/小号账号登录、给别的主播的房间跑，这两个 uid 本来就该是两个人。
+// myAudience 播种的必须是后者，不是登录账号（审查发现的真实缺陷）。
 func TestPKSeedsAudienceSetsFromRecentDanmakuAndSelves(t *testing.T) {
-	sess, err := auth.ParseSession("SESSDATA=x; bili_jct=tok; DedeUserID=1; buvid3=BV3")
+	sess, err := auth.ParseSession("SESSDATA=x; bili_jct=tok; DedeUserID=999999; buvid3=BV3")
 	if err != nil {
 		t.Fatalf("ParseSession 失败: %v", err)
 	}
@@ -636,7 +833,7 @@ func TestPKSeedsAudienceSetsFromRecentDanmakuAndSelves(t *testing.T) {
 	go c.Run(ctx)
 
 	link := c.StartPK(ctx, []event.PkMember{
-		{RoomID: "21452505", UID: "u-self"},
+		{RoomID: "21452505", UID: "room-anchor-uid"}, // 自己：本房间主播 uid，不是登录账号
 		{RoomID: "33333", UID: "u-opp-anchor"},
 	})
 
@@ -646,14 +843,22 @@ func TestPKSeedsAudienceSetsFromRecentDanmakuAndSelves(t *testing.T) {
 	})
 
 	mine, opposite := link.Audiences()
-	for _, want := range []string{"100", "101", "1"} { // 100/101 来自近期弹幕，1 是自己主播 uid
+	for _, want := range []string{"100", "101", "room-anchor-uid"} { // 100/101 来自近期弹幕，room-anchor-uid 是本房间主播
 		if _, ok := mine[want]; !ok {
 			t.Errorf("myAudience 缺少 %q, 实际 %v", want, mine)
 		}
 	}
+	if _, ok := mine["999999"]; ok {
+		t.Error("myAudience 不应该包含登录账号 uid（999999）——播种的必须是 PK_INFO 里自己房间主播的 uid，不是登录账号")
+	}
+
+	oppRoom, ok := opposite["33333"]
+	if !ok {
+		t.Fatalf("opposite 应该有房间 33333 这个键，实际 %v", opposite)
+	}
 	for _, want := range []string{"200", "u-opp-anchor"} { // 200 来自对面近期弹幕，u-opp-anchor 是对面主播
-		if _, ok := opposite[want]; !ok {
-			t.Errorf("oppositeAudience 缺少 %q, 实际 %v", want, opposite)
+		if _, ok := oppRoom[want]; !ok {
+			t.Errorf("房间 33333 的 oppositeAudience 缺少 %q, 实际 %v", want, oppRoom)
 		}
 	}
 
@@ -702,7 +907,8 @@ func TestPKAudienceSetsUpdateLiveFromBothRooms(t *testing.T) {
 	waitUntil(t, 2*time.Second, func() bool {
 		mine, opposite := link.Audiences()
 		_, hasMine := mine["7001"]
-		_, hasOpp := opposite["7002"]
+		oppRoom := opposite["33333"]
+		_, hasOpp := oppRoom["7002"]
 		return hasMine && hasOpp
 	})
 
