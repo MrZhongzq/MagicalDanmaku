@@ -32,9 +32,12 @@ var defaultBaseURLs = map[string]string{
 	// 以下三个是 PK 场景专用：查「对面」直播间的人数与大航海。
 	// 接口地址与字段路径取自原 C++ 项目 bili_liveservice.cpp 里真实调用过的
 	// 参数（行号见 task-5-api-research.md），不是从通用知识里猜的。
+	// 注意 guardOnline 不是 guardTab/topList——那是死代码路径用的接口，
+	// 真正生效的版本用的是 general-interface/v1/rank/queryContributionRank
+	// （见 pk_opponent.go 里 GuardOnline 的注释）。
 	"roomOnline":  "https://api.live.bilibili.com/xlive/web-room/v1/index/getInfoByRoom",
-	"guardTotal":  "https://api.live.bilibili.com/xlive/app-room/v2/guardTab/topListNew",
-	"guardOnline": "https://api.live.bilibili.com/xlive/app-room/v2/guardTab/topList",
+	"guardTotal":  "https://api.live.bilibili.com/xlive/app-room/v2/guardTab/topList",
+	"guardOnline": "https://api.live.bilibili.com/xlive/general-interface/v1/rank/queryContributionRank",
 }
 
 // riskControlCode 是 B 站的风控错误码。

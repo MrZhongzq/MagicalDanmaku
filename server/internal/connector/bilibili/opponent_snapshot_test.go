@@ -2,6 +2,7 @@ package bilibili
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -12,7 +13,10 @@ import (
 )
 
 // newSnapshotTestClient 起一个能同时应答 roomOnline/guardTotal/guardOnline
-// 三个接口的假服务器，按 room_id/roomid 区分「谁在问谁」。
+// 三个接口的假服务器。三个接口的参数有重叠（roomOnline 和 guardOnline
+// 都带 room_id），按各自独有的参数区分「谁在问谁」：guardOnline 独有
+// switch 参数，guardTotal 独有 roomid（不带下划线）参数，剩下的才是
+// roomOnline。
 func newSnapshotTestClient(t *testing.T, selfRoomID string, roomOnline map[string]int64, guardTotal map[string]int64, guardOnline map[string]int64) (*Client, *int) {
 	t.Helper()
 	calls := 0
@@ -20,25 +24,26 @@ func newSnapshotTestClient(t *testing.T, selfRoomID string, roomOnline map[strin
 		calls++
 		q := r.URL.Query()
 		switch {
-		case q.Has("room_id"): // roomOnline
-			online := roomOnline[q.Get("room_id")]
-			w.Write([]byte(`{"code":0,"data":{"room_info":{"online":` + itoa(online) + `}}}`))
-		case q.Get("page_size") == "20": // guardTotal（typ/page_size=20 是它的特征参数）
-			total := guardTotal[q.Get("roomid")]
-			w.Write([]byte(`{"code":0,"data":{"info":{"num":` + itoa(total) + `}}}`))
-		default: // guardOnline
-			n := guardOnline[q.Get("roomid")]
-			// 全部塞进 list、guard_level=3、is_alive=1，只为验证总数管道打通，
-			// 分档与翻页语义已在 api 包的单元测试里覆盖，这里不重复造样例。
-			list := "["
+		case q.Has("switch"): // guardOnline（queryContributionRank）
+			n := guardOnline[q.Get("room_id")]
+			// 全部塞进 item、guard_level=3，uid 各不相同以免被去重逻辑误伤，
+			// 只为验证总数管道打通，分档/去重/翻页语义已在 api 包的单元
+			// 测试里覆盖，这里不重复造样例。
+			items := "["
 			for i := int64(0); i < n; i++ {
 				if i > 0 {
-					list += ","
+					items += ","
 				}
-				list += `{"guard_level":3,"is_alive":1}`
+				items += fmt.Sprintf(`{"uid":%d,"guard_level":3}`, i+1)
 			}
-			list += "]"
-			w.Write([]byte(`{"code":0,"data":{"top3":[],"list":` + list + `,"info":{"page":1,"now":1}}}`))
+			items += "]"
+			w.Write([]byte(`{"code":0,"data":{"item":` + items + `,"count":` + itoa(n) + `}}`))
+		case q.Has("roomid"): // guardTotal
+			total := guardTotal[q.Get("roomid")]
+			w.Write([]byte(`{"code":0,"data":{"info":{"num":` + itoa(total) + `}}}`))
+		default: // roomOnline
+			online := roomOnline[q.Get("room_id")]
+			w.Write([]byte(`{"code":0,"data":{"room_info":{"online":` + itoa(online) + `}}}`))
 		}
 	}))
 	t.Cleanup(srv.Close)
@@ -143,12 +148,12 @@ func TestFetchOpponentSnapshotsDegradesOnPartialFailure(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 		switch {
-		case q.Get("page_size") == "20": // guardTotal：故意让它失败
+		case q.Has("switch"): // guardOnline
+			w.Write([]byte(`{"code":0,"data":{"item":[{"uid":1,"guard_level":3}],"count":1}}`))
+		case q.Has("roomid"): // guardTotal：故意让它失败
 			w.Write([]byte(`{"code":-352,"message":"风控"}`))
-		case q.Has("room_id"): // roomOnline
+		default: // roomOnline
 			w.Write([]byte(`{"code":0,"data":{"room_info":{"online":999}}}`))
-		default: // guardOnline
-			w.Write([]byte(`{"code":0,"data":{"top3":[],"list":[{"guard_level":3,"is_alive":1}],"info":{"page":1,"now":1}}}`))
 		}
 	}))
 	t.Cleanup(srv.Close)

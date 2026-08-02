@@ -7,17 +7,17 @@ import (
 	"strconv"
 )
 
-// 以下参数取自原 C++ 项目 bili_liveservice.cpp 里真实调用过的取值
-// （getGuardCount / getPkOnlineGuardPage），不是随意选的默认值：
-// appkey 是抓包核实过的固定值，page_size 是原实现用的档位。
+// 以下参数取自原 C++ 项目 bili_liveservice.cpp 里真实调用过的取值，
+// 不是随意选的默认值。
 const (
-	guardTotalPageSize  = "20"
-	guardOnlinePageSize = "30"
-	guardOnlineAppKey   = "27eb53fc9058f8c3"
+	// guardOnlinePageSize 取自 getPkOnlineGuardPageNew2（第 1339/1412 行
+	// 附近，最终生效版本用的是 100）。
+	guardOnlinePageSize = 100
 
-	// guardOnlineMaxPages 是翻页安全上限，防止接口返回异常的分页信息
-	// （data.info.now 卡住不推进）导致无限请求下去。原 C++ 实现没有这层
-	// 保护，翻页逻辑完全信任接口——这是本次移植额外加的防御。
+	// guardOnlineMaxPages 是翻页安全上限，防止接口返回异常的 data.count
+	// （服务端给的值，不可信）导致算出一个超大 pageCount、无限请求下去。
+	// 原 C++ 实现没有这层保护——这是本次移植额外加的防御，用的是独立的
+	// 请求次数计数器，不依赖任何服务端返回值（见 GuardOnline 里的注释）。
 	guardOnlineMaxPages = 100
 )
 
@@ -42,15 +42,18 @@ func (c *Client) RoomOnlineCount(ctx context.Context, roomID string) (int64, err
 	return data.RoomInfo.Online, nil
 }
 
-// GuardTotal 获取指定直播间的大航海总数。单次请求即可拿到，不需要翻页
-// （原 C++ 项目 getGuardCount 就是这么用的，bili_liveservice.cpp:1129-1133）。
+// GuardTotal 获取指定直播间的大航海总数。单次请求即可拿到，不需要翻页。
+//
+// 用的是 getGuardCountByRoomId（bili_liveservice.cpp:5137-5171，调用点
+// 第 5276 行），不是同样读 guardTab/topList{New} 但写死查自己房间的
+// getGuardCount（第 1127-1136 行）——本任务查的是任意房间（对面），
+// 只有前者是为「传入任意房间号」这个场景设计并真实调用过的。
+// 两者响应结构相同，都读 data.info.num。
 func (c *Client) GuardTotal(ctx context.Context, roomID, uid string) (int64, error) {
 	params := url.Values{}
 	params.Set("roomid", roomID)
 	params.Set("page", "1")
 	params.Set("ruid", uid)
-	params.Set("page_size", guardTotalPageSize)
-	params.Set("typ", "0")
 
 	var data struct {
 		Info struct {
@@ -65,42 +68,53 @@ func (c *Client) GuardTotal(ctx context.Context, roomID, uid string) (int64, err
 
 // GuardOnlineCounts 是在线大航海按等级分档的统计。
 type GuardOnlineCounts struct {
-	Governor int64 // 总督（guard_level=1）
-	Admiral  int64 // 提督（guard_level=2）
-	Captain  int64 // 舰长（guard_level 其余取值，实际只有 3）
+	Governor int64 // 总督（guard_level==1）
+	Admiral  int64 // 提督（guard_level==2）
+	Captain  int64 // 舰长（guard_level==3，精确匹配，不是「其余」）
 }
 
 // Total 返回三档之和，即「在线」的大航海总数。
 func (g GuardOnlineCounts) Total() int64 { return g.Governor + g.Admiral + g.Captain }
 
-// guardOnlineMember 是 topList 接口 top3/list 数组里一个成员的形状。
+// guardOnlineMember 是 queryContributionRank 接口 data.item[] 数组里
+// 一个成员的形状。这个接口本身就是「在线」高能榜（type=online_rank），
+// 不带 is_alive 字段，不需要也不能再按 is_alive 过滤一次。
 type guardOnlineMember struct {
-	GuardLevel int `json:"guard_level"`
-	IsAlive    int `json:"is_alive"` // 0 表示已掉线/不在线，非 0 才算「在线」
+	UID        int64 `json:"uid"`
+	GuardLevel int   `json:"guard_level"`
 }
 
 type guardOnlinePage struct {
-	Top3 []guardOnlineMember `json:"top3"`
-	List []guardOnlineMember `json:"list"`
-	Info struct {
-		Page int `json:"page"` // 总页数
-		Now  int `json:"now"`  // 当前页
-	} `json:"info"`
+	Item  []guardOnlineMember `json:"item"`
+	Count int                 `json:"count"` // 总条数，用于算总页数
 }
 
 // GuardOnline 统计指定直播间当前在线的大航海人数，按等级分档。
 //
-// 两条语义原样照搬自原 C++ 项目 getPkOnlineGuardPage
-// （bili_liveservice.cpp:1265-1314），少一条都会算错：
-//  1. 只数 is_alive != 0 的——「在线」不等于榜单里的全部成员；
-//  2. data.top3 只在第一页累加一次，后续翻页如果重复累加会重复计数
-//     （list 则每页都要累加，它是真正分页的数据）。
+// 语义原样照搬自原 C++ 项目**真正生效**的版本 getPkOnlineGuardPageNew2
+// （bili_liveservice.cpp:1378-1452）。这不是最初以为的 getPkOnlineGuardPage
+// （第 1249-1315 行那套 topList + is_alive + top3 仅 page1 的逻辑）——
+// 那个函数第一行就是 `getPkOnlineGuardPageNew2(); return;`，是死代码，
+// 后面的实现永远不会跑到。真正调用的是 queryContributionRank 接口，
+// 语义完全不同，少一条都会算错：
+//  1. 累加对象是 data.item[]，没有 top3/list 之分，不存在「仅 page1」这回事；
+//  2. 跳过 guard_level <= 0 的——只数真正的大航海成员；
+//  3. 按 uid 去重（原代码用 QSet）——这个接口会在不同页之间重复返回同一个
+//     uid，不去重会多算；
+//  4. 不看 is_alive——type=online_rank 本身就是「在线」高能榜，返回的
+//     已经只有在线的人，这个接口压根不带这个字段；
+//  5. 分档是 guard_level==3 精确匹配舰长，不是「非 1/2 就算舰长」，未知
+//     等级（如未来 B 站新增档位）不计入任何一档；
+//  6. 翻页看 data.count（总条数）算 pageCount = ceil(count/page_size)，
+//     page < pageCount 就继续。
 func (c *Client) GuardOnline(ctx context.Context, roomID, uid string) (GuardOnlineCounts, error) {
 	var counts GuardOnlineCounts
+	seenUIDs := make(map[int64]bool)
 	page := 1
-	// 用独立的请求计数器而不是 page 本身来判断是否超过安全上限：
-	// 接口返回的 data.info.now 如果异常卡住不推进，page 会在同一个值上
-	// 反复打转，永远摸不到 guardOnlineMaxPages，靠 page 判断会死循环。
+	// 用独立的请求计数器判断是否超过安全上限，不依赖 data.count 算出的
+	// pageCount——data.count 是服务端给的，不可信；即便它异常地一直很大，
+	// 这里的 page 也是我们自己单调 +1 推进的，不会像「跟着服务端字段走」
+	// 那样被卡住，但依然需要一个跟服务端返回值无关的硬上限兜底。
 	for requests := 0; ; requests++ {
 		if err := ctx.Err(); err != nil {
 			return counts, err
@@ -110,43 +124,48 @@ func (c *Client) GuardOnline(ctx context.Context, roomID, uid string) (GuardOnli
 		}
 
 		params := url.Values{}
-		params.Set("actionKey", "appkey")
-		params.Set("appkey", guardOnlineAppKey)
-		params.Set("roomid", roomID)
-		params.Set("page", strconv.Itoa(page))
 		params.Set("ruid", uid)
-		params.Set("page_size", guardOnlinePageSize)
+		params.Set("room_id", roomID)
+		params.Set("page", strconv.Itoa(page))
+		params.Set("page_size", strconv.Itoa(guardOnlinePageSize))
+		params.Set("type", "online_rank")
+		params.Set("switch", "contribution_rank")
+		params.Set("platform", "web")
 
 		var data guardOnlinePage
 		if err := c.GetJSON(ctx, c.URLFor("guardOnline"), params, false, &data); err != nil {
 			return counts, fmt.Errorf("获取在线大航海失败(page=%d): %w", page, err)
 		}
 
-		if page == 1 {
-			addGuardOnlineCounts(&counts, data.Top3)
-		}
-		addGuardOnlineCounts(&counts, data.List)
+		addGuardOnlineCounts(&counts, seenUIDs, data.Item)
 
-		if data.Info.Now >= data.Info.Page || data.Info.Now <= 0 {
+		pageCount := (data.Count + guardOnlinePageSize - 1) / guardOnlinePageSize
+		if page >= pageCount {
 			break
 		}
-		page = data.Info.Now + 1
+		page++
 	}
 	return counts, nil
 }
 
-func addGuardOnlineCounts(counts *GuardOnlineCounts, members []guardOnlineMember) {
+func addGuardOnlineCounts(counts *GuardOnlineCounts, seenUIDs map[int64]bool, members []guardOnlineMember) {
 	for _, m := range members {
-		if m.IsAlive == 0 {
+		if m.GuardLevel <= 0 {
 			continue
 		}
+		if seenUIDs[m.UID] {
+			continue
+		}
+		seenUIDs[m.UID] = true
+
 		switch m.GuardLevel {
 		case 1:
 			counts.Governor++
 		case 2:
 			counts.Admiral++
-		default:
+		case 3:
 			counts.Captain++
+			// 其余等级（当前接口不会出现，但防御性地不假设）不计入任何档位。
 		}
 	}
 }
