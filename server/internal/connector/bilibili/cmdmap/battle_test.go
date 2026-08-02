@@ -63,6 +63,9 @@ func TestPkInfoParsesMembers(t *testing.T) {
 	}
 
 	// 按 RoomID 找，不按下标找——下标在多人 PK 里不可靠。
+	// 样本里 self（21452505）对应真实抓包中的被匹配方（match_info），
+	// 它赢了这场 PK；这个真实关系必须原样保留，不能为了「self 在前」
+	// 的直觉去调换 votes/is_winner，否则黄金样本会反过来教坏后续任务。
 	var self, opponent *event.PkMember
 	for i := range b.Members {
 		m := &b.Members[i]
@@ -82,11 +85,11 @@ func TestPkInfoParsesMembers(t *testing.T) {
 	if self.Face != "http://i1.hdslb.com/bfs/face/aaa.jpg" {
 		t.Errorf("self.Face = %q", self.Face)
 	}
-	if self.Votes != 65 {
-		t.Errorf("self.Votes = %d, 期望 65", self.Votes)
+	if self.Votes != 1151 {
+		t.Errorf("self.Votes = %d, 期望 1151", self.Votes)
 	}
-	if self.IsWinner {
-		t.Error("self.IsWinner 应为 false（样本里 is_winner=0）")
+	if !self.IsWinner {
+		t.Error("self.IsWinner 应为 true（样本里 is_winner=1，本房赢了这场 PK）")
 	}
 
 	if opponent == nil {
@@ -95,11 +98,11 @@ func TestPkInfoParsesMembers(t *testing.T) {
 	if opponent.UID != "22222222" || opponent.Username != "对面主播" {
 		t.Errorf("opponent = %+v", opponent)
 	}
-	if opponent.Votes != 1151 {
-		t.Errorf("opponent.Votes = %d, 期望 1151", opponent.Votes)
+	if opponent.Votes != 65 {
+		t.Errorf("opponent.Votes = %d, 期望 65", opponent.Votes)
 	}
-	if !opponent.IsWinner {
-		t.Error("opponent.IsWinner 应为 true（样本里 is_winner=1）")
+	if opponent.IsWinner {
+		t.Error("opponent.IsWinner 应为 false（样本里 is_winner=0，对面输了）")
 	}
 
 	// 完整数据必须留在 Raw 里供 P6 使用
