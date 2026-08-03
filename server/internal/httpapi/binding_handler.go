@@ -21,7 +21,55 @@ type bindingView struct {
 	Enabled     bool     `json:"enabled"`
 	RuleCount   int      `json:"ruleCount"`
 	Permissions []string `json:"permissions"`
+
+	// LiveStatus 是最近一次直播间开播状态检测的结果（"living"/"offline"/
+	// "unknown"），由 cmd/magicd 的心跳循环（60 秒一次）或新增绑定时的
+	// 立即检测写入。LiveCheckedAt 为 nil 表示这个绑定从未被检测过。
+	//
+	// **"unknown" 不等于"未开播"**：探测本身失败（网络不通、被风控）
+	// 也会落在这一档，与"确认未开播"是完全不同的两件事，前端不能把它
+	// 当作 offline 的同义词显示，理由与账号登录态的 unknown 完全一致。
+	LiveStatus    string  `json:"liveStatus"`
+	LiveCheckedAt *string `json:"liveCheckedAt"`
+	// AnchorUID/AnchorName 是主播身份——AnchorUID 是主播 UID，不是
+	// RoomID（房间号）；两者探测成功前都是空串。
+	AnchorUID  string `json:"anchorUid"`
+	AnchorName string `json:"anchorName"`
 }
+
+// toBindingView 是 bindingView 唯一的构造入口，保证 handleListBindings
+// 与 handleCreateBinding 对同一批字段的映射逻辑不会走岔。
+func toBindingView(b *store.Binding, ruleCount int, permissions []string) bindingView {
+	v := bindingView{
+		ID: b.ID, AccountID: b.AccountID, AccountName: b.AccountName,
+		RoomID: b.RoomID, Enabled: b.Enabled, RuleCount: ruleCount,
+		Permissions: permissions,
+		LiveStatus:  b.LiveStatus,
+		AnchorUID:   b.AnchorUID,
+		AnchorName:  b.AnchorName,
+	}
+	if b.LiveCheckedAt != nil {
+		s := b.LiveCheckedAt.Format(timeLayout)
+		v.LiveCheckedAt = &s
+	}
+	return v
+}
+
+// RoomStatusProbe 是新增绑定后立即探测一次直播间开播状态与主播身份
+// 的能力，不必等 60 秒心跳。
+//
+// httpapi 自己不知道怎么打 B 站接口——具体探测逻辑（走哪个接口、字段
+// 路径）留在 cmd/magicd 里，通过 SetRoomStatusProbe 注入，与
+// BindingLifecycle/LoginProbe 是同一种解耦方式。可能为 nil（测试环境
+// 通常不关心这一步），处理器判空后跳过——加绑定这个主流程不该被这一步
+// 缺失或探测失败拖累。
+type RoomStatusProbe interface {
+	// ProbeNow 探测 bindingID 对应的直播间并写库。
+	ProbeNow(ctx context.Context, bindingID int64)
+}
+
+// SetRoomStatusProbe 注入直播间状态立即检测能力。run 在装配完成后调用一次。
+func (s *Server) SetRoomStatusProbe(p RoomStatusProbe) { s.roomStatusProbe = p }
 
 // permissionSet 是调用者在各绑定上的权限点快照。
 //
@@ -125,15 +173,7 @@ func (s *Server) handleListBindings(w http.ResponseWriter, r *http.Request) {
 			respondStoreError(w, err, "")
 			return
 		}
-		out = append(out, bindingView{
-			ID:          b.ID,
-			AccountID:   b.AccountID,
-			AccountName: b.AccountName,
-			RoomID:      b.RoomID,
-			Enabled:     b.Enabled,
-			RuleCount:   len(rs),
-			Permissions: ps.of(&b),
-		})
+		out = append(out, toBindingView(&b, len(rs), ps.of(&b)))
 	}
 	respondJSON(w, http.StatusOK, out)
 }
@@ -187,16 +227,30 @@ func (s *Server) handleCreateBinding(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// 立即探测一次直播间状态，不必等 60 秒心跳——用户添加房间号的这一刻
+	// 正是最想确认"有没有加错房间"的时候。门槛与上面的 StartBinding
+	// 一致（只对启用的绑定做），道理相同：重复点一下按钮落在一个已被
+	// 手动停用的绑定上时，不该悄悄替它探测。同步调用（不起 goroutine），
+	// 这样探测成功时下面重新查到的 b 才能带着最新结果一起返回给前端，
+	// 不必让用户刷新页面才看到。
+	if s.roomStatusProbe != nil && b.Enabled {
+		s.roomStatusProbe.ProbeNow(r.Context(), b.ID)
+		if fresh, err := s.store.GetBindingByID(r.Context(), b.ID); err == nil {
+			b = fresh
+		} else {
+			// 绑定不该在这几行之间消失；查不到就沿用探测前的 b，
+			// 响应里的开播状态字段会是探测前的旧值——比让整个请求
+			// 报错更合理，绑定本身已经创建成功了。
+			s.log.Warn("立即检测后重新查询绑定失败", "binding", b.Label(), "err", err)
+		}
+	}
+
 	ps, err := s.callerPermissions(r.Context(), u)
 	if err != nil {
 		respondStoreError(w, err, "")
 		return
 	}
-	respondJSON(w, http.StatusCreated, bindingView{
-		ID: b.ID, AccountID: b.AccountID, AccountName: b.AccountName,
-		RoomID: b.RoomID, Enabled: b.Enabled, RuleCount: 0,
-		Permissions: ps.of(b),
-	})
+	respondJSON(w, http.StatusCreated, toBindingView(b, 0, ps.of(b)))
 }
 
 // handlePatchBinding 启停绑定。守卫是 rule:write。

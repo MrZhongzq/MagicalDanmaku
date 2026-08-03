@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -400,6 +401,68 @@ func TestQRCodePollRefusesAccountCreatedByOthersMeanwhile(t *testing.T) {
 	// 「Cookie 没被换掉」的断言，只查 OwnerID 不够。
 	if acc.Cookie != victimCookie {
 		t.Errorf("Cookie 被换成了攻击者的: %q, 期望仍是王五的原值 %q", acc.Cookie, victimCookie)
+	}
+}
+
+// fakeLoginProbe 记录被探测的账号名，验证 handler 在扫码成功之后是否
+// 正确调用了注入的 LoginProbe——不必真的打 B 站接口（那是 cmd/magicd
+// 里 checkAccountLogin 自己的测试范围），这里只关心 handler 有没有在
+// 正确的时机（且只在扫码成功时）调用它。
+type fakeLoginProbe struct {
+	mu     sync.Mutex
+	probed []string
+}
+
+func (f *fakeLoginProbe) ProbeNow(_ context.Context, accountName string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.probed = append(f.probed, accountName)
+}
+
+func (f *fakeLoginProbe) snapshot() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string{}, f.probed...)
+}
+
+// TestQRCodePollSuccessProbesLoginImmediately 钉住 P5-2 任务 2 的第一条：
+// 扫码成功后必须立即探测一次登录态，不能让用户等后台 10 分钟一轮的
+// 检测循环才发现扫码没有真的成功。
+func TestQRCodePollSuccessProbesLoginImmediately(t *testing.T) {
+	srv, st, api := newTestServerWithAPI(t)
+	cookie := "SESSDATA=abc; bili_jct=def; DedeUserID=10086"
+	api.SetQRLogin(&fakeQR{key: "K", url: "u",
+		result: auth.PollResult{Status: auth.PollSuccess, Cookie: cookie}})
+	probe := &fakeLoginProbe{}
+	api.SetLoginProbe(probe)
+	c := loginAs(t, srv, st, "张三", false)
+
+	start := jsonRequest(t, c, "POST", srv.URL+"/api/accounts/qrcode", `{"name":"小号"}`)
+	start.Body.Close()
+	resp := jsonRequest(t, c, "POST", srv.URL+"/api/accounts/qrcode/K", "")
+	resp.Body.Close()
+
+	if got := probe.snapshot(); len(got) != 1 || got[0] != "小号" {
+		t.Errorf("ProbeNow 调用记录 = %v, 期望恰好 [\"小号\"]", got)
+	}
+}
+
+// TestQRCodePollWaitingDoesNotProbeLogin 验证还没扫完（状态不是
+// success）时不该探测——账号这时候可能压根还没建好/换好 Cookie。
+func TestQRCodePollWaitingDoesNotProbeLogin(t *testing.T) {
+	srv, st, api := newTestServerWithAPI(t)
+	api.SetQRLogin(&fakeQR{key: "K", url: "u", result: auth.PollResult{Status: auth.PollWaiting}})
+	probe := &fakeLoginProbe{}
+	api.SetLoginProbe(probe)
+	c := loginAs(t, srv, st, "张三", false)
+
+	start := jsonRequest(t, c, "POST", srv.URL+"/api/accounts/qrcode", `{"name":"小号"}`)
+	start.Body.Close()
+	resp := jsonRequest(t, c, "POST", srv.URL+"/api/accounts/qrcode/K", "")
+	resp.Body.Close()
+
+	if got := probe.snapshot(); len(got) != 0 {
+		t.Errorf("等待扫码阶段不该触发探测，实际调用记录 = %v", got)
 	}
 }
 

@@ -16,10 +16,12 @@ docker run -d --name magicd-pg \
   -e POSTGRES_USER=magicd -e POSTGRES_PASSWORD=改成你自己的密码 \
   -e POSTGRES_DB=magicd -p 5432:5432 postgres:16-alpine
 
-# 2. 配置连接串
+# 2. 配置连接串与管理员初始密码
 export MAGICD_DATABASE_URL='postgres://magicd:改成你自己的密码@localhost:5432/magicd?sslmode=disable'
+export MAGICD_ADMIN_PASSWORD='改成一个够强的密码，至少 8 位'
 
-# 3. 建表。空库上会创建管理员并打印一次性密码，记下来
+# 3. 建表。空库上会用 MAGICD_ADMIN_PASSWORD 创建管理员——
+#    不设这个变量的话这一步会直接报错并告诉你怎么办。
 magicd migrate
 
 # 4. 扫码登录一个 B 站账号
@@ -47,9 +49,8 @@ magicd run
 # 浏览器打开 http://127.0.0.1:8080
 ```
 
-用 `magicd migrate` 打印的管理员账号密码登录（见上面「快速开始」第 3
-步——空库首次迁移时会创建管理员账户并把用户名、密码打印一次，
-**只打印这一次**，务必当场记下）。
+用管理员账户（用户名固定 `admin`，密码就是建库时设置的
+`MAGICD_ADMIN_PASSWORD`，见上面「快速开始」第 2/3 步）登录。
 
 登录后左侧是七个页面：
 
@@ -115,15 +116,13 @@ magicd run
 git clone https://github.com/MrZhongzq/MagicalDanmaku.git
 cd MagicalDanmaku
 cp .env.example .env
-# 编辑 .env，改掉 POSTGRES_PASSWORD
+# 编辑 .env，改掉 POSTGRES_PASSWORD 与 MAGICD_ADMIN_PASSWORD
 docker compose up -d
 ```
 
-首次启动后取管理员密码——**它只打印这一次**：
-
-```bash
-docker compose logs migrate
-```
+管理员账号密码就是 `.env` 里设的 `MAGICD_ADMIN_PASSWORD`——不用再翻
+`docker compose logs migrate` 找一次性密码了。忘了在 `.env` 里设置的话，
+`docker compose up -d` 这一步会直接报错并说明怎么补。
 
 然后扫码登录一个 B 站账号并加直播间：
 
@@ -178,6 +177,7 @@ docker compose exec -T postgres pg_dump -U magicd magicd > backup.sql
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `MAGICD_DATABASE_URL` | 无 | PostgreSQL 连接串，必填 |
+| `MAGICD_ADMIN_PASSWORD` | 无 | 空库首次 `migrate` 建管理员时用的密码，必填（至少 8 位）；库里已有管理员后不生效，改密码用 `magicd user passwd` |
 | `MAGICD_LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error` |
 | `MAGICD_LOG_FILE` | 空 | 系统日志文件路径，留空则只写 stderr |
 | `MAGICD_LOG_RETENTION_DAYS` | `30` | 业务日志保留天数，0 表示不清理 |

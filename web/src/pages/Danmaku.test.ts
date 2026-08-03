@@ -109,6 +109,10 @@ const 绑定 = {
   enabled: true,
   ruleCount: 2,
   permissions: ['rule:read', 'rule:write'] as const,
+  liveStatus: 'unknown' as const,
+  liveCheckedAt: null,
+  anchorUid: '',
+  anchorName: '',
 }
 
 /** permissions 可覆盖默认的 ['rule:read', 'rule:write']——用于钉「缺 rule:write 时顶警告」的测试。 */

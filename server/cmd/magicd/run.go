@@ -589,6 +589,10 @@ func runRun(args []string) error {
 	rm := newRuntimeManager(ctx, st, sched, activity, apiSink, log, &wg, accounts)
 	if api != nil {
 		api.SetBindingLifecycle(rm)
+		// 扫码成功后立即探测一次登录态、新增绑定后立即探测一次直播间
+		// 状态（P5-2 任务 2）：两者都不依赖 runtimeManager，独立注入。
+		api.SetLoginProbe(&accountLoginProbe{st: st, check: newAPILoginChecker(), log: log})
+		api.SetRoomStatusProbe(&bindingRoomStatusProbe{st: st, check: newAPIRoomStatusChecker(), log: log})
 	}
 
 	// 清理放在 defer 里，而不是只写在正常关停路径的末尾。
@@ -646,6 +650,15 @@ func runRun(args []string) error {
 	go func() {
 		defer wg.Done()
 		loginCheckLoop(ctx, st, newAPILoginChecker(), log)
+	}()
+
+	// 直播间开播状态的心跳（P5-2 任务 1b）：60 秒一次，与上面账号登录态
+	// 检测（10 分钟一次）是两件独立的事，不合并成同一个循环——理由见
+	// roomStatusCheckInterval 的注释。
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		roomStatusCheckLoop(ctx, st, newAPIRoomStatusChecker(), log)
 	}()
 
 	if api != nil {

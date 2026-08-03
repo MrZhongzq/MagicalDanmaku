@@ -11,6 +11,11 @@
  * 探测本身失败（比如后端连不上 B 站）也会落在 unknown，与「从未检测过」
  * 是同一档。把 unknown 显示成「已失效」会在网络抖动时把用户吓得去重新
  * 扫码——账号可能什么问题都没有。见下面 `loginStateMeta` 的说明。
+ *
+ * 每个绑定还带着直播间开播状态（`Binding.liveStatus`，60 秒一轮心跳 +
+ * 新增绑定时立即检测一次）与主播身份（`anchorUid`/`anchorName`，不是
+ * 房间号）——三态设计与账号登录态完全对称，见下面 `roomLiveStateMeta`
+ * 的说明，同样绝不能把 unknown 显示成「未开播」。
  */
 import { computed, onMounted, reactive, ref } from 'vue'
 import {
@@ -134,6 +139,54 @@ function loginStateMeta(acc: Account): {
     detail: checkedAt
       ? `上次尝试检测于 ${checkedAt}，但未能确认结果（例如网络问题），不代表账号已失效`
       : '还没有被检测过，后台每 10 分钟轮询一次，稍等即可看到结果',
+  }
+}
+
+/**
+ * roomLiveStateMeta 把 `Binding.liveStatus` + `liveCheckedAt` 翻译成界面
+ * 文案，与 `loginStateMeta` 是同一套三态设计。
+ *
+ * **`unknown` 绝不能显示成「未开播」**：探测本身失败（网络不通、被
+ * 风控——`api/client.go` 里的 `riskControlCode` 在这个项目上真发生
+ * 过）与「确认未开播」是完全不同的两件事。把探测失败显示成「未开播」
+ * 是在用一个看起来正常的错误答案骗用户。
+ */
+function roomLiveStateMeta(b: Binding): {
+  tagType: 'success' | 'default' | 'warning'
+  text: string
+  detail: string
+} {
+  const checkedAt = b.liveCheckedAt
+  if (b.liveStatus === 'living') {
+    return {
+      tagType: 'success',
+      text: '直播中',
+      detail: checkedAt ? `上次检测：${checkedAt}` : '上次检测：无',
+    }
+  }
+  if (b.liveStatus === 'offline') {
+    return {
+      tagType: 'default',
+      text: '未开播',
+      detail: checkedAt ? `上次检测：${checkedAt}` : '上次检测：无',
+    }
+  }
+  // unknown：区分「从未检测过」与「上次探测失败」，两种情况文案不同，
+  // 但都不能读成「未开播」。
+  return {
+    tagType: 'warning',
+    text: checkedAt ? '状态未知' : '尚未检测',
+    detail: checkedAt
+      ? `上次尝试检测于 ${checkedAt}，但未能确认结果（例如网络问题或被风控），不代表未开播`
+      : '加入后会立即检测一次，之后每 60 秒刷新一次',
+  }
+}
+
+/** 主播身份（UID + 昵称）的展示文案，探测成功前统一显示"未知"。 */
+function anchorMeta(b: Binding): { uid: string; name: string } {
+  return {
+    uid: b.anchorUid || '未知',
+    name: b.anchorName || '未知',
   }
 }
 
@@ -270,10 +323,11 @@ function confirmAccountName() {
 
 function onQrSuccess(name: string) {
   qrModalVisible.value = false
-  // 换 Cookie 后后端会把登录态重置为 unknown（新 Cookie 还没被探测循环
-  // 测过），所以这里不能说「状态显示为有效」——扫完码卡片上大概率还是
-  // 「尚未检测」或「状态未知」，要在这里说清楚，否则用户会以为扫码没成功。
-  message.success(`账号「${name}」登录成功，登录状态将在下一轮检测（最长约 10 分钟）后更新`)
+  // 后端在扫码成功的同一次请求里已经同步做过一次立即检测（P5-2 任务
+  // 2），不必再让用户等后台 10 分钟一轮的检测循环——重新拉一次账号列表
+  // 就能拿到这次立即检测的结果。提示文案要如实说"已立即检测"，不能
+  // 继续说成"下一轮才更新"，那样等于告诉用户这一步没做。
+  message.success(`账号「${name}」登录成功，已立即检测一次登录状态`)
   void loadAccounts()
 }
 
@@ -359,12 +413,29 @@ onMounted(() => void loadAccounts())
 
           <div class="bindings">
             <div v-for="b in bindingsByAccount.get(acc.id) ?? []" :key="b.id" class="binding-row">
-              <span class="room">房间 {{ b.roomId }}</span>
-              <NSwitch :value="b.enabled" @update:value="(v: boolean) => toggleBinding(b, v)" />
-              <span class="rule-count">{{ b.ruleCount }} 条规则</span>
-              <NButton size="small" text type="error" @click="confirmDeleteBinding(b)"
-                >删除</NButton
-              >
+              <div class="binding-row-main">
+                <span class="room">房间 {{ b.roomId }}</span>
+                <NTag class="binding-live-tag" :type="roomLiveStateMeta(b).tagType" size="small">
+                  {{ roomLiveStateMeta(b).text }}
+                </NTag>
+                <NSwitch :value="b.enabled" @update:value="(v: boolean) => toggleBinding(b, v)" />
+                <span class="rule-count">{{ b.ruleCount }} 条规则</span>
+                <NButton size="small" text type="error" @click="confirmDeleteBinding(b)"
+                  >删除</NButton
+                >
+              </div>
+              <!-- 主播 UID + 昵称：现在能看出加的到底是谁的房间，不再只有一个
+                   光秃秃的房间号——这正是加错房间号时用户想看到的第一手信息。
+                   UID 明确写"主播 UID"，不写成"UID"，避免与上面账号卡片的
+                   「UID {{ acc.uid }}」（账号自己的 UID）混淆，那是两个人。 -->
+              <div class="row binding-anchor">
+                <span class="anchor-text"
+                  >主播 UID {{ anchorMeta(b).uid }} · {{ anchorMeta(b).name }}</span
+                >
+              </div>
+              <div class="row binding-live-detail">
+                <span class="binding-live-detail-text">{{ roomLiveStateMeta(b).detail }}</span>
+              </div>
             </div>
             <NEmpty
               v-if="(bindingsByAccount.get(acc.id) ?? []).length === 0"
@@ -461,12 +532,32 @@ onMounted(() => void loadAccounts())
 }
 .binding-row {
   display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 0;
+  border-bottom: 1px solid rgba(128, 128, 128, 0.15);
+}
+.binding-row-main {
+  display: flex;
   align-items: center;
   gap: 12px;
-  padding: 6px 0;
+}
+/* 「他人授权给我的直播间」一节用的是同一个 .binding-row 类名，但那边
+   仍是单行展示（账号名+房间号+启停标签+规则数），不带主播身份/开播
+   状态的详情行，所以要单独盖掉上面为"我拥有的账号"卡片改成的纵向布局。 */
+.binding-row.granted {
+  flex-direction: row;
+  align-items: center;
+  gap: 12px;
+  border-bottom: none;
 }
 .binding-row.granted .account-name {
   font-weight: 600;
+}
+.binding-anchor .anchor-text,
+.binding-live-detail-text {
+  font-size: 12px;
+  opacity: 0.7;
 }
 .add-binding-row {
   display: flex;

@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/perm"
+	"github.com/MrZhongzq/MagicalDanmaku/server/internal/store"
 )
 
 // fakeLifecycle 记录被调用的绑定 ID，验证 handler 在数据库状态改对之后
@@ -42,12 +43,16 @@ func (f *fakeLifecycle) snapshot() (started, stopped []int64) {
 }
 
 type bindingView struct {
-	ID          int64    `json:"id"`
-	AccountName string   `json:"accountName"`
-	RoomID      string   `json:"roomId"`
-	Enabled     bool     `json:"enabled"`
-	RuleCount   int      `json:"ruleCount"`
-	Permissions []string `json:"permissions"`
+	ID            int64    `json:"id"`
+	AccountName   string   `json:"accountName"`
+	RoomID        string   `json:"roomId"`
+	Enabled       bool     `json:"enabled"`
+	RuleCount     int      `json:"ruleCount"`
+	Permissions   []string `json:"permissions"`
+	LiveStatus    string   `json:"liveStatus"`
+	LiveCheckedAt *string  `json:"liveCheckedAt"`
+	AnchorUID     string   `json:"anchorUid"`
+	AnchorName    string   `json:"anchorName"`
 }
 
 func TestListBindingsIncludesCallerPermissions(t *testing.T) {
@@ -377,6 +382,96 @@ func TestDeleteBindingByStrangerLooksLikeNotFound(t *testing.T) {
 // BindingLifecycle」，不关心 StartBinding/StopBinding 内部怎么建连接——
 // 那是 cmd/magicd 的 runtimeManager 自己的测试范围（见 run_test.go /
 // runtime_manager_test.go）。这里假的实现只负责记下被调用的绑定 ID。
+
+// fakeRoomStatusProbe 记录被探测的绑定 ID，可选地模拟真实探测成功后
+// 写库的副作用（simulateWrite 非空时），供验证响应体是否反映了立即
+// 检测的最新结果。
+type fakeRoomStatusProbe struct {
+	mu      sync.Mutex
+	probed  []int64
+	st      *store.Store
+	liveTo  string // 非空时，ProbeNow 会把探测到的绑定写成这个状态
+	anchor  string
+	anchorU string
+}
+
+func (f *fakeRoomStatusProbe) ProbeNow(ctx context.Context, bindingID int64) {
+	f.mu.Lock()
+	f.probed = append(f.probed, bindingID)
+	f.mu.Unlock()
+	if f.liveTo != "" {
+		_ = f.st.UpdateBindingRoomStatus(ctx, bindingID, f.liveTo, f.anchorU, f.anchor)
+	}
+}
+
+func (f *fakeRoomStatusProbe) snapshot() []int64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]int64{}, f.probed...)
+}
+
+// TestCreateBindingProbesRoomStatusImmediately 钉住 P5-2 任务 2 的第二条：
+// 加直播间后必须立刻探测一次，且响应体要反映探测到的最新结果（主播
+// UID + 昵称 + 开播状态），而不是加完之后还得等 60 秒心跳才看得到。
+func TestCreateBindingProbesRoomStatusImmediately(t *testing.T) {
+	srv, st, api := newTestServerWithAPI(t)
+	probe := &fakeRoomStatusProbe{st: st, liveTo: store.RoomLiveLiving, anchorU: "20285041", anchor: "舞月雅白"}
+	api.SetRoomStatusProbe(probe)
+	c := loginAs(t, srv, st, "张三", false)
+	mustBindingFor(t, st, "张三", "小号", "111")
+
+	resp := jsonRequest(t, c, "POST", srv.URL+"/api/bindings",
+		`{"accountName":"小号","roomId":"222"}`)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("状态码 = %d, 期望 201", resp.StatusCode)
+	}
+
+	b, err := st.GetBinding(context.Background(), "小号", "222")
+	if err != nil {
+		t.Fatalf("查绑定报错: %v", err)
+	}
+	if got := probe.snapshot(); len(got) != 1 || got[0] != b.ID {
+		t.Errorf("ProbeNow 调用记录 = %v, 期望恰好 [%d]", got, b.ID)
+	}
+
+	var got bindingView
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("解析响应报错: %v", err)
+	}
+	if got.LiveStatus != store.RoomLiveLiving {
+		t.Errorf("响应里的 LiveStatus = %q, 期望 %q（应反映立即检测的结果）", got.LiveStatus, store.RoomLiveLiving)
+	}
+	if got.AnchorUID != "20285041" || got.AnchorName != "舞月雅白" {
+		t.Errorf("响应里的主播身份 = uid=%q name=%q，期望反映立即检测的结果", got.AnchorUID, got.AnchorName)
+	}
+}
+
+// TestCreateBindingIdempotentOnDisabledBindingDoesNotProbeRoomStatus 与
+// 幂等分支不重新拉起运行时是同一个道理：重复创建落在一个已停用的绑定
+// 上时，不该悄悄替它做一次开播状态探测。
+func TestCreateBindingIdempotentOnDisabledBindingDoesNotProbeRoomStatus(t *testing.T) {
+	srv, st, api := newTestServerWithAPI(t)
+	probe := &fakeRoomStatusProbe{st: st}
+	api.SetRoomStatusProbe(probe)
+	c := loginAs(t, srv, st, "张三", false)
+	mustBindingFor(t, st, "张三", "小号", "111")
+
+	if err := st.SetBindingEnabled(context.Background(), "小号", "111", false); err != nil {
+		t.Fatalf("停用报错: %v", err)
+	}
+
+	resp := jsonRequest(t, c, "POST", srv.URL+"/api/bindings",
+		`{"accountName":"小号","roomId":"111"}`)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
+		t.Fatalf("状态码 = %d", resp.StatusCode)
+	}
+
+	if got := probe.snapshot(); len(got) != 0 {
+		t.Errorf("已停用的绑定不该被重新探测，ProbeNow 调用记录 = %v", got)
+	}
+}
 
 // 新增绑定后必须立刻尝试起运行时，否则用户添加账号+直播间之后什么都
 // 不会发生——这正是 P5-1 要修的真机故障：webui 加完绑定，日志一条不动，

@@ -186,7 +186,7 @@ func TestEnsureAdminCreatesOnEmptyDatabase(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
 
-	name, pass, created, err := s.EnsureAdmin(ctx)
+	name, pass, created, err := s.EnsureAdmin(ctx, "")
 	if err != nil {
 		t.Fatalf("EnsureAdmin 报错: %v", err)
 	}
@@ -216,7 +216,7 @@ func TestEnsureAdminSkipsWhenUsersExist(t *testing.T) {
 	if _, err := s.CreateUser(ctx, "张三", "x", false); err != nil {
 		t.Fatalf("创建用户报错: %v", err)
 	}
-	_, _, created, err := s.EnsureAdmin(ctx)
+	_, _, created, err := s.EnsureAdmin(ctx, "")
 	if err != nil {
 		t.Fatalf("EnsureAdmin 报错: %v", err)
 	}
@@ -225,12 +225,74 @@ func TestEnsureAdminSkipsWhenUsersExist(t *testing.T) {
 	}
 }
 
+// TestEnsureAdminSkipsWhenUsersExistEvenWithPassword 验证 password 参数
+// 不能被当作"改已有管理员密码"的后门——库里已有用户时，即使调用方
+// 传了个合法密码，也必须是空操作，不能悄悄把它设成新密码。
+func TestEnsureAdminSkipsWhenUsersExistEvenWithPassword(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	if _, err := s.CreateUser(ctx, "张三", "原密码", false); err != nil {
+		t.Fatalf("创建用户报错: %v", err)
+	}
+	_, _, created, err := s.EnsureAdmin(ctx, "一个足够强的新密码123")
+	if err != nil {
+		t.Fatalf("EnsureAdmin 报错: %v", err)
+	}
+	if created {
+		t.Error("已有用户时不应再创建管理员")
+	}
+	if _, err := s.GetUserByName(ctx, "admin"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("不该凭空多出一个 admin 账户，查询结果: %v", err)
+	}
+}
+
+// TestEnsureAdminUsesExplicitPassword 验证传入非空密码时，用的就是这个
+// 密码，而不是仍然生成随机密码——无头部署靠这条路径把初始密码钉死成
+// MAGICD_ADMIN_PASSWORD 里配的值。
+func TestEnsureAdminUsesExplicitPassword(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	name, pass, created, err := s.EnsureAdmin(ctx, "一个足够强的密码123")
+	if err != nil {
+		t.Fatalf("EnsureAdmin 报错: %v", err)
+	}
+	if !created {
+		t.Fatal("空库上应创建管理员")
+	}
+	if pass != "一个足够强的密码123" {
+		t.Errorf("返回的密码 = %q, 期望原样是调用方传入的密码", pass)
+	}
+	if _, err := s.VerifyPassword(ctx, name, "一个足够强的密码123"); err != nil {
+		t.Fatalf("传入的密码应当能登录: %v", err)
+	}
+}
+
+// TestEnsureAdminRejectsWeakPassword 验证密码强度下限：太短的密码必须
+// 报错拒绝，而不是悄悄建出一个"123"就能登录的管理员账户。
+func TestEnsureAdminRejectsWeakPassword(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	_, _, created, err := s.EnsureAdmin(ctx, "123")
+	if !errors.Is(err, ErrWeakPassword) {
+		t.Errorf("err = %v, 期望 ErrWeakPassword", err)
+	}
+	if created {
+		t.Error("密码太弱时不该创建管理员")
+	}
+	if _, err := s.GetUserByName(ctx, "admin"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("密码太弱时不该留下任何 admin 账户，查询结果: %v", err)
+	}
+}
+
 func TestEnsureAdminPasswordsDiffer(t *testing.T) {
 	// 随机密码必须真随机，写死的常量等于没有密码
 	var p1, p2 string
 	t.Run("第一次", func(t *testing.T) {
 		s := testStore(t)
-		_, p, _, err := s.EnsureAdmin(context.Background())
+		_, p, _, err := s.EnsureAdmin(context.Background(), "")
 		if err != nil {
 			t.Fatalf("EnsureAdmin 报错: %v", err)
 		}
@@ -238,7 +300,7 @@ func TestEnsureAdminPasswordsDiffer(t *testing.T) {
 	})
 	t.Run("第二次", func(t *testing.T) {
 		s := testStore(t)
-		_, p, _, err := s.EnsureAdmin(context.Background())
+		_, p, _, err := s.EnsureAdmin(context.Background(), "")
 		if err != nil {
 			t.Fatalf("EnsureAdmin 报错: %v", err)
 		}

@@ -50,6 +50,9 @@ const usage = `magicd —— 神奇弹幕服务端
 
 环境变量:
   MAGICD_DATABASE_URL        PostgreSQL 连接串
+  MAGICD_ADMIN_PASSWORD      空库首次 migrate 建管理员时用的密码，必填
+                             （至少 8 位）；库里已有管理员时不生效，
+                             不能拿它改已有密码
   MAGICD_LOG_LEVEL           debug / info / warn / error，默认 info
   MAGICD_LOG_FILE            系统日志文件路径，留空则只写 stderr
   MAGICD_LOG_RETENTION_DAYS  业务日志保留天数，默认 30，0 表示不清理

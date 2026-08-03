@@ -39,6 +39,10 @@ const 绑定: {
   permissions: (
     'rule:read' | 'rule:write' | 'danmaku:send' | 'user:block' | 'member:manage' | 'event:read'
   )[]
+  liveStatus: 'living' | 'offline' | 'unknown'
+  liveCheckedAt: string | null
+  anchorUid: string
+  anchorName: string
 } = {
   id: 1,
   accountId: 1,
@@ -47,6 +51,10 @@ const 绑定: {
   enabled: true,
   ruleCount: 0,
   permissions: ['user:block'],
+  liveStatus: 'unknown',
+  liveCheckedAt: null,
+  anchorUid: '',
+  anchorName: '',
 }
 
 function ok(body: unknown, status = 200) {

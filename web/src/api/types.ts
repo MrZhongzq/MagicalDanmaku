@@ -74,6 +74,17 @@ export interface Account {
   loginCheckedAt: string | null
 }
 
+/**
+ * 直播间开播状态的三个取值。与后端 `store.RoomLive*` 常量一一对应，
+ * 语义与 `LoginState` 完全对称。
+ *
+ * **`unknown` 不等于「未开播」**：探测本身失败（网络不通、被风控）也会
+ * 落在这一档，与「living」「offline」并列的第三态。绝不能把它显示成
+ * 「未开播」——那是在用一个看起来正常的错误答案骗用户，`RoomInfo`/
+ * `RoomStatus` 探测失败与「确认没开播」必须在界面上分开表达。
+ */
+export type RoomLiveStatus = 'living' | 'offline' | 'unknown'
+
 export interface Binding {
   id: number
   accountId: number
@@ -83,6 +94,18 @@ export interface Binding {
   ruleCount: number
   /** 调用者在这个绑定上拥有的权限点，前端据此决定显示哪些按钮。 */
   permissions: Permission[]
+
+  /**
+   * 最近一次直播间开播状态检测的结果，由后端 60 秒一轮的心跳循环，
+   * 或者新增绑定时的立即检测写入。
+   */
+  liveStatus: RoomLiveStatus
+  /** 最近一次检测发生的时间。`null` 表示这个绑定从未被检测过。 */
+  liveCheckedAt: string | null
+  /** 主播 UID——注意不是 `roomId`（房间号）。探测成功前为空串。 */
+  anchorUid: string
+  /** 主播昵称。探测成功前为空串；探测失败时保留上一次已知值。 */
+  anchorName: string
 }
 
 export interface BlockedUser {

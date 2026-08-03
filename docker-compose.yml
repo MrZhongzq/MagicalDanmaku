@@ -47,6 +47,10 @@ services:
         condition: service_healthy
     environment:
       MAGICD_DATABASE_URL: postgres://${POSTGRES_USER:-magicd}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-magicd}?sslmode=disable
+      # 空库首次建管理员时必须有这个值——compose 在这里就把它挡住而不是
+      # 等 migrate 进程起来再报错，理由与上面的 POSTGRES_PASSWORD 一致。
+      # 库里已有管理员之后这个值不会被用来改密码，见 .env.example 的说明。
+      MAGICD_ADMIN_PASSWORD: ${MAGICD_ADMIN_PASSWORD:?请在 .env 里设置 MAGICD_ADMIN_PASSWORD（openssl rand -base64 18）}
     command: ["migrate"]
 
   magicd:

@@ -27,16 +27,20 @@
 最省事的是 Docker（自带 PostgreSQL）：
 
 ```bash
-cp .env.example .env    # 改掉 POSTGRES_PASSWORD
+cp .env.example .env    # 改掉 POSTGRES_PASSWORD 与 MAGICD_ADMIN_PASSWORD
 docker compose up -d
-docker compose logs migrate    # 取管理员的一次性密码
 ```
+
+`MAGICD_ADMIN_PASSWORD` 就是管理员的初始密码——不用再翻
+`docker compose logs migrate` 找一次性密码了；忘了设的话 `migrate`
+会直接报错并说清楚怎么办。
 
 不用 Docker 的话，需要自己准备 PostgreSQL 14+：
 
 ```bash
 export MAGICD_DATABASE_URL='postgres://magicd:magicd@localhost:5432/magicd?sslmode=disable'
-magicd migrate                         # 建表，记下打印出的管理员密码
+export MAGICD_ADMIN_PASSWORD='一个够强的密码，至少 8 位'
+magicd migrate                         # 建表，用上面的密码建管理员
 magicd login --save 小号 --owner admin  # 扫码登录一个 B 站账号
 magicd binding add 小号 1706666491      # 让它连接一个直播间
 magicd run                             # 启动

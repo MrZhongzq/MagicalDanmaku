@@ -220,6 +220,115 @@ func TestSetCooldownGroupsReplacesInsteadOfMerging(t *testing.T) {
 	}
 }
 
+// TestNewBindingHasUnknownLiveStatus 验证新绑定的默认开播状态是
+// unknown（尚未检测过），不是 offline——加绑定的那一刻还没探测过
+// 直播间，"没检测过"与"确认没开播"是两回事，不能用同一个值表示。
+func TestNewBindingHasUnknownLiveStatus(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	accID := mustAccount(t, s, "小号")
+
+	b, err := s.UpsertBinding(ctx, accID, "123")
+	if err != nil {
+		t.Fatalf("创建绑定报错: %v", err)
+	}
+	if b.LiveStatus != RoomLiveUnknown {
+		t.Errorf("LiveStatus = %q, 期望 %q", b.LiveStatus, RoomLiveUnknown)
+	}
+	if b.LiveCheckedAt != nil {
+		t.Errorf("LiveCheckedAt 应为 nil（从未检测过），实际 %v", b.LiveCheckedAt)
+	}
+	if b.AnchorUID != "" || b.AnchorName != "" {
+		t.Errorf("主播身份应为空，实际 uid=%q name=%q", b.AnchorUID, b.AnchorName)
+	}
+}
+
+// TestUpdateBindingRoomStatusWritesLiveAndOffline 验证探测成功时
+// live_status 与主播身份都被正确写入。
+func TestUpdateBindingRoomStatusWritesLiveAndOffline(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	accID := mustAccount(t, s, "小号")
+	b, err := s.UpsertBinding(ctx, accID, "123")
+	if err != nil {
+		t.Fatalf("创建绑定报错: %v", err)
+	}
+
+	if err := s.UpdateBindingRoomStatus(ctx, b.ID, RoomLiveLiving, "20285041", "舞月雅白"); err != nil {
+		t.Fatalf("写入直播间状态报错: %v", err)
+	}
+	got, err := s.GetBindingByID(ctx, b.ID)
+	if err != nil {
+		t.Fatalf("查询绑定报错: %v", err)
+	}
+	if got.LiveStatus != RoomLiveLiving {
+		t.Errorf("LiveStatus = %q, 期望 %q", got.LiveStatus, RoomLiveLiving)
+	}
+	if got.AnchorUID != "20285041" || got.AnchorName != "舞月雅白" {
+		t.Errorf("主播身份 = uid=%q name=%q", got.AnchorUID, got.AnchorName)
+	}
+	if got.LiveCheckedAt == nil {
+		t.Error("LiveCheckedAt 应被写入")
+	}
+}
+
+// TestUpdateBindingRoomStatusUnknownDoesNotClobberAnchor 覆盖探测失败
+// （调用方传空的 anchorUID/anchorName）时，不能用空值把上一次探测
+// 成功时留下的主播身份抹掉——网络抖动/风控这类瞬时失败不该让界面上
+// 已经显示出来的主播昵称突然消失。
+func TestUpdateBindingRoomStatusUnknownDoesNotClobberAnchor(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	accID := mustAccount(t, s, "小号")
+	b, err := s.UpsertBinding(ctx, accID, "123")
+	if err != nil {
+		t.Fatalf("创建绑定报错: %v", err)
+	}
+	if err := s.UpdateBindingRoomStatus(ctx, b.ID, RoomLiveLiving, "20285041", "舞月雅白"); err != nil {
+		t.Fatalf("首次写入报错: %v", err)
+	}
+
+	// 模拟下一轮探测失败：状态降级为 unknown，但没有新的主播身份可写
+	if err := s.UpdateBindingRoomStatus(ctx, b.ID, RoomLiveUnknown, "", ""); err != nil {
+		t.Fatalf("二次写入报错: %v", err)
+	}
+
+	got, err := s.GetBindingByID(ctx, b.ID)
+	if err != nil {
+		t.Fatalf("查询绑定报错: %v", err)
+	}
+	if got.LiveStatus != RoomLiveUnknown {
+		t.Errorf("LiveStatus = %q, 期望 %q", got.LiveStatus, RoomLiveUnknown)
+	}
+	if got.AnchorUID != "20285041" || got.AnchorName != "舞月雅白" {
+		t.Errorf("探测失败不该抹掉上一次已知的主播身份，实际 uid=%q name=%q",
+			got.AnchorUID, got.AnchorName)
+	}
+}
+
+// TestUpdateBindingRoomStatusRejectsInvalidValue 验证非法的三态取值
+// 会被拒绝，而不是悄悄写进库里破坏 CHECK 约束假定的取值范围。
+func TestUpdateBindingRoomStatusRejectsInvalidValue(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	accID := mustAccount(t, s, "小号")
+	b, err := s.UpsertBinding(ctx, accID, "123")
+	if err != nil {
+		t.Fatalf("创建绑定报错: %v", err)
+	}
+	if err := s.UpdateBindingRoomStatus(ctx, b.ID, "非法值", "", ""); err == nil {
+		t.Error("非法的状态取值应报错")
+	}
+}
+
+// TestGetBindingByIDNotFound 验证查不到的绑定返回 ErrNotFound。
+func TestGetBindingByIDNotFound(t *testing.T) {
+	s := testStore(t)
+	if _, err := s.GetBindingByID(context.Background(), 999999); !errors.Is(err, ErrNotFound) {
+		t.Errorf("应返回 ErrNotFound，实际: %v", err)
+	}
+}
+
 func TestCooldownGroupsEmptyReturnsEmptyMap(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()

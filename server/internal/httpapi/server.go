@@ -74,6 +74,12 @@ type Server struct {
 	// 可能为 nil：测试通常不关心这一步，处理器据此判空跳过。
 	lifecycle BindingLifecycle
 
+	// loginProbe/roomStatusProbe 由 run 注入，分别供扫码成功后立即探测
+	// 一次账号登录态、新增绑定后立即探测一次直播间状态使用（P5-2 任务
+	// 2）。都可能为 nil：测试通常不关心这一步，处理器据此判空跳过。
+	loginProbe      LoginProbe
+	roomStatusProbe RoomStatusProbe
+
 	// staticHandler 服务前端产物与 SPA 回退，由 mountStatic 装配。
 	// 不挂在 mux 上，见 static.go 里的说明。
 	staticHandler http.Handler

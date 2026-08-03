@@ -170,11 +170,39 @@ func (s *Store) CountUsers(ctx context.Context) (int, error) {
 	return n, nil
 }
 
-// EnsureAdmin 在库里一个用户都没有时创建管理员，并返回随机密码。
+// MinAdminPasswordLength 是管理员初始密码的最低长度要求。
 //
-// 密码只在这一次返回，之后无法找回——库里只有哈希。调用方必须把它
-// 打印出来。
-func (s *Store) EnsureAdmin(ctx context.Context) (username, password string, created bool, err error) {
+// 不做"必须含大小写/数字/符号"这类复杂度规则——那类规则挡不住
+// "aaaaaaaa" 这种一样弱的密码，只会逼用户去凑不必要的花活。真正
+// 要挡住的是"123"这种一望而知能被撞库撞出来的场景，长度下限便宜
+// 又有效。
+//
+// 导出给 cmd/magicd 用，在提示用户"密码至少要多少位"时保持同一个数字，
+// 不必各自维护一份。
+const MinAdminPasswordLength = 8
+
+// ErrWeakPassword 表示调用方显式指定的管理员初始密码强度不足。
+var ErrWeakPassword = fmt.Errorf("store: 密码长度至少需要 %d 位", MinAdminPasswordLength)
+
+// EnsureAdmin 在库里一个用户都没有时创建管理员。
+//
+// password 为空时，退回到生成一次性随机密码并原样返回给调用方打印——
+// 这条路径只留给"本地随手起一个实例，不必在意密码"的场景（以及本文件
+// 里验证随机路径本身的测试）。**是否允许这条路径是 CLI 层的产品判断，
+// 不是这里该做的**：`cmd/magicd migrate` 面对无头部署时，会在库为空
+// 且没有从 MAGICD_ADMIN_PASSWORD 读到密码时直接报错，根本不会带着空
+// 密码走到这里——这样无头用户不会再遇到"密码只在标准输出打印一次，
+// 装完容器就再也找不回"的处境。
+//
+// password 非空时按 MinAdminPasswordLength 校验强度，太弱则返回
+// ErrWeakPassword，不落库、不创建任何用户——总不能一边说"密码强度要
+// 有下限"一边把一个三位数密码悄悄建成了管理员。
+//
+// 库里已有用户（不管是不是管理员）时永远是空操作：这条函数只负责
+// "空库首次建管理员"，不能被拿来当作改密码的后门——否则任何知道
+// MAGICD_ADMIN_PASSWORD 环境变量取值的人都能借它绕过登录改掉已有
+// 管理员的密码。
+func (s *Store) EnsureAdmin(ctx context.Context, password string) (username, outPassword string, created bool, err error) {
 	n, err := s.CountUsers(ctx)
 	if err != nil {
 		return "", "", false, err
@@ -183,14 +211,19 @@ func (s *Store) EnsureAdmin(ctx context.Context) (username, password string, cre
 		return "", "", false, nil
 	}
 
-	pass, err := randomPassword()
-	if err != nil {
+	if password == "" {
+		password, err = randomPassword()
+		if err != nil {
+			return "", "", false, err
+		}
+	} else if len(password) < MinAdminPasswordLength {
+		return "", "", false, ErrWeakPassword
+	}
+
+	if _, err := s.CreateUser(ctx, defaultAdminName, password, true); err != nil {
 		return "", "", false, err
 	}
-	if _, err := s.CreateUser(ctx, defaultAdminName, pass, true); err != nil {
-		return "", "", false, err
-	}
-	return defaultAdminName, pass, true, nil
+	return defaultAdminName, password, true, nil
 }
 
 // randomPassword 生成 24 个字符的随机密码。

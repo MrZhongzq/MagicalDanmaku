@@ -63,6 +63,23 @@ type qrStarter interface {
 // SetQRLogin 替换扫码登录实现。仅测试使用。
 func (s *Server) SetQRLogin(l qrStarter) { s.qrLogin = l }
 
+// LoginProbe 是扫码成功后立即探测一次账号登录态的能力，不必等后台
+// 10 分钟一轮的检测循环才发现扫码没有真的成功（比如扫码那一刻账号
+// 被风控、或者拿到的 Cookie 缺字段）。
+//
+// httpapi 自己不知道怎么打 B 站接口——具体判定逻辑（nav 接口、
+// code=-101 代表未登录）留在 cmd/magicd 里已经写好且测试过的
+// checkAccountLogin，通过 SetLoginProbe 注入，与 BindingLifecycle 是
+// 同一种解耦方式。可能为 nil（测试环境通常不关心这一步），处理器判空
+// 后跳过——扫码成功这个主流程不该被这一步缺失或探测失败拖累。
+type LoginProbe interface {
+	// ProbeNow 探测 accountName 对应账号的登录态并写库。
+	ProbeNow(ctx context.Context, accountName string)
+}
+
+// SetLoginProbe 注入登录态立即检测能力。run 在装配完成后调用一次。
+func (s *Server) SetLoginProbe(p LoginProbe) { s.loginProbe = p }
+
 func (s *Server) handleListAccounts(w http.ResponseWriter, r *http.Request) {
 	u := userFrom(r.Context())
 
@@ -171,6 +188,16 @@ func (s *Server) handleQRCodePoll(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.qrs.delete(key)
+
+		// 立即探测一次登录态，不必等后台 10 分钟一轮的检测循环——用户
+		// 刚扫完码，此刻正是最该马上知道结果的时候。同步调用（而不是
+		// 起个 goroutine 异步做）：探测本身很轻量（一次 nav 请求），
+		// 同步等它做完，才能保证响应返回时账号的登录态已经是最新的，
+		// 而不是"响应说成功了，但状态要过一会儿才更新"。
+		if s.loginProbe != nil {
+			s.loginProbe.ProbeNow(r.Context(), pending.AccountName)
+		}
+
 		respondJSON(w, http.StatusOK, map[string]string{
 			"status":  "success",
 			"account": pending.AccountName,
