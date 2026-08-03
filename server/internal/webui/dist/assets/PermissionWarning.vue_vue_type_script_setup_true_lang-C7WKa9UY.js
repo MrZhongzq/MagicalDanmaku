@@ -1,1 +1,0 @@
-import{e as t,G as a,C as r,E as o,M as s,a3 as n,D as i}from"./index-B4uFN2uo.js";import{b as p}from"./BindingSelector-BkMwuv5P.js";const l=t({__name:"PermissionWarning",props:{text:{}},setup(e){return(m,c)=>(a(),r(i(p),{type:"warning",bordered:!1,style:{"margin-bottom":"12px"}},{default:o(()=>[s(n(e.text),1)]),_:1}))}});export{l as _};

@@ -159,6 +159,38 @@ describe('Moderation 页：正文里也有账号+直播间选择器', () => {
     expect(selector.exists()).toBe(true)
     expect(selector.props('requiredPerm')).toBe('user:block')
   })
+
+  // 这条原来钉在 Shell.test.ts 上——Shell 头部曾经有一份全局 BindingSelector，
+  // 「绑定列表加载失败」的回显与重试就是靠它验证的。协调者裁决去掉那份全局
+  // 选择器（只保留页面正文里这份）之后，Shell 不再展示这个状态，这条断言
+  // 挪到这里，改成验证页面正文里的 BindingSelector 一样能原样回显后端错误、
+  // 点「重试」一样能重新拉取绑定列表——不是删掉覆盖，是换了个真实成立的落点。
+  it('绑定列表加载失败时，页面正文里的选择器原样显示后端错误，点「重试」会重新请求', async () => {
+    // Moderation.vue 不像 Shell.vue 那样在 onMounted 里自己调
+    // bindings.refresh()——那是 Shell 的职责，这里只挂 Moderation 本身。
+    // 所以「加载失败」这个前提用手动置 loadError 模拟（等价于
+    // bindings.refresh() 内部失败后的状态），点「重试」触发的才是这条
+    // 用例里第一次、也是唯一一次真实的 GET /api/bindings。
+    const f = vi.fn().mockImplementation((url: string) => {
+      if (url === '/api/bindings') return Promise.resolve(ok([绑定]))
+      if (url.endsWith('/blocklist')) return Promise.resolve(ok([]))
+      return Promise.resolve(ok({ status: 'ok' }))
+    })
+    vi.stubGlobal('fetch', f)
+
+    const { bindings, router } = setupStores(['user:block'])
+    bindings.loadError = '数据库连不上'
+    const wrapper = await mountModeration(router)
+
+    expect(wrapper.text()).toContain('数据库连不上')
+
+    const retryBtn = wrapper.findAll('button').find((b) => b.text() === '重试')
+    expect(retryBtn).toBeTruthy()
+    await retryBtn!.trigger('click')
+    await flushPromises()
+
+    expect(wrapper.text()).not.toContain('数据库连不上')
+  })
 })
 
 describe('Moderation 失败回显：后端原文，不包装', () => {

@@ -4,7 +4,6 @@ import { RouterView, useRoute, useRouter } from 'vue-router'
 import { NLayout, NLayoutHeader, NLayoutSider, NMenu, NButton, useMessage } from 'naive-ui'
 import { useAuthStore } from '@/stores/auth'
 import { useBindingsStore } from '@/stores/bindings'
-import BindingSelector from '@/components/BindingSelector.vue'
 
 const auth = useAuthStore()
 const bindings = useBindingsStore()
@@ -62,11 +61,13 @@ function doLogout() {
     </NLayoutSider>
     <NLayout>
       <NLayoutHeader bordered class="header">
-        <div class="left">
-          <!-- 选择器与「加载中/加载失败」的判断收进了 BindingSelector，
-               各页面正文里的同款选择器与这里共用一份实现，见该组件头部注释。 -->
-          <BindingSelector />
-        </div>
+        <!--
+          这里以前放着全局的 BindingSelector。协调者裁决去掉它，只保留各
+          页面正文里的那份——理由：用户抱怨的正是「泛泛」，这个全局选择器
+          跟当前页面看不出关联，留着反而会让人怀疑页头和页内两个下拉框
+          是不是两回事。故意留空，不要在这里塞别的东西回去。
+        -->
+        <div class="left"></div>
         <div class="right">
           <span class="who">{{ auth.user?.username }}</span>
           <NButton text size="small" @click="doLogout"> 退出 </NButton>

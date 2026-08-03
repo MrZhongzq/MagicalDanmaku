@@ -14,13 +14,6 @@ function ok(body: unknown) {
   })
 }
 
-function err(status: number, message: string) {
-  return new Response(JSON.stringify({ error: message }), {
-    status,
-    headers: { 'Content-Type': 'application/json' },
-  })
-}
-
 // Shell 本身没有注册 NMessageProvider/NDialogProvider（那是 App.vue 的事），
 // 但 go() 里用 useMessage() 提示「还没做」，Task 5 的 Accounts.vue（挂在
 // /accounts 路由下，随 Shell 一起渲染）用 useDialog() 做删除确认，
@@ -101,42 +94,13 @@ describe('Shell', () => {
     expect(router.currentRoute.value.name).toBe('accounts')
   })
 
-  // ---- 全分支终审第 2 条：GET /api/bindings 非 401 失败不能一条提示都不出现 ----
-  //
-  // 原来 bindings.refresh() 只有 finally 没有 catch，失败时顶部选择器
-  // 渲染 placeholder="没有可用的直播间"，与「这个账号确实没绑过直播间」
-  // 在界面上完全无法区分。
-  it('绑定列表加载失败时显示后端错误原文，点「重试」会重新请求', async () => {
-    let bindingsCallCount = 0
-    const f = vi.fn().mockImplementation((url: string) => {
-      if (url === '/api/bindings') {
-        bindingsCallCount += 1
-        if (bindingsCallCount === 1) {
-          return Promise.resolve(err(500, '数据库连不上'))
-        }
-        return Promise.resolve(ok([]))
-      }
-      return Promise.resolve(ok([]))
-    })
-    vi.stubGlobal('fetch', f)
-
-    const auth = useAuthStore()
-    auth.user = { id: 1, username: '张三', isAdmin: false, createdAt: '' }
-    auth.loading = false
-
-    await router.push('/accounts')
-    await router.isReady()
-
-    const wrapper = mount(Wrapped, { global: { plugins: [router] } })
-    await flushPromises()
-
-    expect(wrapper.text()).toContain('数据库连不上')
-
-    const retryBtn = wrapper.findAll('button').find((b) => b.text() === '重试')
-    expect(retryBtn).toBeTruthy()
-    await retryBtn!.trigger('click')
-    await flushPromises()
-
-    expect(wrapper.text()).not.toContain('数据库连不上')
-  })
+  // P5-3 复审裁决：Shell 头部原先内联的 BindingSelector 已经去掉（协调者
+  // 认定它是「泛泛」的那一个，且与页面内的选择器同屏出现会让人怀疑两者
+  // 是不是一回事），Shell 自己不再负责展示「绑定列表加载失败」。
+  // 这条行为——原样显示后端错误 + 点「重试」重新请求——现在只在渲染了
+  // BindingSelector 的页面里成立，覆盖见 BindingSelector.test.ts（组件级）
+  // 与 Moderation.test.ts 的「绑定列表加载失败」用例（页面挂载级）。
+  // Shell 本身仍然负责触发首次 bindings.refresh()（onMounted），这条留在
+  // 上面两处已实现的路由跳转测试里间接验证（stub 的 fetch 必须被调用，
+  // 不然 accounts/moderation 这些页面根本拿不到绑定列表）。
 })
