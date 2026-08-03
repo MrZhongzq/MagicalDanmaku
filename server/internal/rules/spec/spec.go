@@ -72,6 +72,14 @@ type Aggregate struct {
 	Window   Duration `yaml:"window"   json:"window"`
 	MinCount int      `yaml:"minCount" json:"minCount,omitempty"`
 	By       string   `yaml:"by"       json:"by"`
+	// Solo 描述「单人优先，多人兜底」的双轨聚合，nil 表示不启用。
+	// 见 rules.SoloSpec 的注释——判定标准按件数，用户已明确裁决。
+	Solo *Solo `yaml:"solo" json:"solo,omitempty"`
+}
+
+// Solo 是单人优先聚合规格的序列化形式。
+type Solo struct {
+	MinItems int `yaml:"minItems" json:"minItems"`
 }
 
 // Action 是一个动作的序列化形式。

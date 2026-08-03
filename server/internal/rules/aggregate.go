@@ -136,7 +136,8 @@ func (a *Aggregator) Close() {
 	}
 }
 
-// drainLocked 清空缓冲区并按 By 分组产出 Trigger。调用者需持有锁。
+// drainLocked 清空缓冲区，先按 Solo 摘出该单独结算的用户，剩下的再按
+// By 分组产出 Trigger。调用者需持有锁。
 func (a *Aggregator) drainLocked() []Trigger {
 	if len(a.buckets) == 0 {
 		a.stopTimersLocked()
@@ -150,10 +151,90 @@ func (a *Aggregator) drainLocked() []Trigger {
 	a.buckets = make(map[string]*bucket)
 	a.stopTimersLocked()
 
-	// 按首次出现顺序排序，保证 users 数组顺序稳定可预测
+	// 按首次出现顺序排序，保证 users/solo 分组顺序稳定可预测
 	sortBucketsBySeq(buckets)
 
-	// 第二步：按 By 分组
+	solo, rest := a.splitSoloLocked(buckets)
+
+	// 结算顺序：先出单人优先的，剩下的零散礼物再合并——用户原话「单人的
+	// 礼物累加逻辑要比多人多礼物优先级高」。
+	out := groupSoloByUser(solo)
+	out = append(out, a.groupRest(rest)...)
+	return out
+}
+
+// splitSoloLocked 把窗口内的桶拆成两拨：件数（不含盲盒）达到
+// spec.Solo.MinItems 阈值的用户的全部桶（solo，稍后跨礼物合并成一条），
+// 与其余桶（rest，走 spec.By 原有分组）。Solo 为 nil 或 MinItems<=0
+// 时不拆分，全部落入 rest，等价于旧版行为。
+//
+// 盲盒桶不计入件数统计、也不会被划进 solo——盲盒必须继续按「送礼人+
+// 盲盒类型」单独结算盈亏（P4-4 硬性要求），让它参与这里的件数阈值判定
+// 会把它的数量算进常规礼物统计，且丢失盲盒专属的盈亏字段。正常情况下
+// 盲盒会被前端拼的 when 条件挡在这个 Aggregator 之外（buildGiftRule 的
+// gift.isBlindBox==false 排除条件），这里的排除是双重保险：哪怕规则
+// 配置疏漏让盲盒事件混进了这个 Aggregator，也不会污染单人阈值判定或被
+// 卷进某个凑巧同 UID 达标用户的合并结果里。
+func (a *Aggregator) splitSoloLocked(buckets []*bucket) (solo, rest []*bucket) {
+	if a.spec.Solo == nil || a.spec.Solo.MinItems <= 0 {
+		return nil, buckets
+	}
+
+	totals := make(map[string]int64, len(buckets))
+	for _, b := range buckets {
+		if isBlindBoxBucket(b) {
+			continue
+		}
+		totals[b.uid] += giftCountOf(b)
+	}
+
+	qualifying := make(map[string]bool, len(totals))
+	for uid, total := range totals {
+		if total >= int64(a.spec.Solo.MinItems) {
+			qualifying[uid] = true
+		}
+	}
+
+	for _, b := range buckets {
+		if !isBlindBoxBucket(b) && qualifying[b.uid] {
+			solo = append(solo, b)
+		} else {
+			rest = append(rest, b)
+		}
+	}
+	return solo, rest
+}
+
+// groupSoloByUser 把 solo 桶按 uid 分组，每个用户合并成一条 Trigger——
+// 跨礼物合并统计，是用户裁决「单人累加可以跨礼物合并」在这里唯一的
+// 落地点：分组键只用 uid，不像 AggregateByGift 那样再带礼物名。
+func groupSoloByUser(solo []*bucket) []Trigger {
+	if len(solo) == 0 {
+		return nil
+	}
+	groups := make(map[string][]*bucket, len(solo))
+	var order []string
+	for _, b := range solo {
+		if _, ok := groups[b.uid]; !ok {
+			order = append(order, b.uid)
+		}
+		groups[b.uid] = append(groups[b.uid], b)
+	}
+	out := make([]Trigger, 0, len(order))
+	for _, uid := range order {
+		out = append(out, mergeBuckets(groups[uid]))
+	}
+	return out
+}
+
+// groupRest 把（未被 Solo 摘走的）桶按 spec.By 分组产出 Trigger。
+// 这是旧版 drainLocked 第二步的原样迁移，Solo 为 nil 时输入即是全部
+// 桶，行为与引入双轨逻辑之前完全一致。
+func (a *Aggregator) groupRest(buckets []*bucket) []Trigger {
+	if len(buckets) == 0 {
+		return nil
+	}
+
 	groups := make(map[string][]*bucket)
 	var order []string
 	for _, b := range buckets {
@@ -180,6 +261,26 @@ func (a *Aggregator) drainLocked() []Trigger {
 		out = append(out, mergeBuckets(groups[g]))
 	}
 	return out
+}
+
+// isBlindBoxBucket 判断桶是否属于盲盒开出的礼物——splitSoloLocked 靠它
+// 把盲盒排除在单人优先的件数统计与分组之外。
+func isBlindBoxBucket(b *bucket) bool {
+	name, ok := LookupPath(b.vars, "gift.blindBox.name")
+	if !ok {
+		return false
+	}
+	return toString(name) != ""
+}
+
+// giftCountOf 取出桶累积的礼物件数，非礼物桶（如进场事件）返回 0——
+// 单人优先本就只对礼物事件有意义，其它事件类型的桶永远凑不满阈值。
+func giftCountOf(b *bucket) int64 {
+	v, ok := LookupPath(b.vars, "gift.count")
+	if !ok {
+		return 0
+	}
+	return toInt64(v)
 }
 
 // groupKey 按 spec.By 计算分组键。

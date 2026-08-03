@@ -659,6 +659,160 @@ func TestAggregateByBlindBoxSeparatesProfitByName(t *testing.T) {
 	}
 }
 
+// TestAggregateSoloPriorityScenario 原样照抄用户 2026-08-03 给的验收场景：
+// a、b、c 短时间内都送了小花花与人气票→三人应合并成一条；同时 d 疯狂刷
+// 粉丝团灯牌（件数达标）→d 应单独一条。用户原话「单人的礼物累加逻辑要
+// 比多人多礼物优先级高，多人多礼物主要是收集散的礼物」，且结算顺序是
+// 「先挑出该单独答谢的人各出一条，剩下的零散礼物再合并成多人条」——
+// 断言顺序也钉住：solo 条目在前，多人合并条目在后。
+func TestAggregateSoloPriorityScenario(t *testing.T) {
+	c := &collector{}
+	agg := NewAggregator(AggregateSpec{
+		Window: time.Hour, By: AggregateByType, Solo: &SoloSpec{MinItems: 3},
+	}, c.add)
+	defer agg.Close()
+
+	agg.Add(giftEvent("a", "a", "小花花", 1, 100))
+	agg.Add(giftEvent("b", "b", "小花花", 1, 100))
+	agg.Add(giftEvent("c", "c", "小花花", 1, 100))
+	agg.Add(giftEvent("a", "a", "人气票", 1, 10))
+	agg.Add(giftEvent("b", "b", "人气票", 1, 10))
+	agg.Add(giftEvent("c", "c", "人气票", 1, 10))
+	// d 刷 12 个粉丝团灯牌，单件礼物件数已经达到阈值 3，应单独出一条。
+	agg.Add(giftEvent("d", "d", "粉丝团灯牌", 12, 12))
+	agg.Flush()
+
+	got := c.all()
+	if len(got) != 2 {
+		t.Fatalf("应产出 2 条 Trigger（d 单独一条 + abc 合并一条），实际 %d 条", len(got))
+	}
+
+	// 顺序：solo（d）在前，剩余多人合并（abc）在后。
+	soloTrigger := got[0]
+	multiTrigger := got[1]
+
+	soloUsers, _ := soloTrigger.Vars["users"].([]string)
+	if len(soloUsers) != 1 || soloUsers[0] != "d" {
+		t.Fatalf("第 1 条应是 d 的单独答谢，实际 users=%v", soloUsers)
+	}
+	if cnt, _ := LookupPath(soloTrigger.Vars, "gift.count"); cnt != int64(12) {
+		t.Errorf("d 的 gift.count = %v，期望 12", cnt)
+	}
+
+	multiUsers, _ := multiTrigger.Vars["users"].([]string)
+	if len(multiUsers) != 3 {
+		t.Fatalf("第 2 条应是 abc 三人合并，实际 users=%v", multiUsers)
+	}
+	wantUsers := map[string]bool{"a": true, "b": true, "c": true}
+	for _, u := range multiUsers {
+		if !wantUsers[u] {
+			t.Errorf("多人合并条目里出现了不该在的用户 %q（users=%v）", u, multiUsers)
+		}
+	}
+	gifts, _ := multiTrigger.Vars["gifts"].([]string)
+	wantGifts := map[string]bool{"小花花": true, "人气票": true}
+	if len(gifts) != 2 {
+		t.Fatalf("多人合并条目的 gifts 应是 [小花花 人气票]，实际 %v", gifts)
+	}
+	for _, g := range gifts {
+		if !wantGifts[g] {
+			t.Errorf("多人合并条目里出现了不该在的礼物 %q（gifts=%v）", g, gifts)
+		}
+	}
+	// d 的灯牌不该混进多人合并条目里
+	for _, g := range gifts {
+		if g == "粉丝团灯牌" {
+			t.Errorf("d 的粉丝团灯牌不该出现在多人合并条目里，应该单独结算：gifts=%v", gifts)
+		}
+	}
+}
+
+// TestAggregateSoloAccumulatesAcrossGifts 钉住 6d：单人累加要跨礼物合并
+// 统计——同一用户在窗口内送了两种不同礼物，只要总件数达标，应该合并成
+// 一条，而不是分别各出一条（旧的 AggregateByGift 语义会按礼物名切开，
+// 这条测试就是要拦住「改回旧语义」这种变异）。
+func TestAggregateSoloAccumulatesAcrossGifts(t *testing.T) {
+	c := &collector{}
+	agg := NewAggregator(AggregateSpec{
+		Window: time.Hour, By: AggregateByUser, Solo: &SoloSpec{MinItems: 3},
+	}, c.add)
+	defer agg.Close()
+
+	agg.Add(giftEvent("d", "d", "小花花", 2, 200))
+	agg.Add(giftEvent("d", "d", "人气票", 1, 10)) // 总件数 2+1=3，达标
+
+	agg.Flush()
+
+	got := c.all()
+	if len(got) != 1 {
+		t.Fatalf("应合并成 1 条跨礼物答谢，实际 %d 条", len(got))
+	}
+	gifts, _ := got[0].Vars["gifts"].([]string)
+	if len(gifts) != 2 {
+		t.Fatalf("单人累加应跨礼物合并，gifts 应有 2 种，实际 %v", gifts)
+	}
+}
+
+// TestAggregateSoloThresholdExcludesBlindBoxCount 是 P4-4 已定死的硬性
+// 要求在新双轨逻辑上的回归防线：盲盒礼物的件数不能计入单人优先的阈值
+// 判定。
+//
+// 正常情况下盲盒会被前端拼的 when 条件挡在这个 Aggregator 之外（见
+// buildGiftRule），这里直接构造盲盒事件混进同一个 Aggregator 模拟误
+// 配置，验证即使盲盒事件真的流入了这个聚合器，也不会把它的件数算进
+// 某个用户的单人优先阈值判定，把本不该单独结算的人错误摘出来。
+//
+// 用 e（常规礼物 2 件，达不到阈值 3；若盲盒的 3 件被错误计入总件数会
+// 凑到 5，超过阈值）与 f（常规礼物 1 件）两个用户、By: AggregateByType
+// 验证：e 不应该被单独摘出来（那样会让 e 与 f 分成 2 条），e 的常规礼物
+// 与盲盒桶都应该照旧走 AggregateByType 的分组，跟 f 合并成 1 条——
+// 若变异把盲盒件数算进了阈值统计，这里会变成 2 条，测试就会红。
+func TestAggregateSoloThresholdExcludesBlindBoxCount(t *testing.T) {
+	c := &collector{}
+	agg := NewAggregator(AggregateSpec{
+		Window: time.Hour, By: AggregateByType, Solo: &SoloSpec{MinItems: 3},
+	}, c.add)
+	defer agg.Close()
+
+	agg.Add(giftEvent("e", "e", "小花花", 2, 200))
+	agg.Add(blindGiftEvent("e", "e", "幸运盲盒", "星光铃铛", 5000, 5200, 3))
+	agg.Add(giftEvent("f", "f", "人气票", 1, 10))
+	agg.Flush()
+
+	got := c.all()
+	if len(got) != 1 {
+		t.Fatalf("盲盒件数不该计入单人优先阈值，e 不该被单独摘出来，应与 f 合并成 1 条，实际 %d 条：%+v", len(got), got)
+	}
+
+	gifts, _ := got[0].Vars["gifts"].([]string)
+	wantGifts := map[string]bool{"小花花": true, "星光铃铛": true, "人气票": true}
+	if len(gifts) != 3 {
+		t.Fatalf("合并结果 gifts = %v，期望包含小花花/星光铃铛/人气票三种", gifts)
+	}
+	for _, g := range gifts {
+		if !wantGifts[g] {
+			t.Errorf("合并结果里出现了不该在的礼物 %q", g)
+		}
+	}
+}
+
+// TestAggregateSoloNilBehavesLikeOldVersion 确保 Solo 为 nil（默认值）
+// 时行为与旧版完全一致，不会因为引入双轨逻辑而影响所有既有配置。
+func TestAggregateSoloNilBehavesLikeOldVersion(t *testing.T) {
+	c := &collector{}
+	agg := NewAggregator(AggregateSpec{Window: time.Hour, By: AggregateByType}, c.add)
+	defer agg.Close()
+
+	agg.Add(giftEvent("1", "甲", "小花花", 100, 100)) // 件数很大也不该被单独摘出
+	agg.Add(giftEvent("2", "乙", "小花花", 1, 100))
+	agg.Flush()
+
+	got := c.all()
+	if len(got) != 1 {
+		t.Fatalf("Solo 为 nil 时应保持旧行为，全部合并成 1 条，实际 %d 条", len(got))
+	}
+}
+
 // TestFormatYuan 钉住「元」展示字符串的换算：原始值单位是 1/100 电池，
 // 元 = 原始值 / 1000。只用整数运算，不经过 float64，避免出现
 // "-4.099999999999999" 这类不能读的展示值。

@@ -423,3 +423,48 @@ func TestToRuleCarriesAggregateFields(t *testing.T) {
 		t.Errorf("Aggregate = %+v, 期望 %+v", *r.Aggregate, want)
 	}
 }
+
+// TestToRuleCarriesAggregateSolo 钉住 spec.Solo → rules.SoloSpec 的转换
+// ——单人优先是这批需求里唯一需要新增序列化字段的部分，漏了转换的话
+// 前端拼出的 aggregate.solo 会在进 ToRule 这一步被悄悄丢弃，界面上看着
+// 配了、后端却从来没生效。
+func TestToRuleCarriesAggregateSolo(t *testing.T) {
+	r, err := spec.Rule{
+		Name: "礼物答谢",
+		On:   []string{"gift"},
+		Aggregate: &spec.Aggregate{
+			Window: spec.Duration(20 * time.Second),
+			By:     "type",
+			Solo:   &spec.Solo{MinItems: 3},
+		},
+		Do: []spec.Action{{Type: "log"}},
+	}.ToRule()
+	if err != nil {
+		t.Fatalf("ToRule 报错: %v", err)
+	}
+	if r.Aggregate.Solo == nil {
+		t.Fatal("Aggregate.Solo 不应为 nil")
+	}
+	if r.Aggregate.Solo.MinItems != 3 {
+		t.Errorf("Solo.MinItems = %d, 期望 3", r.Aggregate.Solo.MinItems)
+	}
+}
+
+// TestToRuleRejectsInvalidAggregateSolo 确认 Solo.MinItems<=0 这类非法
+// 配置在 ToRule 阶段就被 Validate 拦住，不会带着一个「永远不生效」的
+// 单人优先配置悄悄进入运行期。
+func TestToRuleRejectsInvalidAggregateSolo(t *testing.T) {
+	_, err := spec.Rule{
+		Name: "礼物答谢",
+		On:   []string{"gift"},
+		Aggregate: &spec.Aggregate{
+			Window: spec.Duration(20 * time.Second),
+			By:     "type",
+			Solo:   &spec.Solo{MinItems: 0},
+		},
+		Do: []spec.Action{{Type: "log"}},
+	}.ToRule()
+	if err == nil {
+		t.Fatal("Solo.MinItems=0 应当在 ToRule 阶段报错")
+	}
+}

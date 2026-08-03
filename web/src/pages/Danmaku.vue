@@ -85,6 +85,7 @@
  * 便利性优化，不是功能缺口，因此没有计入悬空清单。
  */
 import type { Action, Aggregate, Condition, Rule, RuleView } from '@/api/rule-types'
+import { PICK_MODE_OPTIONS, parsePickMode, type PickMode } from '@/api/rule-types'
 import { PK_RULE_NAME, PK_VISIT_RULE_NAME } from '@/components/PkPanel.vue'
 
 /** 进房欢迎规则的固定名字，前端靠它从规则列表里认领已保存的配置。 */
@@ -137,8 +138,13 @@ function arraysEqualUnordered(a: number[], b: unknown): boolean {
 export interface EnterFilter {
   /** 只欢迎佩戴粉丝牌的用户（口径见 §13.2：已点亮 && 是本房间的牌子）。 */
   wearMedalOnly: boolean
-  /** 粉丝牌等级下限，null 表示不限。 */
-  minMedalLevel: number | null
+  /**
+   * 是否启用「粉丝牌等级下限」筛选——独立勾选，不勾即不启用
+   * （P5-4 5a：旧版是个「填了就生效」的输入框，用户要的是显式开关）。
+   */
+  minMedalLevelEnabled: boolean
+  /** 粉丝牌等级下限，仅 minMedalLevelEnabled 为真时生效。 */
+  minMedalLevel: number
   /** 只欢迎大航海用户。 */
   guardOnly: boolean
   /** 大航海档位下限，仅 guardOnly 为真时生效。 */
@@ -146,7 +152,13 @@ export interface EnterFilter {
 }
 
 export function defaultEnterFilter(): EnterFilter {
-  return { wearMedalOnly: false, minMedalLevel: null, guardOnly: false, guardTier: 'captain' }
+  return {
+    wearMedalOnly: false,
+    minMedalLevelEnabled: false,
+    minMedalLevel: 1,
+    guardOnly: false,
+    guardTier: 'captain',
+  }
 }
 
 /**
@@ -154,6 +166,10 @@ export function defaultEnterFilter(): EnterFilter {
  *
  * roomId 用于粉丝牌的「本房间」判定——§13.2 的口径要求牌子必须是本房间
  * 主播的，否则「别家的牌子也算」，与用户原话不符。
+ *
+ * **筛选条件是 AND 叠加，不是互斥**（P5-4 5b）：勾了粉丝牌等级下限、又
+ * 勾了只欢迎大航海，两条都要满足——`leaves` 超过一条时拼成 `all` 树，
+ * `all` 本身就是「全部满足」的语义，不需要额外逻辑。
  */
 export function buildEnterCondition(f: EnterFilter, roomId: string): Condition | undefined {
   const leaves: Condition[] = []
@@ -164,7 +180,7 @@ export function buildEnterCondition(f: EnterFilter, roomId: string): Condition |
       leaves.push({ field: 'user.medal.roomId', op: 'eq', value: roomId })
     }
   }
-  if (f.minMedalLevel !== null && f.minMedalLevel > 0) {
+  if (f.minMedalLevelEnabled && f.minMedalLevel > 0) {
     leaves.push({ field: 'user.medal.level', op: 'gte', value: f.minMedalLevel })
   }
   if (f.guardOnly) {
@@ -187,6 +203,7 @@ export function parseEnterFilter(condition: Condition | undefined): EnterFilter 
       filter.wearMedalOnly = true
     }
     if (leaf.field === 'user.medal.level' && leaf.op === 'gte' && typeof leaf.value === 'number') {
+      filter.minMedalLevelEnabled = true
       filter.minMedalLevel = leaf.value
     }
     if (leaf.field === 'user.guardLevel' && leaf.op === 'in') {
@@ -203,23 +220,6 @@ export function parseEnterFilter(condition: Condition | undefined): EnterFilter 
 }
 
 // ---- 合并/去重窗口，进房与礼物共用同一套草稿形状 ----
-
-/**
- * PickMode 直接对应 spec.Action.Pick 的取值（`""`/`"random"`/`"sequential"`）。
- * 草稿态不使用空字符串——`parseXxxDraft` 把「空」也当作 `'random'`
- * 处理（与历史配置兼容），保存时统一显式写出 `'random'` 或 `'sequential'`。
- */
-export type PickMode = 'random' | 'sequential'
-
-export const PICK_MODE_OPTIONS: { label: string; value: PickMode }[] = [
-  { label: '随机抽取', value: 'random' },
-  { label: '轮询（按顺序循环）', value: 'sequential' },
-]
-
-/** parsePickMode 把后端的 pick 字段（可能是空字符串或缺省）还原成草稿用的 PickMode。 */
-function parsePickMode(pick: string | undefined): PickMode {
-  return pick === 'sequential' ? 'sequential' : 'random'
-}
 
 /** 把秒数转成 spec.Duration 要求的字符串形式，如 "180s"。 */
 function secondsToDuration(seconds: number): string {
@@ -255,21 +255,26 @@ export function secondsFromDuration(d: string | undefined, fallback: number): nu
 
 // ---- 进房欢迎草稿 ----
 
-export type EnterGroupMode = 'merge' | 'dedupe'
-
-/** merge → 按类型合并（多人合并为一条）；dedupe → 按用户去重（仅频次限制，不合并多人）。 */
-const ENTER_GROUP_MODE_BY: Record<EnterGroupMode, string> = { merge: 'type', dedupe: 'user' }
-const ENTER_BY_TO_GROUP_MODE: Record<string, EnterGroupMode> = { type: 'merge', user: 'dedupe' }
-
-export const ENTER_GROUP_MODE_OPTIONS: { label: string; value: EnterGroupMode }[] = [
-  { label: '窗口内多人合并为一条欢迎', value: 'merge' },
-  { label: '仅按用户去重（不合并，用于频次限制）', value: 'dedupe' },
-]
-
+/**
+ * P5-4 5c：「窗口合并」与「用户去重」不是二选一，而是先后两个阶段——
+ * 同一用户在窗口内只算一次（去重）**恒生效**，这是聚合第一步
+ * （`server/internal/rules/aggregate.go` 的 bucketKey 按 类型+UID 分桶）
+ * 天然带来的，也是 P0 联调发现的「ENTRY_EFFECT + INTERACT_WORD_V2」
+ * 重复问题的修复前提，不能做成可关闭的开关。
+ *
+ * 真正独立于「去重」之外、值得暴露成开关的是**去重之后要不要把多个人
+ * 合并成一条**：`mergeEnabled` 为真时按 `by: type` 分组（配合 minCount
+ * 的「人数不够就每人各自欢迎，人够了才合并」兜底）；为假时按 `by: user`
+ * 分组，去重后的每个人各自一条，永远不合并——用户原话「用于频次限制」
+ * 描述的正是这种模式。旧版把这两件事做成一个 radio，误导用户以为
+ * 「不合并」意味着「不去重」；改成一个开关 + 恒生效的去重说明后，两件
+ * 事各自计算、效果天然叠加，不再是互斥选项。
+ */
 export interface EnterDraft {
   enabled: boolean
   filter: EnterFilter
-  groupMode: EnterGroupMode
+  /** 去重后是否把多人合并成一条；关闭则每个去重后的人各自一条。 */
+  mergeEnabled: boolean
   windowSeconds: number
   minCount: number
   pickMode: PickMode
@@ -281,7 +286,7 @@ export function defaultEnterDraft(): EnterDraft {
   return {
     enabled: true,
     filter: defaultEnterFilter(),
-    groupMode: 'merge',
+    mergeEnabled: true,
     windowSeconds: 180,
     minCount: 2,
     pickMode: 'random',
@@ -316,10 +321,10 @@ export function buildEnterRule(draft: EnterDraft, roomId: string): Rule {
     enabled: draft.enabled,
     on: [ENTER_ON],
     aggregate: buildAggregateCommon({
-      by: ENTER_GROUP_MODE_BY[draft.groupMode],
+      by: draft.mergeEnabled ? 'type' : 'user',
       windowSeconds: draft.windowSeconds,
       minCount: draft.minCount,
-      applyMinCount: draft.groupMode === 'merge',
+      applyMinCount: draft.mergeEnabled,
     }),
     do: [
       {
@@ -345,7 +350,7 @@ export function parseEnterDraft(rule: Rule | null): EnterDraft {
 
   const agg = rule.aggregate
   if (agg) {
-    draft.groupMode = ENTER_BY_TO_GROUP_MODE[agg.by] ?? 'merge'
+    draft.mergeEnabled = agg.by !== 'user'
     draft.windowSeconds = secondsFromDuration(agg.window, draft.windowSeconds)
     if (agg.minCount !== undefined) draft.minCount = agg.minCount
   }
@@ -367,21 +372,36 @@ function findDanmakuAction(actions: Action[] | undefined): Action | undefined {
 
 // ---- 礼物答谢草稿 ----
 
-export type GiftGroupMode = 'merge' | 'dedupeGift'
-
-/** merge → 按类型合并（多人多礼物合并为一条）；dedupeGift → 同用户同礼物计数累加。 */
-const GIFT_GROUP_MODE_BY: Record<GiftGroupMode, string> = { merge: 'type', dedupeGift: 'gift' }
-const GIFT_BY_TO_GROUP_MODE: Record<string, GiftGroupMode> = { type: 'merge', gift: 'dedupeGift' }
-
-export const GIFT_GROUP_MODE_OPTIONS: { label: string; value: GiftGroupMode }[] = [
-  { label: '窗口内全部合并为一条答谢（可多人多礼物）', value: 'merge' },
-  { label: '同一用户同一礼物计数累加（不跨礼物合并）', value: 'dedupeGift' },
-]
-
+/**
+ * P5-4 6a-6d：「多人多礼物合并」与「单人礼物累加」不是二选一，而是两个
+ * 独立功能，可以同时开、效果叠加——用户给的验收场景：a、b、c 短时间内
+ * 都送了小花花与人气票 → 三人合并成一条；同时 d 疯狂刷粉丝团灯牌 →
+ * d 单独答谢。用户原话「单人的礼物累加逻辑要比多人多礼物优先级高，
+ * 多人多礼物主要是收集散的礼物」。
+ *
+ * 后端 `server/internal/rules/aggregate.go` 的 `AggregateSpec.Solo` 就是
+ * 这条裁决的落地：`splitSoloLocked` 先把件数（不含盲盒）达到
+ * `soloThreshold` 的用户摘出来，跨礼物合并成一条单独答谢；剩下的零散
+ * 礼物再按 `by` 分组——`multiMergeEnabled` 决定剩下这部分要不要合并成
+ * 一条（`by: type`，配合 minCount 兜底）还是仍按用户分开
+ * （`by: user`，同样跨礼物合并，只是不跨用户合并）。
+ *
+ * `soloEnabled`/`multiMergeEnabled` 两个布尔各自独立勾选，不是 radio：
+ * 都开 → 完整的双轨逻辑（验收场景）；只开单人 → 达标的人各自单独答谢，
+ * 没达标的人也各自一条（不跨用户合并）；只开多人合并 → 退回旧版「全部
+ * 合并成一条」；都不开 → 每个用户跨礼物累加、互不合并（6d 裁决的默认
+ * 兜底行为）。
+ */
 export interface GiftDraft {
   enabled: boolean
-  groupMode: GiftGroupMode
+  /** 单人礼物累加是否优先摘出——判定标准按件数（用户已裁决，不做成价值）。 */
+  soloEnabled: boolean
+  /** 单人优先的件数阈值 N，可配、默认 3。仅 soloEnabled 为真时生效。 */
+  soloThreshold: number
+  /** 剩余零散礼物是否合并成一条多人答谢；关闭则每个用户各自一条（仍跨礼物合并）。 */
+  multiMergeEnabled: boolean
   windowSeconds: number
+  /** 多人合并所需的最少人数，仅 multiMergeEnabled 为真时生效。 */
   minCount: number
   pickMode: PickMode
   templates: string[]
@@ -394,7 +414,10 @@ export interface GiftDraft {
    * **默认值是 `true`，不是可选偏好**——计划文件的硬性要求、用户原话
    * 「盲盒类单独计算」说的是正确行为该是什么样，不是"某些人可能想要
    * 分开"。开关留着是给想混着谢的人一个退出的自由，但新用户第一次
-   * 打开这页看到的必须是正确行为。
+   * 打开这页看到的必须是正确行为。这也是单人/多人双轨逻辑不把盲盒卷
+   * 进去的第一道防线——第二道防线在后端 `splitSoloLocked`，即使这个
+   * 开关被关掉、盲盒混进了通用答谢，件数阈值判定也不会把盲盒算进去
+   * （见 aggregate.go 的注释）。
    */
   blindBoxSeparate: boolean
   /**
@@ -408,7 +431,9 @@ export interface GiftDraft {
 export function defaultGiftDraft(): GiftDraft {
   return {
     enabled: true,
-    groupMode: 'merge',
+    soloEnabled: true,
+    soloThreshold: 3,
+    multiMergeEnabled: true,
     windowSeconds: 20,
     minCount: 2,
     pickMode: 'random',
@@ -429,16 +454,21 @@ export function defaultGiftDraft(): GiftDraft {
  * 写法。
  */
 export function buildGiftRule(draft: GiftDraft): Rule {
+  const agg = buildAggregateCommon({
+    by: draft.multiMergeEnabled ? 'type' : 'user',
+    windowSeconds: draft.windowSeconds,
+    minCount: draft.minCount,
+    applyMinCount: draft.multiMergeEnabled,
+  })
+  if (draft.soloEnabled && draft.soloThreshold > 0) {
+    agg.solo = { minItems: draft.soloThreshold }
+  }
+
   const rule: Rule = {
     name: GIFT_RULE_NAME,
     enabled: draft.enabled,
     on: [GIFT_ON],
-    aggregate: buildAggregateCommon({
-      by: GIFT_GROUP_MODE_BY[draft.groupMode],
-      windowSeconds: draft.windowSeconds,
-      minCount: draft.minCount,
-      applyMinCount: draft.groupMode === 'merge',
-    }),
+    aggregate: agg,
     do: [
       {
         type: 'danmaku',
@@ -513,7 +543,9 @@ export function buildBlindBoxRule(draft: GiftDraft): Rule {
       {
         type: 'danmaku',
         template: [
-          draft.blindBoxProfitTracking ? BLIND_BOX_TEMPLATE_WITH_PROFIT : BLIND_BOX_TEMPLATE_WITHOUT_PROFIT,
+          draft.blindBoxProfitTracking
+            ? BLIND_BOX_TEMPLATE_WITH_PROFIT
+            : BLIND_BOX_TEMPLATE_WITHOUT_PROFIT,
         ],
       },
     ],
@@ -536,9 +568,15 @@ export function parseGiftDraft(rule: Rule | null, blindBoxRule: Rule | null): Gi
 
     const agg = rule.aggregate
     if (agg) {
-      draft.groupMode = GIFT_BY_TO_GROUP_MODE[agg.by] ?? 'merge'
+      // 旧配置（P5-4 之前保存）用 by: 'gift' 表示「同用户同礼物累加，不
+      // 跨礼物合并」——现已废弃这个语义，但历史数据仍可能是这个值：按
+      // 「不是 type」统一折算成 multiMergeEnabled=false，与 'user' 一样
+      // 退回「不合并多人」这个大方向，不强行报错。
+      draft.multiMergeEnabled = agg.by === 'type'
       draft.windowSeconds = secondsFromDuration(agg.window, draft.windowSeconds)
       if (agg.minCount !== undefined) draft.minCount = agg.minCount
+      draft.soloEnabled = agg.solo !== undefined
+      if (agg.solo) draft.soloThreshold = agg.solo.minItems
     }
 
     const action = findDanmakuAction(rule.do)
@@ -649,15 +687,22 @@ export function parseBroadcastDraft(rule: Rule | null): BroadcastDraft {
   return draft
 }
 
-// ---- 关注答谢 / 分享答谢 / 上舰答谢：三者形状相同（开关 + 模板），共用一套草稿 ----
+// ---- 关注答谢 / 分享答谢 / 上舰答谢：三者形状相同（开关 + 模板 + 轮询/随机），共用一套草稿 ----
 
+/**
+ * P5-4 8：「每一条答谢都要有」轮询/随机开关——此前只有进房欢迎/礼物
+ * 答谢/轮播消息接了 `pick`，关注/分享/上舰这三条同样有多模板列表，却没
+ * 有选取方式，多条模板时永远只能随机（旧行为，`pick` 未写等同
+ * `"random"`），现在补上。
+ */
 export interface SimpleThanksDraft {
   enabled: boolean
+  pickMode: PickMode
   templates: string[]
 }
 
 function defaultSimpleThanksDraft(templates: string[]): SimpleThanksDraft {
-  return { enabled: true, templates }
+  return { enabled: true, pickMode: 'random', templates }
 }
 
 function buildSimpleThanksRule(name: string, on: string, draft: SimpleThanksDraft): Rule {
@@ -665,7 +710,13 @@ function buildSimpleThanksRule(name: string, on: string, draft: SimpleThanksDraf
     name,
     enabled: draft.enabled,
     on: [on],
-    do: [{ type: 'danmaku', template: draft.templates.filter((t) => t.trim() !== '') }],
+    do: [
+      {
+        type: 'danmaku',
+        template: draft.templates.filter((t) => t.trim() !== ''),
+        pick: draft.pickMode,
+      },
+    ],
   }
 }
 
@@ -677,6 +728,7 @@ function parseSimpleThanksDraft(rule: Rule | null, defaultTemplates: string[]): 
   if (action?.template && action.template.length > 0) {
     draft.templates = action.template
   }
+  draft.pickMode = parsePickMode(action?.pick)
   return draft
 }
 
@@ -815,11 +867,55 @@ const missingWritePerm = computed(() => {
  * 源码里就不会出现裸的 `{{`/`}}` 字符对。
  */
 const TEMPLATE_VAR_HINT = {
+  username: '{{.user.username}}',
   users: '{{join .users "、"}}',
   giftName: '{{.gift.name}}',
   count: '{{.count}}',
   gifts: '{{join .gifts "、"}}',
 }
+
+/**
+ * P5-4 5d/6e：变量说明改成「变量 / 含义 / 示例输出」的表格，不再用一整段
+ * 中文夹杂模板语法的大白话——用户原话「变量指示重写，这样又带点又顿号
+ * 的到底什么语法」，问题是旧文案把 `text/template` 的点号语法（如
+ * `.user.username`）和中文顿号（列举「、」）混在一句话里，读者分不清
+ * 哪部分是要抄进模板的语法、哪部分只是说明文字里的标点。表格用列分隔
+ * 二者：「变量」列只放能直接抄进模板的字面量，「含义」列才是中文说明。
+ */
+interface VarHintRow {
+  variable: string
+  meaning: string
+  example: string
+}
+
+const ENTER_TEMPLATE_VAR_ROWS: VarHintRow[] = [
+  { variable: TEMPLATE_VAR_HINT.username, meaning: '单人欢迎语里的用户昵称', example: '张三' },
+  {
+    variable: TEMPLATE_VAR_HINT.users,
+    meaning: '多人合并欢迎语里，本轮进场的用户列表（去重后，按先后顺序）',
+    example: '张三、李四',
+  },
+  { variable: TEMPLATE_VAR_HINT.count, meaning: '本轮合并的人数', example: '3' },
+]
+
+const GIFT_TEMPLATE_VAR_ROWS: VarHintRow[] = [
+  {
+    variable: TEMPLATE_VAR_HINT.users,
+    meaning: '本轮参与答谢的用户（去重后，按先后顺序）',
+    example: '张三、李四',
+  },
+  {
+    variable: TEMPLATE_VAR_HINT.gifts,
+    meaning: '本轮涉及的礼物名（去重后）',
+    example: '小花花、人气票',
+  },
+  {
+    variable: TEMPLATE_VAR_HINT.giftName,
+    meaning: '只取第一件礼物的名字；合并多种礼物时推荐改用上一行的 gifts',
+    example: '小花花',
+  },
+  { variable: TEMPLATE_VAR_HINT.count, meaning: '本轮合并涉及的用户/礼物档位数量', example: '3' },
+]
 
 /** 上舰答谢模板可用变量提示，同样要挪成变量，理由见上方 TEMPLATE_VAR_HINT 的注释。 */
 const GUARD_TEMPLATE_VAR_HINT = {
@@ -1017,12 +1113,13 @@ function dismissPartialFailure() {
           </div>
 
           <div class="row">
-            <span class="label">粉丝牌等级下限</span>
+            <NCheckbox v-model:checked="enterDraft.filter.minMedalLevelEnabled">
+              限制粉丝牌等级下限
+            </NCheckbox>
             <NInputNumber
               v-model:value="enterDraft.filter.minMedalLevel"
-              :min="0"
-              clearable
-              placeholder="不限"
+              :min="1"
+              :disabled="!enterDraft.filter.minMedalLevelEnabled"
               style="width: 140px"
             />
           </div>
@@ -1036,28 +1133,32 @@ function dismissPartialFailure() {
               style="width: 200px"
             />
           </div>
+          <p class="hint">
+            以上筛选条件是「且」的关系（同时满足才欢迎）：比如同时勾选了「限制粉丝牌等级下限」与
+            「只欢迎大航海用户」，实际生效的是两者的交集。
+          </p>
 
           <h4>频次 / 合并</h4>
-          <NRadioGroup v-model:value="enterDraft.groupMode">
-            <NRadio
-              v-for="opt in ENTER_GROUP_MODE_OPTIONS"
-              :key="opt.value"
-              :value="opt.value"
-              class="radio-item"
+          <p class="hint">
+            同一用户在窗口内只算一次（去重）恒生效，这是数据正确性的前提，不能关闭。
+            下面这个开关决定去重之后，多个不同的人要不要再合并成一条——它和「去重」各自计算，
+            不是二选一。
+          </p>
+          <div class="row">
+            <NCheckbox v-model:checked="enterDraft.mergeEnabled"
+              >窗口内多人合并为一条欢迎</NCheckbox
             >
-              {{ opt.label }}
-            </NRadio>
-          </NRadioGroup>
+          </div>
           <div class="row">
             <span class="label">
-              {{ enterDraft.groupMode === 'merge' ? '合并窗口（秒）' : '去重窗口（秒）' }}
+              {{ enterDraft.mergeEnabled ? '合并窗口（秒）' : '去重窗口（秒）' }}
             </span>
             <NInputNumber v-model:value="enterDraft.windowSeconds" :min="1" style="width: 140px" />
             <span class="label">最少合并人数</span>
             <NInputNumber
               v-model:value="enterDraft.minCount"
               :min="1"
-              :disabled="enterDraft.groupMode !== 'merge'"
+              :disabled="!enterDraft.mergeEnabled"
               style="width: 100px"
             />
           </div>
@@ -1092,6 +1193,28 @@ function dismissPartialFailure() {
             <TemplateList v-model="enterDraft.multiTemplates" placeholder="多人合并欢迎语模板" />
           </div>
 
+          <div class="var-hint-block">
+            <span class="label">可用变量</span>
+            <table class="var-hint-table">
+              <thead>
+                <tr>
+                  <th>变量</th>
+                  <th>含义</th>
+                  <th>示例输出</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="row in ENTER_TEMPLATE_VAR_ROWS" :key="row.variable">
+                  <td>
+                    <code>{{ row.variable }}</code>
+                  </td>
+                  <td>{{ row.meaning }}</td>
+                  <td>{{ row.example }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
           <NCollapse class="preview-collapse">
             <NCollapseItem title="预览将要生成的规则 JSON（本地草稿，尚未保存）" name="preview">
               <pre class="json-preview">{{ JSON.stringify(builtEnterRule, null, 2) }}</pre>
@@ -1105,27 +1228,46 @@ function dismissPartialFailure() {
             <NSwitch v-model:value="giftDraft.enabled" />
           </template>
 
-          <h4>归类阈值</h4>
-          <NRadioGroup v-model:value="giftDraft.groupMode">
-            <NRadio
-              v-for="opt in GIFT_GROUP_MODE_OPTIONS"
-              :key="opt.value"
-              :value="opt.value"
-              class="radio-item"
-            >
-              {{ opt.label }}
-            </NRadio>
-          </NRadioGroup>
+          <h4>单人礼物累加（优先）</h4>
+          <p class="hint">
+            单人累加的优先级比下面的「多人多礼物合并」更高：先判定哪些人达到了单独答谢的门槛，
+            剩下的零散礼物才轮到多人合并——多人合并主要是用来收集这些散礼物。
+            两个开关各自独立，可以同时打开。
+          </p>
+          <div class="row">
+            <NCheckbox v-model:checked="giftDraft.soloEnabled">
+              单人礼物件数达标时单独答谢（跨礼物合并统计）
+            </NCheckbox>
+            <span class="label">件数阈值</span>
+            <NInputNumber
+              v-model:value="giftDraft.soloThreshold"
+              :min="1"
+              :disabled="!giftDraft.soloEnabled"
+              style="width: 100px"
+            />
+          </div>
+          <p class="hint">
+            判定标准是窗口内该用户的礼物总件数（不含盲盒，盲盒单独结算盈亏）——比如同一个人连刷
+            {{ giftDraft.soloThreshold }}
+            个粉丝团灯牌就会单独收到一条答谢，不会被并进别人的合并答谢里。
+          </p>
+
+          <h4>多人多礼物合并</h4>
+          <div class="row">
+            <NCheckbox v-model:checked="giftDraft.multiMergeEnabled">
+              窗口内剩余的零散礼物合并为一条答谢（可多人多礼物）
+            </NCheckbox>
+          </div>
           <div class="row">
             <span class="label">
-              {{ giftDraft.groupMode === 'merge' ? '合并窗口（秒）' : '累加窗口（秒）' }}
+              {{ giftDraft.multiMergeEnabled ? '合并窗口（秒）' : '累加窗口（秒）' }}
             </span>
             <NInputNumber v-model:value="giftDraft.windowSeconds" :min="1" style="width: 140px" />
             <span class="label">最少合并人数</span>
             <NInputNumber
               v-model:value="giftDraft.minCount"
               :min="1"
-              :disabled="giftDraft.groupMode !== 'merge'"
+              :disabled="!giftDraft.multiMergeEnabled"
               style="width: 100px"
             />
           </div>
@@ -1144,17 +1286,28 @@ function dismissPartialFailure() {
             </NRadioGroup>
           </div>
           <TemplateList v-model="giftDraft.templates" placeholder="答谢语模板" />
-          <p class="hint">
-            可用变量：<code>{{ TEMPLATE_VAR_HINT.users }}</code>
-            （本轮参与的用户，需要用 join 拼接）、
-            <code>{{ TEMPLATE_VAR_HINT.gifts }}</code>
-            （本轮合并涉及的礼物名，去重后的列表，同样需要用 join 拼接）、
-            <code>{{ TEMPLATE_VAR_HINT.giftName }}</code>
-            （只取第一件礼物的名字，合并多种礼物时更推荐用上面的
-            <code>gifts</code>）、
-            <code>{{ TEMPLATE_VAR_HINT.count }}</code>
-            等。
-          </p>
+
+          <div class="var-hint-block">
+            <span class="label">可用变量</span>
+            <table class="var-hint-table">
+              <thead>
+                <tr>
+                  <th>变量</th>
+                  <th>含义</th>
+                  <th>示例输出</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="row in GIFT_TEMPLATE_VAR_ROWS" :key="row.variable">
+                  <td>
+                    <code>{{ row.variable }}</code>
+                  </td>
+                  <td>{{ row.meaning }}</td>
+                  <td>{{ row.example }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
 
           <h4>盲盒</h4>
           <div class="row">
@@ -1166,8 +1319,8 @@ function dismissPartialFailure() {
                 <NTag type="info" size="small">独立规则「内置/盲盒答谢」</NTag>
               </template>
               勾选后通用礼物答谢会加一条 <code>gift.isBlindBox == false</code> 排除盲盒，
-              盲盒改由独立规则答谢（<code>when: gift.isBlindBox == true</code>，按
-              「送礼人 + 盲盒名称」分开聚合——交叉送不同盲盒会分别结算，不会混在一起算出
+              盲盒改由独立规则答谢（<code>when: gift.isBlindBox == true</code>，按 「送礼人 +
+              盲盒名称」分开聚合——交叉送不同盲盒会分别结算，不会混在一起算出
               错误的盈亏）。不勾选则盲盒仍混在通用答谢里，跟以前一样。
             </NTooltip>
           </div>
@@ -1267,17 +1420,53 @@ function dismissPartialFailure() {
             <h4 class="inline-title">关注答谢</h4>
             <NSwitch v-model:value="followDraft.enabled" />
           </div>
+          <div class="row">
+            <NRadioGroup v-model:value="followDraft.pickMode">
+              <NRadio
+                v-for="opt in PICK_MODE_OPTIONS"
+                :key="opt.value"
+                :value="opt.value"
+                class="radio-item"
+              >
+                {{ opt.label }}
+              </NRadio>
+            </NRadioGroup>
+          </div>
           <TemplateList v-model="followDraft.templates" placeholder="关注答谢模板" />
 
           <div class="row">
             <h4 class="inline-title">分享答谢</h4>
             <NSwitch v-model:value="shareDraft.enabled" />
           </div>
+          <div class="row">
+            <NRadioGroup v-model:value="shareDraft.pickMode">
+              <NRadio
+                v-for="opt in PICK_MODE_OPTIONS"
+                :key="opt.value"
+                :value="opt.value"
+                class="radio-item"
+              >
+                {{ opt.label }}
+              </NRadio>
+            </NRadioGroup>
+          </div>
           <TemplateList v-model="shareDraft.templates" placeholder="分享答谢模板" />
 
           <div class="row">
             <h4 class="inline-title">上舰答谢</h4>
             <NSwitch v-model:value="guardDraft.enabled" />
+          </div>
+          <div class="row">
+            <NRadioGroup v-model:value="guardDraft.pickMode">
+              <NRadio
+                v-for="opt in PICK_MODE_OPTIONS"
+                :key="opt.value"
+                :value="opt.value"
+                class="radio-item"
+              >
+                {{ opt.label }}
+              </NRadio>
+            </NRadioGroup>
           </div>
           <p class="hint">
             可用变量：<code>{{ GUARD_TEMPLATE_VAR_HINT.username }}</code
@@ -1346,6 +1535,29 @@ function dismissPartialFailure() {
   margin: 8px 0;
 }
 .hint code {
+  background: rgba(128, 128, 128, 0.15);
+  padding: 0 4px;
+  border-radius: 3px;
+}
+.var-hint-block {
+  margin: 8px 0 12px;
+}
+.var-hint-block .label {
+  display: block;
+  margin-bottom: 4px;
+}
+.var-hint-table {
+  border-collapse: collapse;
+  font-size: 12px;
+  width: 100%;
+}
+.var-hint-table th,
+.var-hint-table td {
+  border: 1px solid rgba(128, 128, 128, 0.25);
+  padding: 4px 8px;
+  text-align: left;
+}
+.var-hint-table code {
   background: rgba(128, 128, 128, 0.15);
   padding: 0 4px;
   border-radius: 3px;

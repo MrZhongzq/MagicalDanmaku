@@ -90,6 +90,9 @@ func (r Rule) ToRule() (rules.Rule, error) {
 			MinCount: r.Aggregate.MinCount,
 			By:       rules.AggregateBy(r.Aggregate.By),
 		}
+		if r.Aggregate.Solo != nil {
+			out.Aggregate.Solo = &rules.SoloSpec{MinItems: r.Aggregate.Solo.MinItems}
+		}
 	}
 
 	for _, a := range r.Do {

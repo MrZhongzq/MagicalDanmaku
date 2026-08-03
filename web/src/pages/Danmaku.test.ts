@@ -142,7 +142,13 @@ describe('Danmaku 纯函数：条件拼装与还原', () => {
   it('buildEnterCondition 在什么都没选时返回 undefined（不该生成空 when）', () => {
     expect(
       buildEnterCondition(
-        { wearMedalOnly: false, minMedalLevel: null, guardOnly: false, guardTier: 'captain' },
+        {
+          wearMedalOnly: false,
+          minMedalLevelEnabled: false,
+          minMedalLevel: 1,
+          guardOnly: false,
+          guardTier: 'captain',
+        },
         '9000',
       ),
     ).toBeUndefined()
@@ -150,7 +156,13 @@ describe('Danmaku 纯函数：条件拼装与还原', () => {
 
   it('buildEnterCondition 只选"佩戴粉丝牌"时拼出 isLighted + 本房间 roomId 两条', () => {
     const cond = buildEnterCondition(
-      { wearMedalOnly: true, minMedalLevel: null, guardOnly: false, guardTier: 'captain' },
+      {
+        wearMedalOnly: true,
+        minMedalLevelEnabled: false,
+        minMedalLevel: 1,
+        guardOnly: false,
+        guardTier: 'captain',
+      },
       '9000',
     )
     expect(cond).toEqual({
@@ -161,9 +173,27 @@ describe('Danmaku 纯函数：条件拼装与还原', () => {
     })
   })
 
+  // P5-4 5a：粉丝牌等级下限改成独立勾选，不勾选即不启用——即使
+  // minMedalLevel 本身留着上次填过的数值，minMedalLevelEnabled 为假时
+  // 也不该拼出对应的条件（钉住"不勾选就不生效"这个核心行为）。
+  it('buildEnterCondition：minMedalLevelEnabled 为假时，即使 minMedalLevel 有值也不拼条件', () => {
+    const cond = buildEnterCondition(
+      {
+        wearMedalOnly: false,
+        minMedalLevelEnabled: false,
+        minMedalLevel: 5,
+        guardOnly: false,
+        guardTier: 'captain',
+      },
+      '9000',
+    )
+    expect(cond).toBeUndefined()
+  })
+
   it('buildEnterCondition 三个筛选都选时拼成一棵 all 树，且能被 parseEnterFilter 还原', () => {
     const filter = {
       wearMedalOnly: true,
+      minMedalLevelEnabled: true,
       minMedalLevel: 5,
       guardOnly: true,
       guardTier: 'admiral' as const,
@@ -172,9 +202,36 @@ describe('Danmaku 纯函数：条件拼装与还原', () => {
     expect(parseEnterFilter(cond)).toEqual(filter)
   })
 
+  // P5-4 5b：筛选条件叠加（AND）——粉丝牌等级下限 + 只欢迎大航海同时勾选，
+  // 拼出的 all 树两条都要满足，不是"后选的覆盖先选的"。
+  it('buildEnterCondition：粉丝牌等级下限与大航海筛选同时勾选时是 AND（拼进同一棵 all 树）', () => {
+    const cond = buildEnterCondition(
+      {
+        wearMedalOnly: false,
+        minMedalLevelEnabled: true,
+        minMedalLevel: 20,
+        guardOnly: true,
+        guardTier: 'captain',
+      },
+      '9000',
+    )
+    expect(cond).toEqual({
+      all: [
+        { field: 'user.medal.level', op: 'gte', value: 20 },
+        { field: 'user.guardLevel', op: 'in', value: [1, 2, 3] },
+      ],
+    })
+  })
+
   it('大航海档位用 in 一组数值而不是 gte——因为编号越小档位越高', () => {
     const cond = buildEnterCondition(
-      { wearMedalOnly: false, minMedalLevel: null, guardOnly: true, guardTier: 'governor' },
+      {
+        wearMedalOnly: false,
+        minMedalLevelEnabled: false,
+        minMedalLevel: 1,
+        guardOnly: true,
+        guardTier: 'governor',
+      },
       '9000',
     )
     expect(cond).toEqual({ field: 'user.guardLevel', op: 'in', value: [1] })
@@ -263,7 +320,7 @@ describe('Danmaku 纯函数：build/parse 往返（组装成 spec.Rule 与从中
     }
     const draft = parseEnterDraft(savedRule)
     expect(draft.enabled).toBe(false)
-    expect(draft.groupMode).toBe('merge')
+    expect(draft.mergeEnabled).toBe(true)
     expect(draft.windowSeconds).toBe(120)
     expect(draft.minCount).toBe(4)
     expect(draft.singleTemplates).toEqual(['已保存单人模板A', '已保存单人模板B'])
@@ -302,7 +359,10 @@ describe('Danmaku 纯函数：build/parse 往返（组装成 spec.Rule 与从中
     expect(parseEnterDraft(savedRule).pickMode).toBe('random')
   })
 
-  it('parseGiftDraft 还原 groupMode=dedupeGift（by: "gift"）与模板', () => {
+  // by: "gift" 是 P5-4 之前的旧语义（同用户同礼物累加，不跨礼物合并），
+  // 现已废弃；旧配置里仍可能存着这个值，加载时应该折算成
+  // multiMergeEnabled=false（不合并多人），不报错也不崩溃。
+  it('parseGiftDraft 还原旧配置（by: "gift"）时 multiMergeEnabled 折算为 false，且不含 solo 时 soloEnabled 为 false', () => {
     const savedRule = {
       name: GIFT_RULE_NAME,
       enabled: true,
@@ -311,9 +371,51 @@ describe('Danmaku 纯函数：build/parse 往返（组装成 spec.Rule 与从中
       do: [{ type: 'danmaku', template: ['已保存答谢模板'] }],
     }
     const draft = parseGiftDraft(savedRule, null)
-    expect(draft.groupMode).toBe('dedupeGift')
+    expect(draft.multiMergeEnabled).toBe(false)
+    expect(draft.soloEnabled).toBe(false)
     expect(draft.windowSeconds).toBe(15)
     expect(draft.templates).toEqual(['已保存答谢模板'])
+  })
+
+  // P5-4 6b/6c：单人优先是否启用、阈值是多少，都要能从已保存的 aggregate.solo
+  // 里还原回来——这是「单人/多人双轨」配置能持久化的前提。
+  it('parseGiftDraft 还原 aggregate.solo，soloEnabled=true 且 soloThreshold=阈值', () => {
+    const savedRule = {
+      name: GIFT_RULE_NAME,
+      enabled: true,
+      on: ['gift'],
+      aggregate: { window: '20s', by: 'type', minCount: 2, solo: { minItems: 5 } },
+      do: [{ type: 'danmaku', template: ['已保存答谢模板'] }],
+    }
+    const draft = parseGiftDraft(savedRule, null)
+    expect(draft.soloEnabled).toBe(true)
+    expect(draft.soloThreshold).toBe(5)
+    expect(draft.multiMergeEnabled).toBe(true)
+  })
+
+  // buildGiftRule/parseGiftDraft 往返：既是回归防线，也是这批需求的核心
+  // 验收标准的一部分——soloEnabled 与 multiMergeEnabled 两个开关必须能
+  // 同时为 true 并且各自独立生效，不能因为实现疏漏又把它们做回了排他关系。
+  it('buildGiftRule：soloEnabled 与 multiMergeEnabled 同时为 true 时，aggregate 同时带 solo 与 by:"type"', () => {
+    const draft = {
+      ...defaultGiftDraft(),
+      soloEnabled: true,
+      soloThreshold: 3,
+      multiMergeEnabled: true,
+    }
+    const rule = buildGiftRule(draft)
+    expect(rule.aggregate?.by).toBe('type')
+    expect(rule.aggregate?.solo).toEqual({ minItems: 3 })
+  })
+
+  it('buildGiftRule：multiMergeEnabled=false 时 by 变成 "user"（跨礼物合并、不跨用户合并）', () => {
+    const rule = buildGiftRule({ ...defaultGiftDraft(), multiMergeEnabled: false })
+    expect(rule.aggregate?.by).toBe('user')
+  })
+
+  it('buildGiftRule：soloEnabled=false 时不带 solo 字段', () => {
+    const rule = buildGiftRule({ ...defaultGiftDraft(), soloEnabled: false })
+    expect(rule.aggregate?.solo).toBeUndefined()
   })
 })
 
@@ -640,7 +742,9 @@ describe('Danmaku 页面：保存（Task 13 接上 useDraft）', () => {
     setupStores()
     const wrapper = await mountDanmaku()
 
-    const checkbox = wrapper.findAll('.n-checkbox').find((c) => c.text() === '盲盒礼物单独一类，不并入常规答谢')
+    const checkbox = wrapper
+      .findAll('.n-checkbox')
+      .find((c) => c.text() === '盲盒礼物单独一类，不并入常规答谢')
     await checkbox!.trigger('click') // 默认是勾选状态，点一下变成取消勾选
     await flushPromises()
 
@@ -667,7 +771,9 @@ describe('Danmaku 页面：保存（Task 13 接上 useDraft）', () => {
     const wrapper = await mountDanmaku()
 
     // PkPanel 里"PK 串门欢迎"那一行的 NSwitch，靠它前面的说明文字定位。
-    const visitRow = wrapper.findAll('.row').find((r) => r.text().includes('对面观众串门时用单独欢迎语'))
+    const visitRow = wrapper
+      .findAll('.row')
+      .find((r) => r.text().includes('对面观众串门时用单独欢迎语'))
     expect(visitRow, '找不到 PK 串门欢迎那一行').toBeTruthy()
     const toggle = visitRow!.find('.n-switch')
     await toggle.trigger('click')

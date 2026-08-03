@@ -28,6 +28,7 @@
  * （`PK_RULE_NAME`/`PK_VISIT_RULE_NAME`），刷新页面或切换直播间不再丢失。
  */
 import type { Rule } from '@/api/rule-types'
+import { PICK_MODE_OPTIONS, parsePickMode, type PickMode } from '@/api/rule-types'
 
 /** PK 播报（匹配信息）规则的固定名字，与「进房欢迎」「礼物答谢」用同一套按 name 认领的机制。 */
 export const PK_RULE_NAME = '内置/PK播报'
@@ -59,11 +60,15 @@ export interface PkDraft {
   announceGuardTotal: boolean
   /** 播报对面大航海在线数。 */
   announceGuardOnline: boolean
+  /** PK 匹配播报模板有多条时怎么挑（P5-4 8：每一条答谢/播报都要有这个开关）。 */
+  matchPickMode: PickMode
   /** PK 匹配播报模板。 */
   matchTemplates: string[]
 
   /** PK 串门欢迎开关。 */
   visitGreetingEnabled: boolean
+  /** PK 串门欢迎模板有多条时怎么挑。 */
+  visitPickMode: PickMode
   /** PK 串门欢迎模板。 */
   visitTemplates: string[]
 }
@@ -75,11 +80,13 @@ export function defaultPkDraft(): PkDraft {
     announceRoomCount: true,
     announceGuardTotal: true,
     announceGuardOnline: false,
+    matchPickMode: 'random',
     matchTemplates: [
       '对面主播是 {{.pk.opponent.uname}}，直播间 {{.pk.opponent.online}} 人在线，' +
         '大航海 {{.pk.opponent.guardTotal}} 位，一起加油！',
     ],
     visitGreetingEnabled: false,
+    visitPickMode: 'random',
     visitTemplates: ['欢迎对面直播间的朋友 {{.user.username}} 来串门认识一下~'],
   }
 }
@@ -105,7 +112,13 @@ export function buildPkRule(draft: PkDraft): Rule {
     enabled: draft.enabled,
     on: [PK_ON],
     when: { field: 'battle.subCommand', op: 'eq', value: PK_SNAPSHOT_SUBCOMMAND },
-    do: [{ type: 'danmaku', template: draft.matchTemplates.filter((t) => t.trim() !== '') }],
+    do: [
+      {
+        type: 'danmaku',
+        template: draft.matchTemplates.filter((t) => t.trim() !== ''),
+        pick: draft.matchPickMode,
+      },
+    ],
   }
 }
 
@@ -144,7 +157,13 @@ export function buildPkVisitRule(draft: PkDraft): Rule {
     enabled: draft.visitGreetingEnabled,
     on: [PK_VISIT_ON],
     aggregate: { window: `${PK_VISIT_AGGREGATE_WINDOW_SECONDS}s`, by: 'type' },
-    do: [{ type: 'danmaku', template: draft.visitTemplates.filter((t) => t.trim() !== '') }],
+    do: [
+      {
+        type: 'danmaku',
+        template: draft.visitTemplates.filter((t) => t.trim() !== ''),
+        pick: draft.visitPickMode,
+      },
+    ],
   }
 }
 
@@ -163,6 +182,7 @@ export function parsePkDraft(matchRule: Rule | null, visitRule: Rule | null): Pk
     if (action?.template && action.template.length > 0) {
       draft.matchTemplates = action.template
     }
+    draft.matchPickMode = parsePickMode(action?.pick)
   }
 
   if (visitRule) {
@@ -171,6 +191,7 @@ export function parsePkDraft(matchRule: Rule | null, visitRule: Rule | null): Pk
     if (action?.template && action.template.length > 0) {
       draft.visitTemplates = action.template
     }
+    draft.visitPickMode = parsePickMode(action?.pick)
   }
 
   return draft
@@ -185,6 +206,8 @@ import {
   NCheckbox,
   NCollapse,
   NCollapseItem,
+  NRadio,
+  NRadioGroup,
   NSwitch,
   NTag,
   NTooltip,
@@ -229,8 +252,8 @@ const builtVisitRule = computed(() => buildPkVisitRule(props.modelValue))
         右上角总开关与下面的播报模板都会被保存。模板变量：<code>pk.opponent.uname</code>
         （对面主播昵称）、<code>pk.opponent.online</code>（对面直播间人数）、
         <code>pk.opponent.guardTotal</code>（对面大航海总数）、
-        <code>pk.opponent.guardOnline</code>（对面大航海在线数）、<code>pk.pkId</code>
-        （这场 PK 的 ID）。多人 PK 下 <code>pk.opponents</code> 是全部对手的列表，
+        <code>pk.opponent.guardOnline</code>（对面大航海在线数）、<code>pk.pkId</code> （这场 PK 的
+        ID）。多人 PK 下 <code>pk.opponents</code> 是全部对手的列表，
         <code>pk.opponent</code> 只是取第一个的便利写法。下面四个勾选只决定「恢复默认值」时
         模板长什么样，不会在你编辑过模板之后反过来改写它——模板是自由文本，想加减字段直接改
         文本即可。
@@ -264,6 +287,21 @@ const builtVisitRule = computed(() => buildPkVisitRule(props.modelValue))
       </NCheckbox>
     </div>
 
+    <div class="row">
+      <NRadioGroup
+        :value="modelValue.matchPickMode"
+        @update:value="(v: 'random' | 'sequential') => patch({ matchPickMode: v })"
+      >
+        <NRadio
+          v-for="opt in PICK_MODE_OPTIONS"
+          :key="opt.value"
+          :value="opt.value"
+          class="radio-item"
+        >
+          {{ opt.label }}
+        </NRadio>
+      </NRadioGroup>
+    </div>
     <TemplateList
       :model-value="modelValue.matchTemplates"
       placeholder="PK播报语模板"
@@ -290,6 +328,21 @@ const builtVisitRule = computed(() => buildPkVisitRule(props.modelValue))
         @update:value="(v: boolean) => patch({ visitGreetingEnabled: v })"
       />
     </div>
+    <div class="row">
+      <NRadioGroup
+        :value="modelValue.visitPickMode"
+        @update:value="(v: 'random' | 'sequential') => patch({ visitPickMode: v })"
+      >
+        <NRadio
+          v-for="opt in PICK_MODE_OPTIONS"
+          :key="opt.value"
+          :value="opt.value"
+          class="radio-item"
+        >
+          {{ opt.label }}
+        </NRadio>
+      </NRadioGroup>
+    </div>
     <TemplateList
       :model-value="modelValue.visitTemplates"
       placeholder="串门欢迎语模板"
@@ -297,7 +350,10 @@ const builtVisitRule = computed(() => buildPkVisitRule(props.modelValue))
     />
 
     <NCollapse class="preview-collapse">
-      <NCollapseItem title="预览将要生成的规则 JSON（PK 匹配信息 + PK 串门欢迎，各一条规则）" name="preview">
+      <NCollapseItem
+        title="预览将要生成的规则 JSON（PK 匹配信息 + PK 串门欢迎，各一条规则）"
+        name="preview"
+      >
         <pre class="json-preview">{{ JSON.stringify(builtMatchRule, null, 2) }}</pre>
         <pre class="json-preview">{{ JSON.stringify(builtVisitRule, null, 2) }}</pre>
       </NCollapseItem>
@@ -322,6 +378,9 @@ const builtVisitRule = computed(() => buildPkVisitRule(props.modelValue))
 .label {
   font-size: 13px;
   opacity: 0.8;
+}
+.radio-item {
+  margin-right: 16px;
 }
 .hint {
   font-size: 12px;

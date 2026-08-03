@@ -340,6 +340,37 @@ type AggregateSpec struct {
 	MinCount int
 
 	By AggregateBy // 分组键
+
+	// Solo 描述「单人优先，多人兜底」的双轨聚合，nil 表示不启用，行为与
+	// 旧版完全一致（全部按 By 分组）。
+	//
+	// 用户 2026-08-03 给的验收场景：a、b、c 短时间内都送了小花花与人气票
+	// →三人合并成一条；同时 d 在疯狂刷粉丝团灯牌→d 单独答谢。用户原话
+	// 「单人的礼物累加逻辑要比多人多礼物优先级高，多人多礼物主要是收集
+	// 散的礼物」——所以 Solo 命中的用户在 drainLocked 里被优先摘出来，
+	// 剩下的才轮到 By 分组。
+	Solo *SoloSpec
+}
+
+// SoloSpec 描述单人优先聚合的判定标准。
+//
+// 判定标准是用户 2026-08-03 的明确裁决：按礼物件数，不做成价值或其他
+// 标准——不要因为「按价值」看起来更「值钱」就改回去，用户在三个方案里
+// 选的就是件数。
+type SoloSpec struct {
+	// MinItems 是单人优先的件数阈值：窗口内某用户名下（不含盲盒，盲盒
+	// 恒单独结算）的礼物总件数达到该值就单独成一条 Trigger，跨礼物合并
+	// 统计（用户裁决「单人累加可以跨礼物合并」）。必须 > 0——没有阈值这
+	// 个特性没有意义，等同于永远不生效，是个无声的死配置。
+	MinItems int
+}
+
+// Validate 校验单人优先规格。
+func (s SoloSpec) Validate() error {
+	if s.MinItems <= 0 {
+		return fmt.Errorf("单人优先的件数阈值 minItems 必须大于 0")
+	}
+	return nil
 }
 
 // Validate 校验合并规格。
@@ -352,8 +383,14 @@ func (s AggregateSpec) Validate() error {
 	}
 	switch s.By {
 	case AggregateByType, AggregateByUser, AggregateByGift, AggregateByBlindBox:
-		return nil
+		// 合法分组键，继续往下校验 Solo
 	default:
 		return fmt.Errorf("未知的分组键 %q", s.By)
 	}
+	if s.Solo != nil {
+		if err := s.Solo.Validate(); err != nil {
+			return fmt.Errorf("单人优先规格非法: %w", err)
+		}
+	}
+	return nil
 }

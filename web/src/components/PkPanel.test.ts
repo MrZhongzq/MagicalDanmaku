@@ -33,7 +33,7 @@ describe('PkPanel 纯函数：build/parse 往返', () => {
       op: 'eq',
       value: 'PK_OPPONENT_SNAPSHOT',
     })
-    expect(rule.do).toEqual([{ type: 'danmaku', template: draft.matchTemplates }])
+    expect(rule.do).toEqual([{ type: 'danmaku', template: draft.matchTemplates, pick: 'random' }])
     // 默认模板必须用真实字段名，不能是渲染不出东西的占位符
     const tmpl = draft.matchTemplates.join('\n')
     expect(tmpl).toContain('.pk.opponent.uname')
@@ -49,7 +49,35 @@ describe('PkPanel 纯函数：build/parse 往返', () => {
     expect(rule.enabled).toBe(true)
     expect(rule.on).toEqual(['pk_visit_from_opponent'])
     expect(rule.on).not.toContain('pk_visit_to_opponent')
-    expect(rule.do).toEqual([{ type: 'danmaku', template: draft.visitTemplates }])
+    expect(rule.do).toEqual([{ type: 'danmaku', template: draft.visitTemplates, pick: 'random' }])
+  })
+
+  // P5-4 8：「每一条答谢/播报都要有」轮询/随机开关——PK 播报此前是唯一
+  // 有多模板列表却没有这个选项的地方。
+  it('buildPkRule/buildPkVisitRule：pickMode 直接进 do[0].pick，两者互不干扰', () => {
+    const draft = { ...defaultPkDraft(), matchPickMode: 'sequential' as const }
+    expect(buildPkRule(draft).do![0].pick).toBe('sequential')
+    expect(buildPkVisitRule(draft).do![0].pick).toBe('random')
+
+    const draft2 = { ...defaultPkDraft(), visitPickMode: 'sequential' as const }
+    expect(buildPkVisitRule(draft2).do![0].pick).toBe('sequential')
+    expect(buildPkRule(draft2).do![0].pick).toBe('random')
+  })
+
+  it('parsePkDraft 还原 matchPickMode/visitPickMode', () => {
+    const matchRule = {
+      name: PK_RULE_NAME,
+      on: ['battle'],
+      do: [{ type: 'danmaku', template: ['已保存'], pick: 'sequential' }],
+    }
+    const visitRule = {
+      name: PK_VISIT_RULE_NAME,
+      on: ['pk_visit_from_opponent'],
+      do: [{ type: 'danmaku', template: ['已保存'], pick: 'sequential' }],
+    }
+    const draft = parsePkDraft(matchRule, visitRule)
+    expect(draft.matchPickMode).toBe('sequential')
+    expect(draft.visitPickMode).toBe('sequential')
   })
 
   it('buildPkVisitRule 带 aggregate，PK 接通瞬间对面多个不同的人涌入时不会各触发一条弹幕', () => {

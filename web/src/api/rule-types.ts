@@ -44,13 +44,26 @@ export interface Condition {
  * Aggregate 对应 spec.Aggregate。
  *
  * 注意 `window` 与 `by` 在 Go 侧**没有** `omitempty`——它们始终会出现在
- * 序列化结果里，所以这里是必填字段，不加 `?`。`minCount` 才是
+ * 序列化结果里，所以这里是必填字段，不加 `?`。`minCount`/`solo` 才是
  * omitempty，可选。
  */
 export interface Aggregate {
   window: Duration
   minCount?: number
   by: string
+  /**
+   * Solo 对应 spec.Solo——「单人优先，多人兜底」的双轨聚合（P5-4）。
+   * 不启用时整个字段不出现，不是 `{minItems: 0}`：0 会被后端 Validate
+   * 拒绝（`server/internal/rules/rule.go` 的 SoloSpec.Validate），
+   * 「配了但不生效」在这里没有合法状态。
+   */
+  solo?: AggregateSolo
+}
+
+/** AggregateSolo 对应 spec.Solo。 */
+export interface AggregateSolo {
+  /** 单人优先的件数阈值：窗口内某用户（不含盲盒）总件数达标就单独一条。 */
+  minItems: number
 }
 
 /**
@@ -75,6 +88,27 @@ export interface Action {
   pick?: string
   hours?: number
   script?: string
+}
+
+/**
+ * PickMode 直接对应 spec.Action.Pick 的取值（`""`/`"random"`/`"sequential"`）。
+ * 草稿态不使用空字符串——`parsePickMode` 把「空」也当作 `'random'` 处理
+ * （与历史配置兼容），保存时统一显式写出 `'random'` 或 `'sequential'`。
+ *
+ * 挪到这里是共享点：Danmaku.vue 与 PkPanel.vue 都要用（P5-4 之前只有
+ * Danmaku.vue 用，定义在那边；PK 播报/串门欢迎补上轮询开关后 PkPanel.vue
+ * 也要用同一套，放在两者都不依赖对方的这个类型文件里，避免循环 import。
+ */
+export type PickMode = 'random' | 'sequential'
+
+export const PICK_MODE_OPTIONS: { label: string; value: PickMode }[] = [
+  { label: '随机抽取', value: 'random' },
+  { label: '轮询（按顺序循环）', value: 'sequential' },
+]
+
+/** parsePickMode 把后端的 pick 字段（可能是空字符串或缺省）还原成草稿用的 PickMode。 */
+export function parsePickMode(pick: string | undefined): PickMode {
+  return pick === 'sequential' ? 'sequential' : 'random'
 }
 
 /**

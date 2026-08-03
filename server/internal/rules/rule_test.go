@@ -299,6 +299,31 @@ func TestAggregateSpecValidate(t *testing.T) {
 	}
 }
 
+// TestAggregateSpecValidateRejectsInvalidSolo 钉住 SoloSpec.MinItems 必须
+// 大于 0——0 或负值是「配了却永远不生效」的无声死配置，必须在校验阶段
+// 就拦住，而不是留到运行期悄悄什么都不做。
+func TestAggregateSpecValidateRejectsInvalidSolo(t *testing.T) {
+	base := AggregateSpec{Window: time.Second, By: AggregateByType}
+
+	withZero := base
+	withZero.Solo = &SoloSpec{MinItems: 0}
+	if err := withZero.Validate(); err == nil {
+		t.Error("Solo.MinItems = 0 应当报错")
+	}
+
+	withNegative := base
+	withNegative.Solo = &SoloSpec{MinItems: -1}
+	if err := withNegative.Validate(); err == nil {
+		t.Error("Solo.MinItems < 0 应当报错")
+	}
+
+	withValid := base
+	withValid.Solo = &SoloSpec{MinItems: 3}
+	if err := withValid.Validate(); err != nil {
+		t.Errorf("合法的 Solo 不应报错: %v", err)
+	}
+}
+
 func TestTriggerHoldsEvents(t *testing.T) {
 	ev := event.Event{Type: event.TypeDanmaku, RoomID: "1"}
 	tr := Trigger{Type: event.TypeDanmaku, Events: []event.Event{ev}, Vars: map[string]any{"text": "hi"}}
