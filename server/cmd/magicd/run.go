@@ -430,6 +430,30 @@ func assembleRuntimes(
 const defaultRetentionDays = 30
 
 // runRun 从数据库加载配置并启动机器人。
+// noBindingsFatal 判断「一个启用的绑定都没有」这件事该不该让 run 退出。
+//
+// 结论是**只要 WebUI 还开着就不能退出**。WebUI 是添加绑定的唯一图形入口，
+// 而它只在 run 进程里起：退出的话就成了死锁 —— 全新安装没有绑定 →
+// run 退出 → WebUI 起不来 → 用户加不了绑定 → 永远起不来。Docker 部署下
+// 更明显，restart 策略会把它变成崩溃重启循环，日志里刷的还是「请先添加
+// 绑定」这种看起来像用户操作问题的提示。
+//
+// 这与 P4-3 修过的「非法 suppress 让守护进程开不了机」是同一类问题：
+// 凡是启动期的校验失败，只要唯一的自救入口是 WebUI，就必须降级放行
+// 而不是拒绝启动。
+//
+// 唯一该退出的情况是 HTTP 被显式关掉（MAGICD_HTTP_ADDR 为空或 off）：
+// 那时既没有机器人可跑、也没有界面可用，进程留着纯属空转。
+func noBindingsFatal(httpAddr string) error {
+	if httpAddr != "" && httpAddr != "off" {
+		return nil
+	}
+	return errors.New("数据库里没有任何启用的绑定，而 WebUI 也已关闭，没有可做的事。\n" +
+		"先 magicd login --save <账号名> --owner <用户名>，再 magicd binding add <账号名> <房间号>；\n" +
+		"或者用 magicd import -c config.yaml --owner <用户名> 导入现成的配置；\n" +
+		"或者去掉 MAGICD_HTTP_ADDR=off，改用 WebUI 添加绑定")
+}
+
 func runRun(args []string) error {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	dsn := addDBFlag(fs)
@@ -452,9 +476,14 @@ func runRun(args []string) error {
 		return err
 	}
 	if len(cfgs) == 0 {
-		return fmt.Errorf("数据库里没有任何启用的绑定。\n" +
-			"先 magicd login --save <账号名> --owner <用户名>，再 magicd binding add <账号名> <房间号>；\n" +
-			"或者用 magicd import -c config.yaml --owner <用户名> 导入现成的配置")
+		if err := noBindingsFatal(httpAddr()); err != nil {
+			return err
+		}
+		// 不要写成「添加后无需重启」：热重载（roomRuntime.Reload）是按
+		// bindingID 找**已存在**的运行时并重建它的规则引擎，新增的绑定
+		// 不在其中，必须重启进程才会被装配。
+		log.Warn("数据库里没有任何启用的绑定，暂时不连接任何直播间；" +
+			"请打开 WebUI 添加账号与直播间绑定，添加完重启本进程即可生效")
 	}
 
 	// 业务日志：一个写入器，每个绑定分一个带归属 ID 的 Sink

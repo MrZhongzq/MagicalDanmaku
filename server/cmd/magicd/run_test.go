@@ -1072,3 +1072,27 @@ func TestLoginCheckLoopRunsImmediatelyAndRespectsCancellation(t *testing.T) {
 		t.Fatal("ctx 取消后 loginCheckLoop 应尽快退出，而不是继续等下一个 tick")
 	}
 }
+
+// 「一个绑定都没有」不能让守护进程退出——WebUI 是添加绑定的唯一图形入口，
+// 退出就成了死锁（没绑定 → run 退出 → WebUI 起不来 → 加不了绑定）。
+// Docker 部署下这个死锁表现为崩溃重启循环，是在真实机器上第一次部署时
+// 撞到的；这条测试就是防止有人「顺手」把那个校验加回去。
+func TestNoBindingsDoesNotKillDaemonWhileWebUIIsUp(t *testing.T) {
+	for _, addr := range []string{"127.0.0.1:8080", "0.0.0.0:20992"} {
+		if err := noBindingsFatal(addr); err != nil {
+			t.Errorf("WebUI 开着(%s)时不该退出，实际报错: %v", addr, err)
+		}
+	}
+
+	// WebUI 也关掉时就真的无事可做了，这时报错退出才是对的。
+	for _, addr := range []string{"", "off"} {
+		err := noBindingsFatal(addr)
+		if err == nil {
+			t.Errorf("WebUI 关闭(%q)且无绑定时应报错退出", addr)
+			continue
+		}
+		if !contains(err.Error(), "MAGICD_HTTP_ADDR=off") {
+			t.Errorf("错误信息应告诉用户怎么自救，实际: %v", err)
+		}
+	}
+}
