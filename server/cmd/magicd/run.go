@@ -30,6 +30,19 @@ import (
 // defaultRateLimit 是未配置时的账号发送间隔。
 const defaultRateLimit = 1500 * time.Millisecond
 
+// shutdownSendBudget 是关停/拆除一个绑定时，给它未决合并窗口的有限
+// 发送预算。
+//
+// engine.Close() 会结算未决窗口并真的去发弹幕，但此时对应的连接 ctx
+// 可能已经被取消（宿主整体关停时是 Ctrl+C 取消的主 ctx；单独拆一个
+// 绑定时是 runtimeManager 为它取消的子 ctx），限流器会立刻返回
+// context.Canceled，那批攒着的欢迎语一条也发不出去。用一个脱离取消链、
+// 但有超时上限的 ctx，让它们有机会发出去而又不会拖死退出/拆除。
+//
+// 包级常量而不是 runRun 里的局部常量：runtime_manager.go 里单独拆除
+// 一个绑定时要复用同一个预算，没有理由另定一个数字。
+const shutdownSendBudget = 5 * time.Second
+
 // httpAddr 读 HTTP 监听地址。
 //
 // 默认只监听本机：不因为用户忘了配防火墙就把管理界面暴露到公网。
@@ -345,6 +358,79 @@ type roomAssembly struct {
 	cfg    store.RunConfig
 }
 
+// errInvalidRules 包装"这个绑定该被跳过、不该让整批装配失败"的错误——
+// 目前只有 buildRoomRuntime 报的"规则非法"这一种。
+//
+// assembleOne 同时喂给两个调用方（启动时的批量装配、运行期的单个动态
+// 装配），但两者对失败的处理策略完全不同：批量装配要把"规则非法"降级
+// 成跳过+记日志（P4-3 终审项【2】），其余错误（RoomInfo/调度器）仍然
+// 致命；动态装配面对的从来只有一个绑定，所有错误都只是"这一次没启动
+// 成功"，不需要这层区分。用类型而不是字符串匹配错误文案，是因为文案
+// 本来就该随时能改，不该被拿来当控制流的判据。
+type errInvalidRules struct{ err error }
+
+func (e *errInvalidRules) Error() string { return e.err.Error() }
+func (e *errInvalidRules) Unwrap() error { return e.err }
+
+// assembleOne 组装单个绑定直到"可以起 goroutine、可以登记进注册表"这
+// 一步：拿 RoomInfo → buildRoomRuntime → 注册这个绑定的全部定时规则 →
+// 记一条"已配置绑定"日志。
+//
+// 供两处复用，不要另写一套：assembleRuntimes 在进程启动时批量装配
+// （对 errInvalidRules 单独降级处理，其余错误让整批失败）；
+// runtimeManager.StartBinding 在运行期单独装配一个新增/启用的绑定
+// （任何错误都只是"这一次没启动成功"，见 runtime_manager.go）。
+func assembleOne(
+	ctx context.Context,
+	c store.RunConfig,
+	acctRT *accountRuntime,
+	activity *logging.ActivityWriter,
+	st *store.Store,
+	sched *scheduler.Scheduler,
+	log *slog.Logger,
+) (roomAssembly, error) {
+	// 解析真实房间号：配置里可能填的是短号
+	info, err := acctRT.api.RoomInfo(ctx, c.RoomID)
+	if err != nil {
+		return roomAssembly{}, fmt.Errorf("账号 %q 获取直播间 %s 信息失败: %w", c.AccountName, c.RoomID, err)
+	}
+
+	room, bot, engine, client, err := buildRoomRuntime(ctx, c, acctRT, info, activity, st, sched, log)
+	if err != nil {
+		return roomAssembly{}, &errInvalidRules{err}
+	}
+
+	// 注册该绑定的定时规则。这一步失败与"规则非法"是不同性质的问题——
+	// 规则本身校验通过了，是调度器出了别的问题。
+	for _, r := range engine.ScheduledRules() {
+		name, eng := r.Name, engine
+		if err := sched.Add(r.Schedule, room.label+"/"+name, func() {
+			eng.FireScheduled(name)
+		}); err != nil {
+			return roomAssembly{}, err
+		}
+	}
+
+	status := "未开播"
+	if info.IsLiving() {
+		status = "直播中"
+	}
+	enabled := 0
+	for _, r := range c.Rules {
+		if r.Enabled {
+			enabled++
+		}
+	}
+	log.Info("已配置绑定",
+		"binding", room.label,
+		"title", info.Title,
+		"status", status,
+		"rules", len(c.Rules),
+		"enabled", enabled)
+
+	return roomAssembly{room: room, bot: bot, engine: engine, client: client, cfg: c}, nil
+}
+
 // assembleRuntimes 依次为 cfgs 里的每个绑定组装运行时资源。
 //
 // **不启动任何 goroutine**：事件扇出与连接 goroutine 涉及真实网络连接，
@@ -352,10 +438,10 @@ type roomAssembly struct {
 // 能在不发起真实 B 站连接的前提下用 httptest 单独测试
 // （TestAssembleRuntimesSkipsInvalidBindingButKeepsOthers）。
 //
-// **单个绑定规则非法不会让整体失败**：buildRoomRuntime 返回 err 时只是
-// 跳过这一个绑定、记一条 log.Error，继续装配其余的。这是 P4-3 全批次
-// 终审项【2】的修复——一个绑定的配置坏了不该让整个守护进程（包括用户
-// 唯一的自救入口 WebUI）都起不来。
+// **单个绑定规则非法不会让整体失败**：assembleOne 返回 *errInvalidRules
+// 时只是跳过这一个绑定、记一条 log.Error，继续装配其余的。这是 P4-3
+// 全批次终审项【2】的修复——一个绑定的配置坏了不该让整个守护进程
+// （包括用户唯一的自救入口 WebUI）都起不来。
 //
 // RoomInfo 失败与定时规则注册失败仍然是致命的，原样冒泡给调用方：前者
 // 是网络/账号问题，后者说明规则本身已经校验通过、是调度器出了别的
@@ -373,55 +459,24 @@ func assembleRuntimes(
 	for _, c := range cfgs {
 		acctRT := accounts[c.AccountName]
 
-		// 解析真实房间号：配置里可能填的是短号
-		info, err := acctRT.api.RoomInfo(ctx, c.RoomID)
+		asm, err := assembleOne(ctx, c, acctRT, activity, st, sched, log)
 		if err != nil {
-			return nil, fmt.Errorf("账号 %q 获取直播间 %s 信息失败: %w", c.AccountName, c.RoomID, err)
-		}
-
-		room, bot, engine, client, err := buildRoomRuntime(ctx, c, acctRT, info, activity, st, sched, log)
-		if err != nil {
-			// 一个绑定的规则非法不该让整个守护进程起不来——尤其是当
-			// 修复入口正是这个进程本身提供的 WebUI。跳过这一个绑定，
-			// 其余绑定与 HTTP 服务照常装配、照常起来；用户能从这条
-			// 日志、以及仍然能打开的 WebUI 里看到问题并把规则改对。
-			// 这与「热重载失败时旧引擎照跑」是同一个原则：局部失败
-			// 不该升级成全局失败。
-			log.Error("绑定装配失败，已跳过该绑定，请修复规则后重启或通过 WebUI 重新保存",
-				"binding", c.Label(), "err", err)
-			continue
-		}
-
-		// 注册该绑定的定时规则。这一步失败与「规则非法」是不同性质的
-		// 问题——规则本身校验通过了，是调度器出了别的问题——所以仍然
-		// 保留原来的处理方式：让整个装配失败，不跟着降级。
-		for _, r := range engine.ScheduledRules() {
-			name, eng := r.Name, engine
-			if err := sched.Add(r.Schedule, room.label+"/"+name, func() {
-				eng.FireScheduled(name)
-			}); err != nil {
-				return nil, err
+			var invalid *errInvalidRules
+			if errors.As(err, &invalid) {
+				// 一个绑定的规则非法不该让整个守护进程起不来——尤其是当
+				// 修复入口正是这个进程本身提供的 WebUI。跳过这一个绑定，
+				// 其余绑定与 HTTP 服务照常装配、照常起来；用户能从这条
+				// 日志、以及仍然能打开的 WebUI 里看到问题并把规则改对。
+				// 这与「热重载失败时旧引擎照跑」是同一个原则：局部失败
+				// 不该升级成全局失败。
+				log.Error("绑定装配失败，已跳过该绑定，请修复规则后重启或通过 WebUI 重新保存",
+					"binding", c.Label(), "err", invalid.err)
+				continue
 			}
+			return nil, err
 		}
 
-		status := "未开播"
-		if info.IsLiving() {
-			status = "直播中"
-		}
-		enabled := 0
-		for _, r := range c.Rules {
-			if r.Enabled {
-				enabled++
-			}
-		}
-		log.Info("已配置绑定",
-			"binding", room.label,
-			"title", info.Title,
-			"status", status,
-			"rules", len(c.Rules),
-			"enabled", enabled)
-
-		out = append(out, roomAssembly{room: room, bot: bot, engine: engine, client: client, cfg: c})
+		out = append(out, asm)
 	}
 	return out, nil
 }
@@ -497,12 +552,18 @@ func runRun(args []string) error {
 		activity.Close()
 		return err
 	}
+	// 起始账号数固定成一个局部变量，只为最后那行启动日志用——
+	// accounts 这个 map 马上会被 rm 接手（newRuntimeManager 的 accounts
+	// 参数），HTTP 服务起来之后 ensureAccountRuntime 可能并发写它；
+	// 若日志那行到时候再读 len(accounts)，就是对同一个 map 无锁的
+	// 并发读写。启动日志只想报「装配时读到几个账号」，这里定住足够，
+	// 不需要为了一行日志去过 rm.mu。
+	initialAccountCount := len(accounts)
 
 	// HTTP 管理界面与机器人同进程：实时事件流直接复用机器人已持有的
 	// 事件通道。MAGICD_HTTP_ADDR 设为空串或 off 时完全不起 HTTP 服务，
 	// 退化成纯机器人。
 	var api *httpapi.Server
-	apiRuntimes := make(map[int64]httpapi.BindingRuntime, len(cfgs))
 	if addr := httpAddr(); addr != "" && addr != "off" {
 		api = httpapi.New(st, httpapi.Options{
 			Addr:         addr,
@@ -513,16 +574,22 @@ func runRun(args []string) error {
 
 	sched := scheduler.New(log)
 	var wg sync.WaitGroup
-	var roomRTs []*roomRuntime // 供关停时结算——必须取热重载后的当前引擎，见下方 defer
-	var bots []*roomBot
 
-	// 关停时给未决的合并窗口一个有限的发送预算。
+	// apiSink 是 runtimeManager 借用的 httpapi.Server 能力子集（登记/摘除
+	// 运行时、扇出事件），见 runtime_manager.go 的 apiRuntimeSink。
 	//
-	// engine.Close() 会结算未决窗口并真的去发弹幕，但此时主 ctx 已被
-	// Ctrl+C 取消，限流器会立刻返回 context.Canceled，那批攒着的欢迎语
-	// 一条也发不出去（只会留下一堆 error 日志行）。用一个脱离取消链、
-	// 但有超时上限的 ctx，让它们有机会发出去而又不会拖死退出。
-	const shutdownSendBudget = 5 * time.Second
+	// 不能直接把可能为 nil 的 *httpapi.Server 赋给接口变量——nil 指针
+	// 装进接口后接口本身不等于 nil（经典的 Go 陷阱），runtimeManager
+	// 里所有 `rm.api != nil` 的判断都会失效，变成永远调用一个内部是
+	// nil 指针的方法。
+	var apiSink apiRuntimeSink
+	if api != nil {
+		apiSink = api
+	}
+	rm := newRuntimeManager(ctx, st, sched, activity, apiSink, log, &wg, accounts)
+	if api != nil {
+		api.SetBindingLifecycle(rm)
+	}
 
 	// 清理放在 defer 里，而不是只写在正常关停路径的末尾。
 	//
@@ -532,18 +599,16 @@ func runRun(args []string) error {
 	// 那批日志行根本不会产生：Close() 才是结算未决合并窗口的地方，
 	// 不调用它，攒着的欢迎语既不会发出去，也不会有对应的动作日志。
 	//
-	// 这里用闭包而不是直接 defer closeAll(engines, bots, ..., activity)：
-	// defer 的参数在语句执行时就求值，若直接传值会捕获此刻仍是 nil 的
-	// engines/bots，后续循环里的 append 不会反映到已经求过值的参数上。
-	// 闭包捕获的是变量本身，调用时才读取，因此能看到循环结束时的
-	// 最终切片。
-	//
-	// engines 列表在这里现取而不是在装配循环里固定下来：一个绑定可能
-	// 在运行期间被热重载过，此时 roomRuntime.engine 里存的已经是新引擎，
-	// 关停时要结算的是这个新引擎，而不是启动时那个早已被 Reload 关掉的旧引擎。
+	// engines/bots 在这里现取而不是在装配循环里固定下来：绑定的集合
+	// 在运行期是可变的（P5-1 之后新增/停用都会即时生效），一个绑定也
+	// 可能被热重载过，此时 roomRuntime.engine 里存的已经是新引擎——
+	// 关停时要结算的是 rm.live 里此刻实际还在跑的那些，而不是进程启动
+	// 那一刻装配出来的静态列表。已经被 StopBinding 单独拆除过的绑定
+	// 不会出现在这里，它们的引擎在各自的拆除路径里已经关过了。
 	defer func() {
 		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownSendBudget)
 		defer cancel()
+		roomRTs, bots := rm.liveRoomRuntimes()
 		engines := make([]*rules.Engine, len(roomRTs))
 		for i, rt := range roomRTs {
 			engines[i] = rt.Engine()
@@ -559,42 +624,11 @@ func runRun(args []string) error {
 		return err
 	}
 
+	// 起 goroutine、登记进注册表：与运行期动态新增一个绑定
+	// （runtimeManager.StartBinding）走的是同一段收尾逻辑（Adopt），
+	// 不再各写一套——见 runtime_manager.go 顶部的说明。
 	for _, a := range assemblies {
-		bots = append(bots, a.bot)
-		roomRTs = append(roomRTs, a.room)
-		if api != nil {
-			apiRuntimes[a.cfg.BindingID] = a.room
-		}
-
-		wg.Add(2)
-		go func(rt *roomRuntime, c *bilibili.Client, bindingID int64) {
-			defer wg.Done()
-			// 消费 PKPipeline 合流后的通道，不直接消费 c.Events()：这一步
-			// 把 StartPK/EndPK/FetchOpponentSnapshots/ClassifyVisit 接进了
-			// 实时事件流（P4-4 Task 7）——PKPipeline 内部把「读事件」和
-			// 「PK 相关的网络调用」拆到了不同 goroutine，这里拿到的仍然是
-			// 一个普通的 <-chan event.Event，用法与直接消费 c.Events() 时
-			// 完全一致，只是多了 PK 期间合成的快照事件与串门信号事件。
-			for ev := range bilibili.NewPKPipeline(c).Run(ctx) {
-				// rt.Engine() 每次都要重新取：热重载会把 rt.engine 换成
-				// 新引擎，若在循环外缓存一次就等于把旧引擎闭包捕获死了，
-				// 重载之后事件会继续打在已经 Close 掉的旧引擎上。
-				rt.Engine().Handle(ev)
-				if api != nil {
-					// 扇出给网页。必须在 Handle 之后：机器人的响应也是通过
-					// 弹幕事件回流的，顺序颠倒会让因果看起来是反的。
-					api.Hub().Publish(bindingID, ev)
-				}
-			}
-		}(a.room, a.client, a.cfg.BindingID)
-
-		go func(label string, c *bilibili.Client) {
-			defer wg.Done()
-			// 单个绑定的连接出错不影响其他绑定，也不做账号切换
-			if err := c.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
-				log.Error("绑定连接退出", "binding", label, "err", err)
-			}
-		}(a.room.label, a.client)
+		rm.Adopt(ctx, a)
 	}
 
 	// 业务日志的定期清理
@@ -615,7 +649,8 @@ func runRun(args []string) error {
 	}()
 
 	if api != nil {
-		api.SetRuntime(apiRuntimes)
+		// 运行时注册表已经在上面的 rm.Adopt 循环里逐个 PutRuntime 登记过，
+		// 不再需要整表一次性 SetRuntime——这正是 P5-1 要拆掉的一次性交付。
 		if h, err := api.CurrentConfigHash(ctx); err == nil {
 			api.SetConfigHash(h)
 		} else {
@@ -632,7 +667,7 @@ func runRun(args []string) error {
 	}
 
 	sched.Start()
-	log.Info("机器人已启动", "绑定数", len(cfgs), "账号数", len(accounts))
+	log.Info("机器人已启动", "绑定数", len(cfgs), "账号数", initialAccountCount)
 	fmt.Println("按 Ctrl+C 退出")
 
 	<-ctx.Done()
@@ -655,30 +690,52 @@ func buildAccounts(ctx context.Context, cfgs []store.RunConfig, log *slog.Logger
 			continue
 		}
 
-		sess, err := auth.ParseSession(c.Cookie)
+		acctRT, err := buildAccountRuntime(ctx, c)
 		if err != nil {
-			return nil, fmt.Errorf("账号 %q 的 Cookie 无效，请重新扫码登录（magicd login --save %s）: %w",
-				c.AccountName, c.AccountName, err)
+			return nil, err
 		}
+		out[c.AccountName] = acctRT
 
+		// 仅用于日志：与 buildAccountRuntime 内部的 fallback 逻辑重复，
+		// 但 accountRuntime 不保留原始 interval（只保留装配好的
+		// ratelimit.Limiter），这里就不值得为了一行日志专门加一个
+		// 访问器往回掏。
 		interval := c.RateLimit
 		if interval <= 0 {
 			interval = defaultRateLimit
 		}
-
-		apiClient := api.New(sess)
-		// wbi 签名每个账号刷新一次即可，其全部直播间共用
-		if err := apiClient.RefreshNav(ctx); err != nil {
-			return nil, fmt.Errorf("账号 %q 初始化签名失败: %w", c.AccountName, err)
-		}
-
-		out[c.AccountName] = &accountRuntime{
-			acc: account.New(c.AccountName, sess, interval),
-			api: apiClient,
-		}
-		log.Info("已载入账号", "name", c.AccountName, "uid", sess.UID, "发送间隔", interval)
+		log.Info("已载入账号", "name", c.AccountName, "uid", acctRT.acc.Session.UID, "发送间隔", interval)
 	}
 	return out, nil
+}
+
+// buildAccountRuntime 装配单个账号的运行时资源（Cookie 解析、wbi 签名
+// 刷新）。供两处复用：buildAccounts 在进程启动时批量装配全部账号；
+// runtimeManager.ensureAccountRuntime 在运行期为一个新增/启用的绑定
+// 按需装配它所属的账号（若该账号已有其他绑定在跑，直接复用那一份，
+// 保证限流器真正共享——见 runtime_manager.go）。
+func buildAccountRuntime(ctx context.Context, c store.RunConfig) (*accountRuntime, error) {
+	sess, err := auth.ParseSession(c.Cookie)
+	if err != nil {
+		return nil, fmt.Errorf("账号 %q 的 Cookie 无效，请重新扫码登录（magicd login --save %s）: %w",
+			c.AccountName, c.AccountName, err)
+	}
+
+	interval := c.RateLimit
+	if interval <= 0 {
+		interval = defaultRateLimit
+	}
+
+	apiClient := api.New(sess)
+	// wbi 签名每个账号刷新一次即可，其全部直播间共用
+	if err := apiClient.RefreshNav(ctx); err != nil {
+		return nil, fmt.Errorf("账号 %q 初始化签名失败: %w", c.AccountName, err)
+	}
+
+	return &accountRuntime{
+		acc: account.New(c.AccountName, sess, interval),
+		api: apiClient,
+	}, nil
 }
 
 // closeAll 按「切换发送 ctx → 引擎 → 业务日志」的顺序关闭资源。

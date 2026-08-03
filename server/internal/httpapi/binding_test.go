@@ -5,10 +5,41 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/perm"
 )
+
+// fakeLifecycle 记录被调用的绑定 ID，验证 handler 在数据库状态改对之后
+// 是否正确地把「让改动在运行期生效」这件事交给了注入的实现——
+// 不必真的建连接、真的装配规则引擎（那是 cmd/magicd 的 runtimeManager
+// 自己的测试范围），这里只关心 handler 有没有在正确的时机调用它。
+type fakeLifecycle struct {
+	mu       sync.Mutex
+	started  []int64
+	stopped  []int64
+	startErr error
+}
+
+func (f *fakeLifecycle) StartBinding(_ context.Context, id int64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.started = append(f.started, id)
+	return f.startErr
+}
+
+func (f *fakeLifecycle) StopBinding(_ context.Context, id int64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.stopped = append(f.stopped, id)
+}
+
+func (f *fakeLifecycle) snapshot() (started, stopped []int64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]int64{}, f.started...), append([]int64{}, f.stopped...)
+}
 
 type bindingView struct {
 	ID          int64    `json:"id"`
@@ -337,5 +368,166 @@ func TestDeleteBindingByStrangerLooksLikeNotFound(t *testing.T) {
 
 	if _, err := st.GetBinding(context.Background(), "小号", "123"); err != nil {
 		t.Error("绑定不该被删掉")
+	}
+}
+
+// ---- P5-1：绑定的增删启停要让运行时在进程内跟着变，不需要重启 ----
+//
+// 这些测试只钉「handler 有没有在数据库状态改对之后调用注入的
+// BindingLifecycle」，不关心 StartBinding/StopBinding 内部怎么建连接——
+// 那是 cmd/magicd 的 runtimeManager 自己的测试范围（见 run_test.go /
+// runtime_manager_test.go）。这里假的实现只负责记下被调用的绑定 ID。
+
+// 新增绑定后必须立刻尝试起运行时，否则用户添加账号+直播间之后什么都
+// 不会发生——这正是 P5-1 要修的真机故障：webui 加完绑定，日志一条不动，
+// 只有手工重启进程才连得上。
+func TestCreateBindingStartsRuntime(t *testing.T) {
+	srv, st, api := newTestServerWithAPI(t)
+	lc := &fakeLifecycle{}
+	api.SetBindingLifecycle(lc)
+	c := loginAs(t, srv, st, "张三", false)
+	mustBindingFor(t, st, "张三", "小号", "111")
+
+	resp := jsonRequest(t, c, "POST", srv.URL+"/api/bindings",
+		`{"accountName":"小号","roomId":"222"}`)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("状态码 = %d, 期望 201", resp.StatusCode)
+	}
+
+	b, err := st.GetBinding(context.Background(), "小号", "222")
+	if err != nil {
+		t.Fatalf("查绑定报错: %v", err)
+	}
+	started, _ := lc.snapshot()
+	if len(started) != 1 || started[0] != b.ID {
+		t.Errorf("StartBinding 调用记录 = %v, 期望恰好 [%d]", started, b.ID)
+	}
+}
+
+// 重复创建（幂等分支）落在一个已被用户手动停用的绑定上时，不该把它
+// 悄悄重新拉起——UpsertBinding 的注释就写了「不改动 enabled」，
+// StartBinding 同理不该在这条路径上被调用。
+func TestCreateBindingIdempotentOnDisabledBindingDoesNotStartRuntime(t *testing.T) {
+	srv, st, api := newTestServerWithAPI(t)
+	lc := &fakeLifecycle{}
+	api.SetBindingLifecycle(lc)
+	c := loginAs(t, srv, st, "张三", false)
+	mustBindingFor(t, st, "张三", "小号", "111")
+
+	if err := st.SetBindingEnabled(context.Background(), "小号", "111", false); err != nil {
+		t.Fatalf("停用报错: %v", err)
+	}
+
+	resp := jsonRequest(t, c, "POST", srv.URL+"/api/bindings",
+		`{"accountName":"小号","roomId":"111"}`)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
+		t.Fatalf("状态码 = %d", resp.StatusCode)
+	}
+
+	started, _ := lc.snapshot()
+	if len(started) != 0 {
+		t.Errorf("已停用的绑定不该被重新拉起，StartBinding 调用记录 = %v", started)
+	}
+}
+
+// 启用一个绑定（PATCH enabled:true）要让它在运行期真的连上。
+func TestPatchBindingEnableStartsRuntime(t *testing.T) {
+	srv, st, api := newTestServerWithAPI(t)
+	lc := &fakeLifecycle{}
+	api.SetBindingLifecycle(lc)
+	c := loginAs(t, srv, st, "张三", false)
+	bid := mustBindingFor(t, st, "张三", "小号", "123")
+	if err := st.SetBindingEnabled(context.Background(), "小号", "123", false); err != nil {
+		t.Fatalf("停用报错: %v", err)
+	}
+
+	resp := jsonRequest(t, c, "PATCH", srv.URL+"/api/bindings/"+itoa(bid), `{"enabled":true}`)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("状态码 = %d", resp.StatusCode)
+	}
+
+	started, stopped := lc.snapshot()
+	if len(started) != 1 || started[0] != bid {
+		t.Errorf("StartBinding 调用记录 = %v, 期望恰好 [%d]", started, bid)
+	}
+	if len(stopped) != 0 {
+		t.Errorf("启用时不该调用 StopBinding，实际 = %v", stopped)
+	}
+}
+
+// 停用一个绑定（PATCH enabled:false）要让它在运行期真的断开——这正是
+// 「拆除」这一半，P4-4 踩过的坑同样适用：不摘干净就是悬挂的连接/
+// goroutine/定时任务。
+func TestPatchBindingDisableStopsRuntime(t *testing.T) {
+	srv, st, api := newTestServerWithAPI(t)
+	lc := &fakeLifecycle{}
+	api.SetBindingLifecycle(lc)
+	c := loginAs(t, srv, st, "张三", false)
+	bid := mustBindingFor(t, st, "张三", "小号", "123")
+
+	resp := jsonRequest(t, c, "PATCH", srv.URL+"/api/bindings/"+itoa(bid), `{"enabled":false}`)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("状态码 = %d", resp.StatusCode)
+	}
+
+	started, stopped := lc.snapshot()
+	if len(stopped) != 1 || stopped[0] != bid {
+		t.Errorf("StopBinding 调用记录 = %v, 期望恰好 [%d]", stopped, bid)
+	}
+	if len(started) != 0 {
+		t.Errorf("停用时不该调用 StartBinding，实际 = %v", started)
+	}
+}
+
+// 删库成功之后必须紧接着拆运行时——不拆的话，运行时会继续悬挂着一个
+// 数据库里已经查不到的绑定：定时任务、连接、goroutine 全部悬空，且
+// 再也没有任何 API 路径能摸到它、清理它。
+func TestDeleteBindingStopsRuntime(t *testing.T) {
+	srv, st, api := newTestServerWithAPI(t)
+	lc := &fakeLifecycle{}
+	api.SetBindingLifecycle(lc)
+	c := loginAs(t, srv, st, "张三", false)
+	bid := mustBindingFor(t, st, "张三", "小号", "123")
+
+	resp := jsonRequest(t, c, "DELETE", srv.URL+"/api/bindings/"+itoa(bid), "")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("状态码 = %d", resp.StatusCode)
+	}
+
+	_, stopped := lc.snapshot()
+	if len(stopped) != 1 || stopped[0] != bid {
+		t.Errorf("StopBinding 调用记录 = %v, 期望恰好 [%d]", stopped, bid)
+	}
+}
+
+// 没有权限的删除请求不该碰运行时——校验失败必须在调用 StopBinding
+// 之前短路，否则枚举攻击者的每一次尝试都会白白拆一次别人的运行时。
+func TestDeleteBindingForbiddenDoesNotStopRuntime(t *testing.T) {
+	srv, st, api := newTestServerWithAPI(t)
+	lc := &fakeLifecycle{}
+	api.SetBindingLifecycle(lc)
+	loginAs(t, srv, st, "张三", false)
+	bid := mustBindingFor(t, st, "张三", "小号", "123")
+
+	li := loginAs(t, srv, st, "李四", false)
+	if err := st.Grant(context.Background(), "李四", "小号", "123",
+		[]perm.Permission{perm.RuleWrite}); err != nil {
+		t.Fatalf("授权报错: %v", err)
+	}
+
+	resp := jsonRequest(t, li, "DELETE", srv.URL+"/api/bindings/"+itoa(bid), "")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("状态码 = %d, 期望 403", resp.StatusCode)
+	}
+
+	_, stopped := lc.snapshot()
+	if len(stopped) != 0 {
+		t.Errorf("无权限的删除尝试不该拆运行时，StopBinding 调用记录 = %v", stopped)
 	}
 }

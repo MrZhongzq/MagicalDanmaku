@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/connector/bilibili/auth"
+	"github.com/MrZhongzq/MagicalDanmaku/server/internal/event"
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/perm"
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/store"
 )
@@ -67,6 +68,11 @@ type Server struct {
 	hub     *Hub
 	runtime *runtimeRegistry
 	cfgHash configHashes
+
+	// lifecycle 由 run 注入（cmd/magicd 的 runtimeManager），供绑定的
+	// 增删启停 handler 在数据库状态改对之后调用，让改动在运行期生效。
+	// 可能为 nil：测试通常不关心这一步，处理器据此判空跳过。
+	lifecycle BindingLifecycle
 
 	// staticHandler 服务前端产物与 SPA 回退，由 mountStatic 装配。
 	// 不挂在 mux 上，见 static.go 里的说明。
@@ -362,3 +368,12 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 
 // Hub 返回事件中枢，供 run 把机器人收到的事件扇出进来。
 func (s *Server) Hub() *Hub { return s.hub }
+
+// Publish 把事件扇出给某个绑定的全部 SSE 订阅者，原样转发给 s.hub。
+//
+// 存在的唯一价值是让 *Server 满足 cmd/magicd 里 apiRuntimeSink 接口——
+// runtimeManager 需要在事件扇出 goroutine 里调用它，而那个接口是为了
+// 不必起一个真正的 httpapi.Server 就能测试 runtimeManager 而抽出来的，
+// 直接暴露 s.hub 反而让接口面变大（调用方能拿着 *Hub 做与「运行时登记」
+// 无关的事）。
+func (s *Server) Publish(bindingID int64, ev event.Event) { s.hub.Publish(bindingID, ev) }

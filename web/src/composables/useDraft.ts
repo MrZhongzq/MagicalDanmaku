@@ -28,21 +28,22 @@ import type { Rule, RuleView } from '@/api/rule-types'
  * 没有这一步的话，弹幕姬页保存一次就会把自定义弹幕姬页建的规则全部
  * 删掉（反过来也一样）——这是本模块最容易踩、后果也最重的坑。
  *
- * ## 第 2 步（reload）失败时 dirty 不归假
+ * ## 第 2 步（reload）失败时 dirty 照样归假
  *
  * PUT 成功但 POST reload 失败，是一个真实的中间态：库已经改了，但规则
- * 引擎还在跑旧配置。这里的判断是**不把 dirty 归假**：
+ * 引擎还在跑旧配置。`dirty` 回答的是「草稿和数据库是否一致」，PUT 一旦
+ * 成功这件事就是真的，不该被 reload 的结果污染——这两件事分别由
+ * `dirty` 与 `partialFailureMessage` 独立表达：
  *
- *   - 归假的话，界面会显示「没有未保存的改动」，操作者容易以为保存已经
- *     完全生效，但实际上引擎还在用旧规则——这比「多显示一条改动未保存」
- *     更容易造成实际的运营事故（该生效的调整没生效，主播却以为生效了）。
- *   - 不归假的代价很小：SaveBar 的按钮本来就没有二次确认，重新点一次
- *     保存，第 1 步（PUT 整组规则）是幂等的，重复写同样的内容无害；
- *     第 2 步会再试一次 reload。
- *
- * 额外暴露 `partialFailureMessage`，页面据此渲染一个独立的「已保存到
- * 数据库，但重载失败」提示——不复用 SaveBar 的 dirty 标签，因为那句
- * 「有未保存的改动」不足以说明「其实已经保存了一半」这件事。
+ *   - **早期版本曾经让 dirty 保持真**，理由是「怕操作者以为已经完全
+ *     生效」。但真机反馈（P5-1）显示这弄巧成拙：用户看到的是「已保存到
+ *     数据库，但重载失败」的黄条**同时**挂着右上角「有未保存的改动」，
+ *     两个信号叠在一起读起来像是保存本身失败了、数据没进库——而实际上
+ *     数据已经落库，只是没生效。离开页面时还会为一份已经保存好的草稿
+ *     弹出「确定要离开吗」，进一步坐实这种误导。
+ *   - 现在的取舍：PUT 成功就 `markSaved()`，`dirty` 归假；「还没生效」
+ *     这件事**只**由 `partialFailureMessage` 表达——页面据此渲染一条
+ *     独立的持久提示，不依赖 SaveBar 的 dirty 标签。
  */
 
 export interface UseDraftOptions {
@@ -138,9 +139,13 @@ export function useDraft(options: UseDraftOptions): UseDraftReturn {
       const merged = [...kept, ...options.buildRules()]
       await request('PUT', `/api/bindings/${id}/rules`, merged)
 
-      // 第 2 步：reload。失败时库已经改了、引擎还没变——见文件头「第 2
-      // 步失败时 dirty 不归假」的说明，这里只负责记录提示文案再原样抛出，
-      // 不在这一层动 baseline。
+      // PUT 一成功，草稿就已经等于数据库——dirty 该在这里归假，不必等
+      // reload 的结果。见文件头「第 2 步失败时 dirty 照样归假」的说明。
+      markSaved()
+
+      // 第 2 步：reload。失败时库已经改了、引擎还没变，这里只负责记录
+      // 提示文案再原样抛出，供页面单独渲染「已保存但未生效」的提示——
+      // 这与上面的 markSaved 是两件独立的事。
       try {
         await request('POST', `/api/bindings/${id}/reload`)
       } catch (e) {
@@ -149,7 +154,6 @@ export function useDraft(options: UseDraftOptions): UseDraftReturn {
       }
 
       partialFailureMessage.value = null
-      markSaved()
     } finally {
       saving.value = false
     }

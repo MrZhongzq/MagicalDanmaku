@@ -35,10 +35,10 @@
  * 是 `onSave`（本文件下方 `<script setup>` 部分），走 `useDraft` 提供的
  * 统一流程：GET 现有规则 → 与本页管的全部内置规则（`OWNED_RULE_NAMES`，
  * 见下方定义，目前九条）合并（不误删别的页面建的自定义规则）→ PUT
- * 写库 → POST reload 让规则引擎拿到新配置。第 2 步
- * （reload）失败时 `dirty` 不会归假，界面会给一条持久的「已保存到数据库，
- * 但重载失败」提示，具体行为见下方 `onSave` 与 `partialFailureMessage`
- * 处的注释。
+ * 写库 → POST reload 让规则引擎拿到新配置。PUT 一成功 `dirty` 就归假
+ * （草稿已经等于数据库）；第 2 步（reload）若失败，界面另外给一条持久的
+ * 「已保存到数据库，但重载失败」提示——这是与 `dirty` 独立的第二个信号，
+ * 具体行为见下方 `onSave` 与 `partialFailureMessage` 处的注释。
  *
  * ## P4-3：模板轮询与单人/多人两套模板已接通，不再悬空
  *
@@ -942,9 +942,10 @@ watch(
  * onSave 接 useDraft 的保存流程：GET 现有规则 → 合并 → PUT → POST reload。
  *
  * 两步都成功才提示「已保存并生效」。第 2 步（reload）失败时 useDraft 内部
- * 已经把 partialFailureMessage 设好、dirty 也没有归假（见 useDraft.ts
- * 文件头说明），这里的 catch 只负责把后端原文以 toast 形式再提醒一遍——
- * 「仍在用上一份配置运行」这句安抚必须原样带到用户面前。
+ * 已经把 partialFailureMessage 设好（dirty 已经归假，见 useDraft.ts
+ * 文件头说明——PUT 已经成功，草稿已经等于数据库），这里的 catch 只负责
+ * 把后端原文以 toast 形式再提醒一遍——「仍在用上一份配置运行」这句安抚
+ * 必须原样带到用户面前。
  */
 async function onSave() {
   try {
@@ -970,9 +971,9 @@ function dismissPartialFailure() {
 
     <!--
       第三态：PUT 写库成功、但 POST reload 失败——库已经改了，引擎还在跑
-      旧配置。dirty 这时候不会归假（见 useDraft.ts），单靠 SaveBar 的
-      「有未保存的改动」不足以说明这一半保存了、一半没生效，所以单独给
-      一条持久提示，不只是转瞬即逝的 toast。
+      旧配置。dirty 这时候已经归假（数据确实保存好了，见 useDraft.ts），
+      单靠 SaveBar 不会再显示「有未保存的改动」，所以单独给一条持久提示
+      说明「保存了，但还没生效」，不只是转瞬即逝的 toast。
     -->
     <NAlert
       v-if="partialFailureMessage"

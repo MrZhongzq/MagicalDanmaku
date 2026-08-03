@@ -175,6 +175,18 @@ func (s *Server) handleCreateBinding(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 只有真正启用的绑定才起运行时：UpsertBinding 不改动已有绑定的
+	// enabled（幂等分支落在一个被用户手动停用的绑定上时 b.Enabled 为
+	// 假），这时不该把它悄悄重新拉起。
+	if s.lifecycle != nil && b.Enabled {
+		if err := s.lifecycle.StartBinding(r.Context(), b.ID); err != nil {
+			// 数据库状态已经改对，运行时没跟上不该让这次请求报错——
+			// 用户看到的应该是「绑定加成功了」，账号异常/网络问题
+			// 从日志和 /api/meta/runtime 的连接状态里看得出来。
+			s.log.Warn("绑定已创建，但装配运行时失败", "binding", b.Label(), "err", err)
+		}
+	}
+
 	ps, err := s.callerPermissions(r.Context(), u)
 	if err != nil {
 		respondStoreError(w, err, "")
@@ -205,6 +217,18 @@ func (s *Server) handlePatchBinding(w http.ResponseWriter, r *http.Request) {
 	if err := s.store.SetBindingEnabled(r.Context(), b.AccountName, b.RoomID, *req.Enabled); err != nil {
 		respondStoreError(w, err, "绑定不存在")
 		return
+	}
+
+	// 数据库状态已经改对，让运行时跟上——这正是 P5-1 要修的问题：
+	// 启停过去只改库，不重启进程不生效。
+	if s.lifecycle != nil {
+		if *req.Enabled {
+			if err := s.lifecycle.StartBinding(r.Context(), b.ID); err != nil {
+				s.log.Warn("绑定已启用，但装配运行时失败", "binding", b.Label(), "err", err)
+			}
+		} else {
+			s.lifecycle.StopBinding(r.Context(), b.ID)
+		}
 	}
 	respondJSON(w, http.StatusOK, map[string]any{"enabled": *req.Enabled})
 }
@@ -254,6 +278,13 @@ func (s *Server) handleDeleteBinding(w http.ResponseWriter, r *http.Request) {
 	if err := s.store.DeleteBinding(r.Context(), b.AccountName, b.RoomID); err != nil {
 		respondStoreError(w, err, "绑定不存在")
 		return
+	}
+
+	// 删库成功之后立刻拆运行时——不拆的话会悬挂着一个数据库里已经查不到
+	// 的绑定：定时任务、连接、goroutine 全部悬空，且再也没有任何 API
+	// 路径能摸到它、清理它，只能重启进程。
+	if s.lifecycle != nil {
+		s.lifecycle.StopBinding(r.Context(), b.ID)
 	}
 	respondJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }

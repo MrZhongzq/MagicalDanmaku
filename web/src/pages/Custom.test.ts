@@ -914,7 +914,7 @@ describe('Custom 页：保存（Task 13 接上 useDraft）', () => {
   })
 
   it(
-    '第 2 步（reload）失败：dirty 不归假，界面出现"已保存到数据库，但重载失败"的持久提示，' +
+    '第 2 步（reload）失败：dirty 归假（数据确实已经保存），界面出现"已保存到数据库，但重载失败"的持久提示，' +
       '且原样带上后端"仍在用上一份配置运行"的安抚文案',
     async () => {
       const reloadErrorMessage = '重载失败，仍在用上一份配置运行: 规则 新规则 的正则非法'
@@ -931,7 +931,9 @@ describe('Custom 页：保存（Task 13 接上 useDraft）', () => {
       await flushPromises()
 
       expect(messageMock.error).toHaveBeenCalledWith(reloadErrorMessage)
-      expect(wrapper.text()).toContain('有未保存的改动')
+      // P5-1 修复：PUT 已经成功，dirty 该归假，「已保存但重载失败」的
+      // 黄条已经足够说明「还没生效」，不该再叠加「有未保存的改动」。
+      expect(wrapper.text()).not.toContain('有未保存的改动')
       expect(wrapper.text()).toContain('已保存到数据库，但重载失败')
       expect(wrapper.text()).toContain(reloadErrorMessage)
     },

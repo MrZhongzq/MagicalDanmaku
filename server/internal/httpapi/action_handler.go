@@ -68,8 +68,67 @@ func (rr *runtimeRegistry) all() map[int64]BindingRuntime {
 	return out
 }
 
-// SetRuntime 注入运行期能力。run 在启动完全部绑定后调用一次。
+// put 登记单个绑定，不影响表里的其余条目。
+func (rr *runtimeRegistry) put(id int64, rt BindingRuntime) {
+	rr.mu.Lock()
+	if rr.m == nil {
+		rr.m = make(map[int64]BindingRuntime)
+	}
+	rr.m[id] = rt
+	rr.mu.Unlock()
+}
+
+// remove 摘除单个绑定，不影响表里的其余条目。
+func (rr *runtimeRegistry) remove(id int64) {
+	rr.mu.Lock()
+	delete(rr.m, id)
+	rr.mu.Unlock()
+}
+
+// SetRuntime 用整张表替换注册表。run 在启动完全部绑定后调用一次——
+// 这一刻全部绑定的运行时都已就绪，一次性交付比逐个 PutRuntime 更直接。
 func (s *Server) SetRuntime(rt map[int64]BindingRuntime) { s.runtime.set(rt) }
+
+// PutRuntime 登记单个绑定的运行期能力，不影响其余绑定。
+//
+// 与 SetRuntime（启动时整表交付一次）是两条不同的路径：新增/启用一个
+// 绑定发生在运行期，此时其余绑定已经在跑，绝不能用一次 SetRuntime
+// 把它们全部替换掉——那样会把尚未来得及重新登记的绑定短暂地从表里
+// 抹掉，造成误报的「未在运行」。
+func (s *Server) PutRuntime(id int64, rt BindingRuntime) { s.runtime.put(id, rt) }
+
+// RemoveRuntime 从注册表摘除单个绑定。停用/删除一个绑定时调用，
+// 之后针对它的即时动作请求会如实收到「未在运行」而不是命中一个
+// 已经拆除掉的运行时。
+func (s *Server) RemoveRuntime(id int64) { s.runtime.remove(id) }
+
+// BindingLifecycle 是绑定生命周期的管理能力：新增/启用一个绑定时建连接、
+// 装配规则引擎、注册定时任务并登记进运行时注册表；停用/删除时反向拆除。
+//
+// httpapi 自己不知道怎么连 B 站——这由 cmd/magicd 的 runtimeManager 实现，
+// 通过 SetBindingLifecycle 注入。绑定的增删启停 handler 只管把数据库
+// 状态改对，然后调这个接口把「让改动在运行期生效」这件事交出去；
+// 生产环境里它不应为 nil（httpapi.New 时机器人进程总会注入一个），
+// 但测试可以不设，处理器据此判空跳过（见各 handler 里的 nil 检查）。
+type BindingLifecycle interface {
+	// StartBinding 为 bindingID 建立运行时。已经在跑的绑定重复调用是
+	// 幂等的（直接返回 nil）。
+	//
+	// 失败（账号异常、网络不通、规则非法等）不应该连带回滚数据库改动：
+	// 数据库状态是唯一真相，调用方只需要记日志，不能让用户的这次
+	// 增/删/启/停操作因为运行时暂时没跟上而报错——这与「热重载失败时
+	// 旧引擎照跑、不拖累其余绑定」是同一个原则。
+	StartBinding(ctx context.Context, bindingID int64) error
+
+	// StopBinding 反向拆除 bindingID 的运行时：停连接、注销定时任务、
+	// 结算引擎未决的合并窗口、从注册表摘除。已经不在跑的绑定重复调用
+	// 是幂等的（直接返回，不做任何事），因此不返回 error——调用方没有
+	// 需要处理的失败态。
+	StopBinding(ctx context.Context, bindingID int64)
+}
+
+// SetBindingLifecycle 注入绑定生命周期管理能力。run 在装配完成后调用一次。
+func (s *Server) SetBindingLifecycle(lc BindingLifecycle) { s.lifecycle = lc }
 
 // runtimeFor 取运行期能力，取不到时已写过 503 响应。
 func (s *Server) runtimeFor(w http.ResponseWriter, bindingID int64, label string) (BindingRuntime, bool) {

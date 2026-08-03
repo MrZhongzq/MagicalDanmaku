@@ -77,8 +77,9 @@
  * 与 Danmaku.vue 同一套约定：改动先只进内存草稿；`SaveBar` 的 `save`
  * 事件接的是 `onSave`（本文件下方 `<script setup>` 部分），走 `useDraft`
  * 提供的统一流程：GET 现有规则 → 合并（保留全部内置规则，替换本页管的
- * 自定义规则）→ PUT 写库 → POST reload。第 2 步失败时 `dirty` 不归假，界面会
- * 给一条持久的「已保存到数据库，但重载失败」提示，具体行为见下方
+ * 自定义规则）→ PUT 写库 → POST reload。PUT 一成功 `dirty` 就归假；
+ * 第 2 步（reload）若失败，界面另外给一条持久的「已保存到数据库，但
+ * 重载失败」提示——这是与 `dirty` 独立的第二个信号，具体行为见下方
  * `onSave` 与 `partialFailureMessage` 处的注释。
  */
 import type { Action, Aggregate, Condition, Rule, RuleView } from '@/api/rule-types'
@@ -711,8 +712,8 @@ function dismissPartialFailure() {
     </div>
 
     <!-- 第三态：PUT 写库成功、但 POST reload 失败——见 useDraft.ts 文件头说明，
-         dirty 这时候不归假，单靠 SaveBar 的「有未保存的改动」看不出「已经保存了一半」，
-         所以单独给一条持久提示。 -->
+         dirty 这时候已经归假（数据确实保存好了），单靠 SaveBar 不会再显示
+         「有未保存的改动」，所以单独给一条持久提示说明「保存了，但还没生效」。 -->
     <NAlert
       v-if="partialFailureMessage"
       type="warning"

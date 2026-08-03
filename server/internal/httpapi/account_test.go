@@ -487,6 +487,43 @@ func TestDeleteAccountByOwner(t *testing.T) {
 	}
 }
 
+// 删账号会级联删掉它名下全部绑定（bindings.account_id 是 ON DELETE
+// CASCADE），但那只是数据库层面的事——运行时（P5-1 之后可以动态跑着）
+// 不会跟着自动消失。不主动摘的话，这些绑定的连接/goroutine/定时任务会
+// 变成永远没有任何 API 路径能摸到、也没人会去清理的悬挂资源，直到进程
+// 重启。删账号前把它名下每个绑定都过一遍 StopBinding，堵住这个口子。
+func TestDeleteAccountStopsRuntimeForAllItsBindings(t *testing.T) {
+	srv, st, api := newTestServerWithAPI(t)
+	lc := &fakeLifecycle{}
+	api.SetBindingLifecycle(lc)
+	c := loginAs(t, srv, st, "张三", false)
+	bid1 := mustBindingFor(t, st, "张三", "小号", "111")
+
+	acc, err := st.GetAccountByName(context.Background(), "小号")
+	if err != nil {
+		t.Fatalf("查账号报错: %v", err)
+	}
+	b2, err := st.UpsertBinding(context.Background(), acc.ID, "222")
+	if err != nil {
+		t.Fatalf("建第二个绑定报错: %v", err)
+	}
+
+	resp := jsonRequest(t, c, "DELETE", srv.URL+"/api/accounts/小号", "")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("状态码 = %d", resp.StatusCode)
+	}
+
+	_, stopped := lc.snapshot()
+	got := map[int64]bool{}
+	for _, id := range stopped {
+		got[id] = true
+	}
+	if !got[bid1] || !got[b2.ID] {
+		t.Errorf("StopBinding 调用记录 = %v, 期望包含该账号名下两个绑定 [%d %d]", stopped, bid1, b2.ID)
+	}
+}
+
 func TestDeleteAccountByStranger(t *testing.T) {
 	srv, st := newTestServer(t)
 	loginAs(t, srv, st, "张三", false)

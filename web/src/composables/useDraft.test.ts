@@ -276,7 +276,7 @@ describe('useDraft：save() 第 1 步（PUT 写库）失败——库和引擎都
 })
 
 describe('useDraft：save() 第 2 步（reload）失败——库已经改了，引擎还在跑旧配置', () => {
-  it('dirty 不归假，partialFailureMessage 原样带上后端"仍在用上一份配置运行"的安抚文案', async () => {
+  it('dirty 归假（数据已经落库），partialFailureMessage 原样带上后端"仍在用上一份配置运行"的安抚文案', async () => {
     const reloadErrorMessage = '重载失败，仍在用上一份配置运行: 规则 X 的正则非法'
     const f = vi.fn().mockImplementation((url: string, init?: RequestInit) => {
       if (url === '/api/bindings/1/rules' && (!init || !init.method || init.method === 'GET')) {
@@ -303,7 +303,12 @@ describe('useDraft：save() 第 2 步（reload）失败——库已经改了，�
 
     await expect(draft.save()).rejects.toThrow(reloadErrorMessage)
 
-    expect(draft.dirty.value).toBe(true)
+    // PUT 已经成功——草稿与数据库一致，「有未保存的改动」这句话不再
+    // 成立，该归假。是否已经生效是另一件事，由 partialFailureMessage
+    // 单独表达，不该靠不归假的 dirty 来代打这个信号（P5-1 修复：
+    // 之前两者混在一起，会同时出现「已保存但重载失败」的黄条和
+    // 「有未保存的改动」的角标，读起来像是保存本身失败了）。
+    expect(draft.dirty.value).toBe(false)
     expect(draft.partialFailureMessage.value).toBe(reloadErrorMessage)
   })
 })

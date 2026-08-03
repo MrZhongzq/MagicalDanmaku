@@ -705,7 +705,7 @@ describe('Danmaku 页面：保存（Task 13 接上 useDraft）', () => {
 
   it(
     '第 2 步（reload）失败：库已经改了、引擎还在跑旧配置——' +
-      'dirty 不归假，界面出现"已保存到数据库，但重载失败"的持久提示，' +
+      'dirty 归假（数据确实已经保存），界面出现"已保存到数据库，但重载失败"的持久提示，' +
       '且原样带上后端"仍在用上一份配置运行"的安抚文案',
     async () => {
       const reloadErrorMessage = '重载失败，仍在用上一份配置运行: 规则 内置/进房欢迎 的正则非法'
@@ -725,10 +725,12 @@ describe('Danmaku 页面：保存（Task 13 接上 useDraft）', () => {
       await flushPromises()
 
       expect(messageMock.error).toHaveBeenCalledWith(reloadErrorMessage)
-      // 用户的判断：不能让 dirty 归假——归假会让操作者以为已经完全生效，
-      // 但引擎其实还在跑旧规则。
-      expect(wrapper.text()).toContain('有未保存的改动')
-      expect(saveBtn().attributes('disabled')).toBeUndefined()
+      // P5-1 修复：PUT 已经成功，草稿已经等于数据库，dirty 该归假——
+      // 「已保存到数据库，但重载失败」的黄条已经足够说明「还没生效」，
+      // 不需要再靠一个不归假的 dirty 叠加一句「有未保存的改动」，
+      // 两者一起出现只会让人以为保存本身失败了。
+      expect(wrapper.text()).not.toContain('有未保存的改动')
+      expect(saveBtn().attributes('disabled')).toBeDefined()
       expect(wrapper.text()).toContain('已保存到数据库，但重载失败')
       expect(wrapper.text()).toContain(reloadErrorMessage)
     },

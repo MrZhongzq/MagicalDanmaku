@@ -285,9 +285,34 @@ func (s *Server) handleDeleteAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 删账号前先摸一遍它名下有哪些绑定，供下面拆运行时用——
+	// DeleteAccount 会带着 ON DELETE CASCADE 把这些绑定行一并删掉，
+	// 到那时候就再也查不出它们的 ID 了。
+	var affected []int64
+	if s.lifecycle != nil {
+		bs, err := s.store.ListBindings(r.Context())
+		if err != nil {
+			respondStoreError(w, err, "")
+			return
+		}
+		for _, b := range bs {
+			if b.AccountID == acc.ID {
+				affected = append(affected, b.ID)
+			}
+		}
+	}
+
 	if err := s.store.DeleteAccount(r.Context(), name); err != nil {
 		respondStoreError(w, err, "账号 "+name+" 不存在")
 		return
+	}
+
+	// 删库级联删掉的绑定不会自动摘运行时——不摘的话，这些绑定的连接/
+	// goroutine/定时任务会变成永远没有任何 API 路径能摸到的悬挂资源。
+	if s.lifecycle != nil {
+		for _, id := range affected {
+			s.lifecycle.StopBinding(r.Context(), id)
+		}
 	}
 	respondJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
