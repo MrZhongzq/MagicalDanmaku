@@ -398,3 +398,19 @@ describe('Logs 页', () => {
     expect(messageMock.error).toHaveBeenCalledWith(backendMessage)
   })
 })
+
+// P5-3：与其余页面同一条要求——日志页此前也看不出正在看哪个绑定的日志。
+// 日志页只读，没有专门的权限点，选择器不带 requiredPerm。
+describe('Logs 页：正文里也有账号+直播间选择器', () => {
+  it('页面渲染 BindingSelector，不要求特定权限', async () => {
+    setupStore()
+    stubFetch([])
+    const wrapper = mount(Logs)
+    await flushPromises()
+
+    const { default: BindingSelector } = await import('@/components/BindingSelector.vue')
+    const selector = wrapper.findComponent(BindingSelector)
+    expect(selector.exists()).toBe(true)
+    expect(selector.props('requiredPerm')).toBeUndefined()
+  })
+})

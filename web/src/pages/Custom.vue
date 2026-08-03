@@ -496,6 +496,7 @@ import TemplateList from '@/components/TemplateList.vue'
 import ConditionTree from '@/components/ConditionTree.vue'
 import type { MetaItem } from '@/components/ConditionTree.vue'
 import PermissionWarning from '@/components/PermissionWarning.vue'
+import BindingSelector from '@/components/BindingSelector.vue'
 
 const auth = useAuthStore()
 const bindings = useBindingsStore()
@@ -707,7 +708,10 @@ function dismissPartialFailure() {
 <template>
   <div class="custom-page">
     <div class="page-header">
-      <h2>自定义弹幕姬</h2>
+      <div class="page-header-left">
+        <h2>自定义弹幕姬</h2>
+        <BindingSelector required-perm="rule:write" />
+      </div>
       <SaveBar :dirty="dirty" :saving="saving" @save="onSave" />
     </div>
 
@@ -955,7 +959,15 @@ function dismissPartialFailure() {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
   margin-bottom: 16px;
+}
+.page-header-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
 }
 .intro-alert {
   margin-bottom: 16px;

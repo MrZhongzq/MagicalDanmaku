@@ -41,6 +41,7 @@ import { useAuthStore } from '@/stores/auth'
 import { useBindingsStore } from '@/stores/bindings'
 import PermissionWarning from '@/components/PermissionWarning.vue'
 import MemberEditor from '@/components/MemberEditor.vue'
+import BindingSelector from '@/components/BindingSelector.vue'
 
 const auth = useAuthStore()
 const bindings = useBindingsStore()
@@ -253,7 +254,15 @@ onMounted(() => void loadUsers())
       </div>
     </NCard>
 
+    <!--
+      管理页三块里只有「授权管理」是绑定维度的（改自己密码、用户管理都
+      与具体绑定无关），选择器只放在这一块的卡片头上，不放在页面顶端——
+      放在页面顶端会让人误以为「改我的密码」「用户管理」也受它影响。
+    -->
     <NCard title="授权管理" class="section-card">
+      <template #header-extra>
+        <BindingSelector required-perm="member:manage" />
+      </template>
       <NEmpty v-if="!bindings.current" description="请先在顶部选择一个直播间" />
       <PermissionWarning v-else-if="!canManageMembers" :text="MEMBER_MANAGE_HINT" />
       <MemberEditor v-else :key="bindings.current.id" :binding-id="bindings.current.id" />

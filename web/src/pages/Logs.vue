@@ -53,6 +53,7 @@ import type { DataTableColumns } from 'naive-ui'
 import { ApiError, request } from '@/api'
 import type { Activity } from '@/api'
 import { useBindingsStore } from '@/stores/bindings'
+import BindingSelector from '@/components/BindingSelector.vue'
 import { useEventStream } from '@/composables/useEventStream'
 import type { StreamEvent } from '@/composables/useEventStream'
 
@@ -382,7 +383,11 @@ async function doClearHistory(bindingId: number) {
 
 <template>
   <div class="logs-page">
-    <h2>日志</h2>
+    <div class="page-header">
+      <h2>日志</h2>
+      <!-- 日志页只读，没有专门的权限点，选择器不带 requiredPerm。 -->
+      <BindingSelector />
+    </div>
 
     <NEmpty v-if="!bindings.current" description="请先在顶部选择一个直播间" />
 
@@ -432,6 +437,14 @@ async function doClearHistory(bindingId: number) {
 </template>
 
 <style scoped>
+.page-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 16px;
+}
 .filters {
   display: flex;
   align-items: center;

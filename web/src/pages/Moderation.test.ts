@@ -142,6 +142,25 @@ describe('Moderation 权限警告：提示但不锁面板', () => {
   })
 })
 
+// P5-3：真机反馈原话——房管页看不到也换不了当前是哪个绑定，用户在这页做的
+// 操作其实打在某个绑定上，但不知道是哪个。删掉页面里的 BindingSelector
+// 这条测试就会变红。
+describe('Moderation 页：正文里也有账号+直播间选择器', () => {
+  it('页面渲染 BindingSelector，且要求 user:block 权限', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(() => Promise.resolve(ok([]))),
+    )
+    const { router } = setupStores(['user:block'])
+    const wrapper = await mountModeration(router)
+
+    const { default: BindingSelector } = await import('@/components/BindingSelector.vue')
+    const selector = wrapper.findComponent(BindingSelector)
+    expect(selector.exists()).toBe(true)
+    expect(selector.props('requiredPerm')).toBe('user:block')
+  })
+})
+
 describe('Moderation 失败回显：后端原文，不包装', () => {
   beforeEach(() => {
     vi.unstubAllGlobals()

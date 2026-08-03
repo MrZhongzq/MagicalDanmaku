@@ -835,6 +835,7 @@ import { useDraft } from '@/composables/useDraft'
 import SaveBar from '@/components/SaveBar.vue'
 import TemplateList from '@/components/TemplateList.vue'
 import PermissionWarning from '@/components/PermissionWarning.vue'
+import BindingSelector from '@/components/BindingSelector.vue'
 import PkPanel, {
   buildPkRule,
   buildPkVisitRule,
@@ -1061,7 +1062,13 @@ function dismissPartialFailure() {
 <template>
   <div class="danmaku-page">
     <div class="page-header">
-      <h2>弹幕姬</h2>
+      <div class="page-header-left">
+        <h2>弹幕姬</h2>
+        <!-- 弹幕姬这一页表单很长，滚动下去之后顶部导航栏的选择器就不在视野里了
+             ——这正是真机反馈那句「不知道自己正在操作哪个绑定」的成因，
+             页面正文里也放一份同款选择器，不必滚回顶部去确认/切换。 -->
+        <BindingSelector required-perm="rule:write" />
+      </div>
       <SaveBar :dirty="dirty" :saving="saving" @save="onSave" />
     </div>
 
@@ -1497,7 +1504,15 @@ function dismissPartialFailure() {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
   margin-bottom: 16px;
+}
+.page-header-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
 }
 .partial-failure-alert {
   margin-bottom: 16px;

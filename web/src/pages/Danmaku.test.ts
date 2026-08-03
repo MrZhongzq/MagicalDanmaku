@@ -597,6 +597,25 @@ describe('Danmaku 页面：rule:write 权限门禁（提示但不锁面板）', 
   })
 })
 
+// P5-3：真机反馈原话「除了首页账号和直播间之外，必须每个栏目都是账号+直播间
+// 选择」——弹幕姬是长表单页，滚动下去之后顶部导航栏的选择器不在视野里，
+// 正文里必须也有一份。这条测试删掉 Danmaku.vue 里的 BindingSelector 就会变红。
+describe('Danmaku 页面：正文里也有账号+直播间选择器', () => {
+  it('页面渲染 BindingSelector，且要求 rule:write 权限', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(() => Promise.resolve(ok([]))),
+    )
+    setupStores()
+    const wrapper = await mountDanmaku()
+
+    const { default: BindingSelector } = await import('@/components/BindingSelector.vue')
+    const selector = wrapper.findComponent(BindingSelector)
+    expect(selector.exists()).toBe(true)
+    expect(selector.props('requiredPerm')).toBe('rule:write')
+  })
+})
+
 describe('Danmaku 页面：dirty', () => {
   it('刚加载完成时 dirty 为假，保存按钮 disabled；改动草稿后 dirty 变真、按钮可点', async () => {
     stubSaveFetch({ rules: [] })

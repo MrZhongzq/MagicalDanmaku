@@ -51,6 +51,7 @@ import type { BlockedUser } from '@/api'
 import { useAuthStore } from '@/stores/auth'
 import { useBindingsStore } from '@/stores/bindings'
 import PermissionWarning from '@/components/PermissionWarning.vue'
+import BindingSelector from '@/components/BindingSelector.vue'
 
 const auth = useAuthStore()
 const bindings = useBindingsStore()
@@ -301,7 +302,13 @@ function goToCustomDanmaku() {
 
 <template>
   <div class="moderation-page">
-    <h2>房管</h2>
+    <div class="page-header">
+      <h2>房管</h2>
+      <!-- 房管页看不到也换不了当前是哪个绑定是真机反馈原话——操作明明打在
+           某个绑定上，界面却没有任何提示。选择器要求 user:block 才不至于
+           切过去就白操作一场，但只标注、不锁死，见组件头部注释。 -->
+      <BindingSelector required-perm="user:block" />
+    </div>
 
     <NEmpty v-if="!bindings.current" description="请先在顶部选择一个直播间" />
 
@@ -388,6 +395,14 @@ function goToCustomDanmaku() {
 </template>
 
 <style scoped>
+.page-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 16px;
+}
 .section-card {
   margin-bottom: 16px;
 }

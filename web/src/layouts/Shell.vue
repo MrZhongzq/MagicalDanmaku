@@ -1,19 +1,10 @@
 <script setup lang="ts">
-import { computed, onMounted } from 'vue'
+import { onMounted } from 'vue'
 import { RouterView, useRoute, useRouter } from 'vue-router'
-import {
-  NAlert,
-  NLayout,
-  NLayoutHeader,
-  NLayoutSider,
-  NMenu,
-  NSelect,
-  NButton,
-  NSpin,
-  useMessage,
-} from 'naive-ui'
+import { NLayout, NLayoutHeader, NLayoutSider, NMenu, NButton, useMessage } from 'naive-ui'
 import { useAuthStore } from '@/stores/auth'
 import { useBindingsStore } from '@/stores/bindings'
+import BindingSelector from '@/components/BindingSelector.vue'
 
 const auth = useAuthStore()
 const bindings = useBindingsStore()
@@ -30,13 +21,6 @@ const MENU = [
   { label: '日志', key: 'logs' },
   { label: '管理', key: 'admin' },
 ]
-
-const bindingOptions = computed(() =>
-  bindings.list.map((b) => ({
-    label: `${b.accountName} @ ${b.roomId}${b.enabled ? '' : '（已停用）'}`,
-    value: b.id,
-  })),
-)
 
 onMounted(() => void bindings.refresh())
 
@@ -79,40 +63,15 @@ function doLogout() {
     <NLayout>
       <NLayoutHeader bordered class="header">
         <div class="left">
-          <NSpin v-if="bindings.loading" size="small" />
-          <NSelect
-            v-else
-            :value="bindings.currentId"
-            :options="bindingOptions"
-            placeholder="没有可用的直播间"
-            style="width: 260px"
-            @update:value="bindings.select"
-          />
+          <!-- 选择器与「加载中/加载失败」的判断收进了 BindingSelector，
+               各页面正文里的同款选择器与这里共用一份实现，见该组件头部注释。 -->
+          <BindingSelector />
         </div>
         <div class="right">
           <span class="who">{{ auth.user?.username }}</span>
           <NButton text size="small" @click="doLogout"> 退出 </NButton>
         </div>
       </NLayoutHeader>
-      <!--
-        GET /api/bindings 非 401 失败时不能一条提示都不出现——不然顶部选择器
-        会渲染 placeholder="没有可用的直播间"，与「这个账号确实没绑过直播间」
-        在界面上完全无法区分，用户会以为是自己的数据有问题。
-
-        401 已经由 setUnauthorizedHandler 全局处理（会跳登录页），走到这里
-        时用户已经在跳转了，不需要特判。
-      -->
-      <NAlert
-        v-if="bindings.loadError"
-        type="error"
-        title="加载直播间列表失败"
-        class="binding-error-alert"
-      >
-        <div class="binding-error-body">
-          <span>{{ bindings.loadError }}</span>
-          <NButton size="small" @click="bindings.refresh()">重试</NButton>
-        </div>
-      </NAlert>
       <NLayout content-style="padding: 16px">
         <RouterView />
       </NLayout>
@@ -136,14 +95,5 @@ function doLogout() {
 .who {
   font-size: 13px;
   opacity: 0.8;
-}
-.binding-error-alert {
-  margin: 12px 16px 0;
-}
-.binding-error-body {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
 }
 </style>

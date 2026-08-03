@@ -438,3 +438,19 @@ describe('Stats 页', () => {
     expect(wrapper.find('.bucket-card').text()).toContain('session-1')
   })
 })
+
+// P5-3：与其余页面同一条要求——统计页此前完全看不出正在看哪个绑定的数据。
+// 统计页没有专门的权限点校验，选择器不带 requiredPerm。
+describe('Stats 页：正文里也有账号+直播间选择器', () => {
+  it('页面渲染 BindingSelector，不要求特定权限', async () => {
+    setupStore()
+    stubFetch({ statsByDay: [] })
+    const wrapper = mount(Stats)
+    await flushPromises()
+
+    const { default: BindingSelector } = await import('@/components/BindingSelector.vue')
+    const selector = wrapper.findComponent(BindingSelector)
+    expect(selector.exists()).toBe(true)
+    expect(selector.props('requiredPerm')).toBeUndefined()
+  })
+})

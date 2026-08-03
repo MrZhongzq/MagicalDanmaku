@@ -59,6 +59,7 @@ import type { DataTableColumns } from 'naive-ui'
 import { ApiError, request } from '@/api'
 import type { Activity, StatsBucket, StatsDimension } from '@/api'
 import { useBindingsStore } from '@/stores/bindings'
+import BindingSelector from '@/components/BindingSelector.vue'
 
 const bindings = useBindingsStore()
 
@@ -352,7 +353,12 @@ const previewColumns: DataTableColumns<PreviewRow> = [
 
 <template>
   <div class="stats-page">
-    <h2>统计</h2>
+    <div class="page-header">
+      <h2>统计</h2>
+      <!-- 统计页不写规则也不动禁言名单，本页没有专门的权限点校验，
+           选择器不带 requiredPerm——所有能看到这个绑定的成员理应都能看统计。 -->
+      <BindingSelector />
+    </div>
 
     <NEmpty v-if="!bindings.current" description="请先在顶部选择一个直播间" />
 
@@ -453,6 +459,14 @@ const previewColumns: DataTableColumns<PreviewRow> = [
 </template>
 
 <style scoped>
+.page-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 16px;
+}
 .hanging-alert {
   margin-bottom: 16px;
 }

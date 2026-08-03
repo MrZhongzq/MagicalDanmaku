@@ -810,6 +810,21 @@ describe('Custom 页：rule:write 权限门禁（提示但不锁面板）', () =
   })
 })
 
+// P5-3：与 Danmaku.vue 同一条要求——每个栏目都要能看到、换掉当前绑定，
+// 删掉页面里的 BindingSelector 这条测试就会变红。
+describe('Custom 页：正文里也有账号+直播间选择器', () => {
+  it('页面渲染 BindingSelector，且要求 rule:write 权限', async () => {
+    setupStores()
+    stubFetch({ rules: [] })
+    const wrapper = await mountCustom()
+
+    const { default: BindingSelector } = await import('@/components/BindingSelector.vue')
+    const selector = wrapper.findComponent(BindingSelector)
+    expect(selector.exists()).toBe(true)
+    expect(selector.props('requiredPerm')).toBe('rule:write')
+  })
+})
+
 describe('defaultActionDraft', () => {
   it('默认是 danmaku 类型，带一条模板', () => {
     const a = defaultActionDraft()

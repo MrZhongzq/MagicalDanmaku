@@ -1,7 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount, flushPromises, DOMWrapper } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
+import { NCard } from 'naive-ui'
 import type { Permission } from '@/api'
+import BindingSelector from '@/components/BindingSelector.vue'
 
 // Admin 页三块：改自己的密码、用户管理（仅管理员）、授权管理（委托给
 // MemberEditor）。MemberEditor 自己有完整的测试（PRESETS 展开、编辑/撤销），
@@ -339,5 +341,33 @@ describe('Admin 三、授权管理：门禁判断委托给 auth.hasPerm，文案
     await flushPromises()
 
     expect(wrapper.text()).not.toContain('授权管理需要 member:manage 权限')
+  })
+})
+
+// P5-3：管理页三块只有「授权管理」是绑定维度的——改自己密码、用户管理都跟
+// 具体绑定无关。选择器只该出现在「授权管理」这一块卡片头上，不该出现在
+// 页面顶端（那样会误导成「改密码/用户管理也受它影响」）。
+describe('Admin 页：BindingSelector 只出现在「授权管理」卡片上，不出现在其余两块', () => {
+  it('「授权管理」卡片头上有 BindingSelector，「改我的密码」「用户管理」两块没有', async () => {
+    const auth = useAuthStore()
+    auth.user = { id: 1, username: '管理员', isAdmin: true, createdAt: '' }
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(() => Promise.resolve(ok([]))),
+    )
+
+    const wrapper = mountAdmin()
+    await flushPromises()
+
+    const cards = wrapper.findAllComponents(NCard)
+    const authCard = cards.find((c) => c.props('title') === '授权管理')
+    expect(authCard, '应该能找到「授权管理」卡片').toBeTruthy()
+    expect(authCard!.findComponent(BindingSelector).exists()).toBe(true)
+
+    const otherCards = cards.filter((c) => c.props('title') !== '授权管理')
+    expect(otherCards.length).toBeGreaterThan(0)
+    otherCards.forEach((c) => {
+      expect(c.findComponent(BindingSelector).exists()).toBe(false)
+    })
   })
 })
