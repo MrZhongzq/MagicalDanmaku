@@ -46,6 +46,34 @@ magicd run                             # 启动
 
 配置的唯一真相是数据库，`magicd run` 不读 YAML——YAML 只是导入入口。
 
+## 开发：跑测试
+
+```bash
+cd server
+export MAGICD_TEST_DATABASE_URL='postgres://magicd:magicd@localhost:5432/magicd?sslmode=disable'
+go test ./... -count=1
+```
+
+**`MAGICD_TEST_DATABASE_URL` 不设的话，存储层测试会整包 skip 而退出码仍是 0**
+——看起来全绿，实际什么都没跑。`-count=1` 同理：不加的话拿到的可能是缓存的
+旧结果，不是这次改动的证据。
+
+竞态检测（本仓库有两条并发的 WebSocket 连接与若干共享状态，改动这些地方时
+务必跑）：
+
+```bash
+CGO_ENABLED=1 go test ./... -race -count=1
+```
+
+`-race` **需要 CGO 和一个 C 编译器**，而本项目为了六平台交叉编译默认
+`CGO_ENABLED=0`，所以必须像上面这样显式打开。Windows 上装编译器：
+
+```powershell
+winget install -e --id MSYS2.MSYS2
+C:\msys64\usr\bin\pacman.exe -S --noconfirm --needed mingw-w64-x86_64-gcc
+$env:PATH = "C:\msys64\mingw64\bin;$env:PATH"
+```
+
 ## 与原项目的差异
 
 - **平台**：只做 B 站；win / macOS / Linux × amd64 / arm64 六个目标的静态
