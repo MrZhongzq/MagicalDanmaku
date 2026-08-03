@@ -145,6 +145,16 @@ func pkVars(b event.Battle, selfRoomID string) map[string]any {
 	if len(opponents) > 0 {
 		pk["opponent"] = opponents[0]
 	}
+	// endTime 同样只在非零时才写入：只有 PK_INFO（mapPkInfo）和
+	// PKPipeline 合成的快照事件带 pk_basic.end_time，其余 PK_BATTLE_*
+	// CMD 上是零值，不是「真的是 0」。终审 Important-3：这个字段早在
+	// PK_INFO 阶段就已经解析进 event.Battle.EndTime，但此前全仓没有
+	// 任何地方读它——PKPipeline 现在用它驱动 PK_BATTLE_END 丢失时的
+	// 超时兜底（watchEndTimeFallback，见 pk_pipeline.go），这里顺带把
+	// 它暴露成模板变量，规则作者也能用它做「PK 快结束了」之类的判断。
+	if b.EndTime != 0 {
+		pk["endTime"] = b.EndTime
+	}
 	return pk
 }
 
@@ -253,6 +263,8 @@ var commonVariables = []Variable{
 	{Path: "blindBox.costYuan", Label: "本轮盲盒投入（元，展示用字符串；仅按盲盒聚合触发时存在）", Optional: true},
 	{Path: "blindBox.gainYuan", Label: "本轮盲盒产出（元，展示用字符串；仅按盲盒聚合触发时存在）", Optional: true},
 	{Path: "blindBox.profitYuan", Label: "本轮盲盒盈亏（元，展示用字符串，可为负；仅按盲盒聚合触发时存在）", Optional: true},
+	{Path: "blindBox.profitAbsYuan", Label: "本轮盲盒盈亏的绝对值（元，展示用字符串，恒不为负，专供播报模板" +
+		"搭配「赚了/亏了」这类已经带方向的措辞、避免双重否定；仅按盲盒聚合触发时存在）", Optional: true},
 }
 
 // userVariables 是 userVars 展开产出的字段，路径不带前缀——
@@ -371,6 +383,8 @@ func VariableCatalog() (common []Variable, byEvent map[event.Type][]Variable) {
 				"可用作 when 条件精确定位「PK 接通的这一瞬间」，避免每个 PK_BATTLE_* " +
 				"子状态都触发一遍播报）"},
 			{Path: "pk.pkId", Label: "这场 PK 的 ID，来自 pk_basic.pk_id；不在 PK 中或未携带明细的 CMD 上为空"},
+			{Path: "pk.endTime", Label: "这场 PK 预计结束时间（Unix 秒，来自 pk_basic.end_time）；" +
+				"未携带明细的 CMD 上不存在，不要跟 0 混为一谈", Optional: true},
 			{Path: "pk.opponents", Label: "全部对手列表（多人 PK 可能不止一个），" +
 				"按本绑定房间号与 member.roomId 比对筛出——不是发起方/被匹配方"},
 			{Path: "pk.opponent.roomId", Label: "对手（取第一个）直播间号", Optional: true},

@@ -264,6 +264,10 @@ func mergeBuckets(bs []*bucket) Trigger {
 
 	if hasBlindBox {
 		profit := blindBoxGain - blindBoxCost
+		absProfit := profit
+		if absProfit < 0 {
+			absProfit = -absProfit
+		}
 		vars["blindBox"] = map[string]any{
 			"name":       blindBoxName,
 			"count":      blindBoxCount,
@@ -273,6 +277,16 @@ func mergeBuckets(bs []*bucket) Trigger {
 			"costYuan":   formatYuan(blindBoxCost),
 			"gainYuan":   formatYuan(blindBoxGain),
 			"profitYuan": formatYuan(profit),
+			// profitAbsYuan 是绝对值版本，专供播报模板避免「亏了 -11 元」
+			// 这种双重否定用——终审 Important-2 抓到的真实缺陷：旧模板
+			// `{{if gt .blindBox.profit 0}}赚了{{else}}亏了{{end}}
+			// {{.blindBox.profitYuan}} 元！` 在亏损分支直接拼 profitYuan
+			// （自带负号），"亏了" 和 "-11" 两个否定叠在一起。profitYuan
+			// 本身不能改成无符号——它是独立展示字段，aggregate_test.go
+			// 已经钉死了它的负号语义，其它消费方（如果将来有）不该被这里
+			// 的模板措辞问题连带改变行为，所以新增一个专门给模板用的
+			// 绝对值字段，而不是改 profitYuan 本身。
+			"profitAbsYuan": formatYuan(absProfit),
 		}
 	}
 

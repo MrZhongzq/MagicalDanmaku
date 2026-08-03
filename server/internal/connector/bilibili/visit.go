@@ -85,36 +85,58 @@ func (p *PkLink) ClassifyVisit(ev event.Event) (event.Event, bool) {
 // 返回，确保 OpponentRoomID 在重复调用间是确定的——第二轮审查复核的
 // Minor-3，Task 7 要拿这个字段取对面主播名播报，不确定的结果会导致
 // 同一个人的播报文案在不同调用间无缘无故不一致。
+//
+// 【终审 Critical-1】命中任一判据后，还要过 round.markWelcomedFromOpponent
+// 这一道门：两个判据都是逐事件的瞬时判断，userOf 覆盖的十种事件类型
+// 里任何一种都能重新触发一次判定，戴着对面勋章的观众每发一条弹幕都会
+// 重新命中——不加这道门就是打开即刷屏，PK 期间对面观众涌入又恰恰是这
+// 个功能的目标场景。同一个 uid 在这一轮 PK 里只会让这个函数返回一次
+// true，此后不管这个人再互动多少次都返回 false，不产生新的欢迎信号。
+// 见 pkRound.welcomedFromOpponent 字段注释里对「为什么是按人去重而不是
+// 频率限流」的完整说明。
 func (p *PkLink) classifyVisitFromOpponent(ev event.Event, round *pkRound) (event.Event, bool) {
 	user, ok := userOf(ev)
 	if !ok || user.UID == "" {
 		return event.Event{}, false
 	}
 
+	matched := false
+	var opponentRoomID string
+	var matchedBy event.VisitMatchedBy
+
 	if user.Medal != nil {
 		if _, isOpponentMedal := round.opponentRoomIDs[user.Medal.RoomID]; isOpponentMedal {
-			return p.newVisitEvent(ev, event.TypeVisitFromOpponent, event.VisitFromOpponent{
-				User:           user,
-				OpponentRoomID: user.Medal.RoomID,
-				MatchedBy:      event.VisitMatchedByFanMedal,
-			}), true
+			matched, opponentRoomID, matchedBy = true, user.Medal.RoomID, event.VisitMatchedByFanMedal
 		}
 	}
 
-	p.audMu.Lock()
-	defer p.audMu.Unlock()
-	if _, isOwnRegular := p.mineSeed[user.UID]; !isOwnRegular {
-		for _, roomID := range round.opponentRoomIDsOrdered {
-			if _, seen := p.opposite[roomID][user.UID]; seen {
-				return p.newVisitEvent(ev, event.TypeVisitFromOpponent, event.VisitFromOpponent{
-					User:           user,
-					OpponentRoomID: roomID,
-					MatchedBy:      event.VisitMatchedByAudience,
-				}), true
+	if !matched {
+		p.audMu.Lock()
+		if _, isOwnRegular := p.mineSeed[user.UID]; !isOwnRegular {
+			for _, roomID := range round.opponentRoomIDsOrdered {
+				if _, seen := p.opposite[roomID][user.UID]; seen {
+					matched, opponentRoomID, matchedBy = true, roomID, event.VisitMatchedByAudience
+					break
+				}
 			}
 		}
+		p.audMu.Unlock()
 	}
-	return event.Event{}, false
+
+	if !matched {
+		return event.Event{}, false
+	}
+	if !round.markWelcomedFromOpponent(user.UID) {
+		// 这一轮 PK 已经欢迎过这个 uid 一次，不重复产出信号——即使他
+		// 一直戴着勋章、一直在互动。
+		return event.Event{}, false
+	}
+
+	return p.newVisitEvent(ev, event.TypeVisitFromOpponent, event.VisitFromOpponent{
+		User:           user,
+		OpponentRoomID: opponentRoomID,
+		MatchedBy:      matchedBy,
+	}), true
 }
 
 // classifyVisitToOpponent 是方向 B，语义照抄原 C++ 的 toView（三处

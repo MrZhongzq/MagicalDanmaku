@@ -1,6 +1,7 @@
 package bilibili
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -215,23 +216,102 @@ func TestClassifyVisitFromOpponentMisclassifiesOwnRegularWhenSeedIncomplete(t *t
 // 是第二轮审查 Minor-3 的回归测试：多人 PK 下同一个人同时出现在两个
 // 对手房间的观众集合里时，OpponentRoomID 必须是确定的（取 PK_INFO 原始
 // 顺序里排在前面的那个），不能因为遍历 map 顺序随机而在多次调用间
-// 摇摆——重复跑几十次，结果必须每次都一样。
+// 摇摆。
+//
+// 【终审 Critical-1 后订正】不能再对同一个 uid 重复调用几十次断言都命中
+// ——welcomedFromOpponent 去重上线后，同一个 uid 在一轮 PK 里只会命中
+// 一次，第二次起恒为 false，这是修复本身要的行为，不是这条测试要防的
+// bug。改成用几十个不同的 uid（每个都同时出现在 oppA/oppB 两个对手的
+// 观众集合里）分别判定一次，这样既不撞上新的去重语义，也保留了原本要
+// 验证的东西：不管测到哪个 uid，OpponentRoomID 的选择规则都必须稳定
+// 指向 oppA（排在前面的那个），不会因为 map 遍历顺序随机而摇摆。
 func TestClassifyVisitFromOpponentDeterministicOpponentRoomIDAcrossMultipleOpponents(t *testing.T) {
 	p := newTestPkLinkWithRound("self", "oppA", "oppB") // 顺序：oppA 排第一
-	p.trackOpposite("oppA", danmakuFrom("oppA", "u1", nil))
-	p.trackOpposite("oppB", danmakuFrom("oppB", "u1", nil))
 
-	ev := danmakuFrom("self", "u1", nil)
 	for i := 0; i < 30; i++ {
-		got, ok := p.ClassifyVisit(ev)
+		uid := fmt.Sprintf("u%d", i)
+		p.trackOpposite("oppA", danmakuFrom("oppA", uid, nil))
+		p.trackOpposite("oppB", danmakuFrom("oppB", uid, nil))
+
+		got, ok := p.ClassifyVisit(danmakuFrom("self", uid, nil))
 		if !ok {
-			t.Fatalf("第 %d 次调用应该命中", i)
+			t.Fatalf("第 %d 次调用（uid=%s）应该命中", i, uid)
 		}
 		payload := got.Payload.(event.VisitFromOpponent)
 		if payload.OpponentRoomID != "oppA" {
-			t.Fatalf("第 %d 次调用 OpponentRoomID = %q, 期望恒为 %q（PK_INFO 原始顺序里排第一的对手）",
-				i, payload.OpponentRoomID, "oppA")
+			t.Fatalf("第 %d 次调用（uid=%s）OpponentRoomID = %q, 期望恒为 %q（PK_INFO 原始顺序里排第一的对手）",
+				i, uid, payload.OpponentRoomID, "oppA")
 		}
+	}
+}
+
+// ---------- 终审 Critical-1：一场 PK 里同一个人只欢迎一次 ----------
+
+// TestClassifyVisitFromOpponentWelcomesEachUIDOnlyOnce 是终审 Critical-1
+// 的核心回归测试：戴着对面勋章的观众每发一条弹幕/点一次赞/每次进场都会
+// 重新满足判据 1（纯报文字段，逐事件成立），不加去重就是打开即刷屏。
+// 同一个 uid 连续触发多次，只有第一次应该命中，此后都应该被压住。
+func TestClassifyVisitFromOpponentWelcomesEachUIDOnlyOnce(t *testing.T) {
+	p := newTestPkLinkWithRound("self", "opp")
+	medal := &event.Medal{RoomID: "opp"}
+
+	first, ok := p.ClassifyVisit(danmakuFrom("self", "u1", medal))
+	if !ok {
+		t.Fatal("第一次应该命中")
+	}
+	if first.Type != event.TypeVisitFromOpponent {
+		t.Errorf("Type = %v, 期望 %v", first.Type, event.TypeVisitFromOpponent)
+	}
+
+	for i := 0; i < 10; i++ {
+		if _, ok := p.ClassifyVisit(danmakuFrom("self", "u1", medal)); ok {
+			t.Fatalf("第 %d 次重复触发不应该再次命中——同一场 PK 里同一个人只该欢迎一次", i+2)
+		}
+	}
+}
+
+// TestClassifyVisitFromOpponentWelcomeDedupIsPerUIDNotGlobal 验证去重的
+// 粒度是「按 uid」，不是「这一轮 PK 只欢迎一次」——不同的人各自都应该
+// 被欢迎到，压住的只是同一个人的重复触发。
+func TestClassifyVisitFromOpponentWelcomeDedupIsPerUIDNotGlobal(t *testing.T) {
+	p := newTestPkLinkWithRound("self", "opp")
+	medal := &event.Medal{RoomID: "opp"}
+
+	if _, ok := p.ClassifyVisit(danmakuFrom("self", "u1", medal)); !ok {
+		t.Fatal("u1 第一次应该命中")
+	}
+	if _, ok := p.ClassifyVisit(danmakuFrom("self", "u1", medal)); ok {
+		t.Fatal("u1 第二次不应该命中")
+	}
+	if _, ok := p.ClassifyVisit(danmakuFrom("self", "u2", medal)); !ok {
+		t.Fatal("u2 是另一个人，第一次应该命中，不该被 u1 的去重记录连坐")
+	}
+}
+
+// TestClassifyVisitFromOpponentWelcomeDedupResetsPerRound 验证去重记录
+// 绑定单场 PK 的生命周期：上一场 PK 欢迎过的人，下一场 PK（新的
+// pkRound，即重新 connect）里重新出现，应该被当作新来的客人再欢迎
+// 一次，不能被上一场的记录永久压制。
+func TestClassifyVisitFromOpponentWelcomeDedupResetsPerRound(t *testing.T) {
+	p := newTestPkLinkWithRound("self", "opp")
+	medal := &event.Medal{RoomID: "opp"}
+
+	if _, ok := p.ClassifyVisit(danmakuFrom("self", "u1", medal)); !ok {
+		t.Fatal("第一场 PK：u1 第一次应该命中")
+	}
+	if _, ok := p.ClassifyVisit(danmakuFrom("self", "u1", medal)); ok {
+		t.Fatal("第一场 PK：u1 第二次不应该命中")
+	}
+
+	// 模拟新一场 PK：新的 pkRound（测试直接替换 p.round，等价于真实的
+	// disconnect 之后重新 connect）。
+	p.round = &pkRound{
+		opponentRoomIDs:        p.round.opponentRoomIDs,
+		opponentRoomIDsOrdered: p.round.opponentRoomIDsOrdered,
+	}
+
+	if _, ok := p.ClassifyVisit(danmakuFrom("self", "u1", medal)); !ok {
+		t.Fatal("第二场 PK：u1 应该被当作新来的客人重新欢迎一次，不该被上一场的记录压住")
 	}
 }
 

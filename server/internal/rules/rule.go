@@ -19,6 +19,18 @@ const (
 	ActionLog     ActionType = "log"     // 只记日志，用于调试规则
 )
 
+// allActionTypes 按声明顺序排列，AllActionTypes 依赖这个顺序。
+var allActionTypes = []ActionType{ActionDanmaku, ActionBlock, ActionScript, ActionLog}
+
+// AllActionTypes 返回全部动作类型的副本——跟 AllAggregateBy 同一个理由
+// （见其注释）：httpapi/meta_handler.go 不再自己手抄一份，减少「加了
+// 新值却忘了同步登记」这类漂移的落点。
+func AllActionTypes() []ActionType {
+	out := make([]ActionType, len(allActionTypes))
+	copy(out, allActionTypes)
+	return out
+}
+
 // Pick 决定一个 danmaku 动作有多条模板时怎么挑。
 //
 // 空串或 PickRandom：随机挑一条（默认，与历史行为一致）。
@@ -38,6 +50,26 @@ const (
 	AggregateByGift     AggregateBy = "gift"     // 按类型+UID+礼物名：数量累加
 	AggregateByBlindBox AggregateBy = "blindBox" // 按类型+UID+盲盒名称：盲盒单独聚合、结算盈亏
 )
+
+// allAggregateBy 按声明顺序排列，AllAggregateBy 依赖这个顺序。
+//
+// 终审 Important-1 的教训：httpapi/meta_handler.go 的 aggregateByLabels
+// 曾经是一份跟这里完全独立的手抄清单，新增 AggregateByBlindBox 时只在
+// 这个 const 块里加了一行，那份手抄清单没有同步——后果是自定义规则页
+// 的「分组方式」下拉框里永远选不出「盲盒」，而后端和示例配置早就在用。
+// 现在 aggregateByLabels 直接从这里的 AllAggregateBy() 生成（而不是自己
+// 再抄一份字面量），加一种分组方式只需要改这一处。
+var allAggregateBy = []AggregateBy{
+	AggregateByType, AggregateByUser, AggregateByGift, AggregateByBlindBox,
+}
+
+// AllAggregateBy 返回全部合并窗口分组方式的副本，供 /api/meta/aggregate-by
+// 之类需要下发完整枚举的场景使用。
+func AllAggregateBy() []AggregateBy {
+	out := make([]AggregateBy, len(allAggregateBy))
+	copy(out, allAggregateBy)
+	return out
+}
 
 // validOps 是条件支持的全部操作符。
 var validOps = map[string]bool{

@@ -305,6 +305,42 @@ func TestVarsFromBattlePkOpponentSnapshotFieldsDistinguishUnknownFromZero(t *tes
 	}
 }
 
+// TestVarsFromBattlePkEndTimeExposed 是终审 Important-3 的回归测试：
+// pk_basic.end_time 早在 PK_INFO 阶段就解析进了 event.Battle.EndTime
+// （cmdmap/battle.go 的 mapPkInfo），但在这次修复之前全仓没有任何地方
+// 读它，模板变量里也没有对应的 pk.endTime。这里验证非零时正确暴露、
+// 零值（其余 PK_BATTLE_* CMD 上恒为零值，不是「真的是 0」）时不存在，
+// 跟 pk.opponent.online 等字段同一套「拿不到不能塌缩成 0」的约定。
+func TestVarsFromBattlePkEndTimeExposed(t *testing.T) {
+	ev := event.Event{
+		Type: event.TypeBattle, RoomID: "self-room", Timestamp: time.Unix(1700000000, 0),
+		Payload: event.Battle{PkID: "pk-1", EndTime: 1700003600},
+	}
+	v := VarsFromEvent(ev)
+	got, ok := LookupPath(v, "pk.endTime")
+	if !ok {
+		t.Fatal("pk.endTime 应该存在（EndTime 非零）")
+	}
+	if got != int64(1700003600) {
+		t.Errorf("pk.endTime = %v, 期望 int64(1700003600)", got)
+	}
+}
+
+// TestVarsFromBattlePkEndTimeAbsentWhenZero 验证零值 EndTime（大多数
+// PK_BATTLE_* CMD 上都是这样，只有 PK_INFO/合成的快照事件真的带这个
+// 字段）不会被写成 pk.endTime=0——那样会让模板作者误以为「PK 0 秒后
+// 结束」这种看起来正常实则错误的数字。
+func TestVarsFromBattlePkEndTimeAbsentWhenZero(t *testing.T) {
+	ev := event.Event{
+		Type: event.TypeBattle, RoomID: "self-room", Timestamp: time.Unix(1700000000, 0),
+		Payload: event.Battle{SubCommand: "PK_BATTLE_PROCESS"},
+	}
+	v := VarsFromEvent(ev)
+	if _, ok := LookupPath(v, "pk.endTime"); ok {
+		t.Error("EndTime 为零值时 pk.endTime 不应该存在")
+	}
+}
+
 func TestLookupPathMissingReturnsFalse(t *testing.T) {
 	v := VarsFromEvent(danmakuEvent())
 	for _, p := range []string{"不存在", "user.不存在", "text.深一层", ""} {
@@ -402,6 +438,7 @@ func TestVariableCatalogCommonMatchesVarsFromEvent(t *testing.T) {
 		"count", "users", "gifts",
 		"blindBox.name", "blindBox.count", "blindBox.cost", "blindBox.gain",
 		"blindBox.profit", "blindBox.costYuan", "blindBox.gainYuan", "blindBox.profitYuan",
+		"blindBox.profitAbsYuan",
 	} {
 		if commonPaths[p] && !optional[p] {
 			t.Errorf("公共变量 %q 只在合并窗口聚合后才存在，VarsFromEvent 本身不产出，"+
@@ -420,6 +457,7 @@ func TestVariableCatalogHasBlindBoxFields(t *testing.T) {
 	want := []string{
 		"blindBox.name", "blindBox.count", "blindBox.cost", "blindBox.gain",
 		"blindBox.profit", "blindBox.costYuan", "blindBox.gainYuan", "blindBox.profitYuan",
+		"blindBox.profitAbsYuan",
 	}
 	got := map[string]bool{}
 	optional := map[string]bool{}
@@ -563,6 +601,11 @@ func TestVariableCatalogMatchesVarsFromEvent(t *testing.T) {
 			Payload: event.Battle{
 				SubCommand: "PK_OPPONENT_SNAPSHOT",
 				PkID:       "pk-1",
+				// EndTime 填非零值，让 pk.endTime 这个 Optional 字段也走到
+				// 「实际产出」一侧被验证——终审 Important-3 新增，同样的
+				// 教训：不填的话 catalog 声明了这条路径也永远不会被真正
+				// 核对到。
+				EndTime: 1700003600,
 				// 一个自己（RoomID="1"，必须被 pkVars 过滤掉）+ 一个对手，
 				// 对手三个快照字段都填满，让 pk.opponent.online/guardTotal/
 				// guardOnline 这组 Optional 字段也走到「实际产出」一侧被

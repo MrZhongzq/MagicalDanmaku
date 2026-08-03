@@ -463,10 +463,29 @@ const BLINDBOX_ON = 'gift'
  * 字符串反推 blindBoxProfitTracking 这个布尔值（规则本身没有单独一个
  * 字段记录这个开关，只能从模板内容反推）。真给用户开放自由编辑的话，
  * 保存后重新加载这个开关会因为文本对不上而丢失状态。
+ *
+ * **终审 Important-2**：`BLIND_BOX_TEMPLATE_WITH_PROFIT` 必须跟
+ * `config.example.yaml` 里「盲盒答谢」示范规则的模板逐字一致（后端
+ * `rules/config` 包有一条跨语言测试读这个文件核对，见
+ * `server/internal/rules/config/example_render_test.go`）——这条模板会
+ * 真正发到直播间，两边任何一边改了措辞/变量名而另一边没跟上，表现是
+ * 同一句播报在「内置盲盒答谢」与「自定义配置」两条路径上不一致，没有
+ * 任何报错。写成一整条不折行的字符串（不像别处那样用 `+` 拼接）也是
+ * 为了配合那条跨语言测试用简单的整串包含判断，不用去猜折行位置。
+ *
+ * 用 `{{int .blindBox.profit}}` 而不是 `{{.blindBox.profit}}` 直接参与
+ * `gt`/`lt` 比较：字段缺失时（比如在自定义页配 `by: blindBox` 却忘了配
+ * `when: gift.isBlindBox`，普通礼物也会走进这条规则）`.blindBox.profit`
+ * 渲染成空字符串，`gt`/`lt` 拿它跟数字比较会直接报
+ * "incompatible types for comparison" 导致整条答谢渲染失败、什么都不发；
+ * `int` 把它安全地转成 0，落到「不赚不亏」分支，优雅退化而不是炸掉。
+ *
+ * 亏损分支读 `profitAbsYuan`（不带负号）而不是 `profitYuan`（自带负号）
+ * ——旧版本两者搭配「亏了」用会拼出「亏了 -11 元」这种双重否定，这是
+ * 这条规则真实播报过的错误文案，终审实跑复现过。
  */
 const BLIND_BOX_TEMPLATE_WITH_PROFIT =
-  '感谢 {{simplifyName .user.username}} 的 {{.blindBox.name}} x{{.blindBox.count}}，' +
-  '{{if gt .blindBox.profit 0}}赚了{{else}}亏了{{end}} {{.blindBox.profitYuan}} 元！'
+  '感谢 {{simplifyName .user.username}} 的 {{.blindBox.name}} x{{.blindBox.count}}，{{if gt (int .blindBox.profit) 0}}赚了 {{.blindBox.profitYuan}} 元！{{else if lt (int .blindBox.profit) 0}}亏了 {{.blindBox.profitAbsYuan}} 元！{{else}}不赚不亏！{{end}}'
 const BLIND_BOX_TEMPLATE_WITHOUT_PROFIT =
   '感谢 {{simplifyName .user.username}} 开出了 {{.blindBox.count}} 次 {{.blindBox.name}}！'
 

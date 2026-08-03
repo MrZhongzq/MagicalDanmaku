@@ -143,7 +143,18 @@ accounts:
             do:
               - type: danmaku
                 template:
-                  - '感谢 {{simplifyName .user.username}} 的 {{.blindBox.name}} x{{.blindBox.count}}，{{if gt .blindBox.profit 0}}赚了{{else}}亏了{{end}} {{.blindBox.profitYuan}} 元！'
+                  # {{int .blindBox.profit}} 而不是直接 {{.blindBox.profit}}：
+                  # 字段缺失时（比如手抖忘了配 when: gift.isBlindBox，普通
+                  # 礼物也走进了这条按盲盒聚合的规则）.blindBox.profit 会
+                  # 渲染成空字符串，gt/lt 直接拿空字符串跟数字比较会报
+                  # "incompatible types for comparison" 渲染失败、整条
+                  # 答谢发不出去；int 把它安全地转成 0，落到「不赚不亏」
+                  # 分支，不炸也不产出一句看起来正常实则错误的话。
+                  #
+                  # 亏损分支用 profitAbsYuan（不带负号）而不是 profitYuan
+                  # （自带负号）：旧版本两者搭配「亏了」用会拼出「亏了 -11
+                  # 元」这种双重否定，这是本条规则真实播过的错。
+                  - '感谢 {{simplifyName .user.username}} 的 {{.blindBox.name}} x{{.blindBox.count}}，{{if gt (int .blindBox.profit) 0}}赚了 {{.blindBox.profitYuan}} 元！{{else if lt (int .blindBox.profit) 0}}亏了 {{.blindBox.profitAbsYuan}} 元！{{else}}不赚不亏！{{end}}'
 
           - name: 上舰答谢
             on: [guard_buy]

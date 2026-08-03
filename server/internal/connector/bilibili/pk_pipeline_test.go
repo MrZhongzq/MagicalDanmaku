@@ -26,7 +26,16 @@ import (
 // pkInfoRaw 构造一条 PK_INFO 的原始 JSON，字段形状对齐
 // testdata/cmds/PK_INFO_basic.json（房间号/pk_id 可参数化，供不同测试
 // 复用）。
+//
+// end_time 必须相对 time.Now() 动态计算，不能写死一个固定的历史 epoch
+// （曾经写死过 1700000300，2023 年的时间戳）——PKPipeline 的
+// watchEndTimeFallback（Important-3）会拿它算「PK 应该在什么时候结束」，
+// 写死的历史时间戳在任何跑测试的当下都早已过期，超时兜底会在 PK 接通
+// 后几乎立刻触发，把测试还没来得及观察的 PK 提前结束掉——这不是
+// watchEndTimeFallback 的 bug，是测试数据要跟着真实时钟走。
 func pkInfoRaw(hostRoom, oppRoom, pkID string) []byte {
+	startTime := time.Now().Unix()
+	endTime := startTime + 300 // 跟真实 B 站 PK 大乱斗的常见时长量级一致
 	return []byte(fmt.Sprintf(`{
 		"cmd":"PK_INFO",
 		"data":{
@@ -34,9 +43,9 @@ func pkInfoRaw(hostRoom, oppRoom, pkID string) []byte {
 				{"room_id":%s,"uid":11111111,"uname":"host-anchor","face":"h.jpg","votes":10,"is_winner":0},
 				{"room_id":%s,"uid":22222222,"uname":"opp-anchor","face":"o.jpg","votes":20,"is_winner":1}
 			],
-			"pk_basic":{"pk_id":"%s","start_time":1700000000,"end_time":1700000300}
+			"pk_basic":{"pk_id":"%s","start_time":%d,"end_time":%d}
 		}
-	}`, hostRoom, oppRoom, pkID))
+	}`, hostRoom, oppRoom, pkID, startTime, endTime))
 }
 
 func pkInfoMsg(hostRoom, oppRoom, pkID string) []byte {
@@ -519,6 +528,124 @@ func TestPKPipelineClassifiesBothVisitDirections(t *testing.T) {
 	}
 }
 
+// userEnterMsgWithMedal 构造一条 INTERACT_WORD（msg_type=1，进场）消息，
+// 带一个指向 medalRoomID 的粉丝勋章——跟 danmakuMsgWithMedal 同样的目的
+// （用粉丝牌判据触发 ClassifyVisit，不依赖 mineSeed/oppositeSeed 播种是
+// 否完成），但事件类型必须是真正的 event.TypeUserEnter（INTERACT_WORD
+// 的 msg_type=1），因为终审 Critical-1 第二部分要验证的正是「进场事件
+// 命中方向 A 时，原始 UserEnter 不该被重复转发」，用弹幕触发测不出这个
+// 场景——「内置/进房欢迎」规则只监听 user_enter。
+func userEnterMsgWithMedal(uid int, uname, medalRoomID string) []byte {
+	body := fmt.Sprintf(`{"cmd":"INTERACT_WORD","data":{
+		"msg_type":1,"uid":%d,"uname":%q,"timestamp":1700000000,
+		"fans_medal":{"anchor_roomid":%s,"guard_level":0,"is_lighted":1,
+			"medal_level":10,"medal_name":"M","target_id":22222222}
+	}}`, uid, uname, medalRoomID)
+	return wire.Encode(wire.OpMessage, []byte(body))
+}
+
+// ---------- 终审 Critical-1 第二部分：进场只欢迎一次，不重复播两条 ----------
+
+// TestPKPipelineSuppressesRawUserEnterWhenClassifiedAsVisitFromOpponent
+// 是终审 Critical-1 第二部分的回归测试：对面观众进场时命中方向 A
+// （ClassifyVisit 判定为串门来客），合流通道里应该只看到一条
+// TypeVisitFromOpponent，不该再看到原始的 TypeUserEnter——旧代码会把
+// 两条都转发出去，导致「内置/进房欢迎」与「内置/PK串门欢迎」各播一条，
+// 跟 PkPanel.vue 的界面文案「与常规进房欢迎区分」自相矛盾。
+//
+// 先用 drainUntil 等到快照事件（PK 接通、round 已建立、pl.link 已发布）
+// 再发送这一条进场消息，是为了避免像 TestPKPipelineClassifiesBothVisitDirections
+// 那样靠重发同一条消息渡过异步建连的时序窗口——重发在这里会跟
+// welcomedFromOpponent 去重纠缠在一起（第一次命中之后，后续重发会因为
+// 已经欢迎过而不再被分类，转发路径又会切回「未分类」的原始事件），
+// 使断言复杂化。等 round 确定就绪后只发一次，断言就能保持精确。
+func TestPKPipelineSuppressesRawUserEnterWhenClassifiedAsVisitFromOpponent(t *testing.T) {
+	const hostRoom = "21452505"
+	const oppRoom = "33333"
+	const visitorUID = 55501
+
+	ts := newPKPipelineTestServer(t)
+
+	hostConnReady := make(chan *websocket.Conn, 1)
+	fs := newMultiRoomFakeServer(t, func(c *websocket.Conn, roomID string) {
+		if roomID != hostRoom {
+			return
+		}
+		c.WriteMessage(websocket.BinaryMessage, pkInfoMsg(hostRoom, oppRoom, "pk-enter-visit"))
+		select {
+		case hostConnReady <- c:
+		default:
+		}
+	})
+
+	c := newPKPipelineTestClient(t, fs, ts, hostRoom)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go c.Run(ctx)
+
+	out := NewPKPipeline(c).Run(ctx)
+
+	// 等到快照事件：round 已建立、pl.link 已发布（Important-3 保证发布
+	// 不会被 FetchOpponentSnapshots 拖住），此后发的事件才会被 ClassifyVisit
+	// 真正处理到，不会因为 round 还没就绪而误判成「未分类」。
+	drainUntil(t, out, 2*time.Second, func(ev event.Event) bool {
+		b, ok := ev.Payload.(event.Battle)
+		return ok && b.SubCommand == PKOpponentSnapshotSubCommand
+	})
+
+	var hostConn *websocket.Conn
+	select {
+	case hostConn = <-hostConnReady:
+	case <-time.After(time.Second):
+		t.Fatal("未能取得宿主连接")
+	}
+	hostConn.WriteMessage(websocket.BinaryMessage,
+		userEnterMsgWithMedal(visitorUID, "opp-fan", oppRoom))
+
+	// 收集接下来一小段时间内合流通道上的全部事件，而不是 drainUntil 到
+	// 第一条命中就停——这条测试恰恰要断言「不该出现」的那条事件不存在，
+	// 只看到期望的那一条不够，必须确认没有第二条。
+	var got []event.Event
+	deadline := time.After(1200 * time.Millisecond)
+collect:
+	for {
+		select {
+		case ev := <-out:
+			got = append(got, ev)
+		case <-deadline:
+			break collect
+		}
+	}
+
+	var visitCount, userEnterCount int
+	for _, ev := range got {
+		switch ev.Type {
+		case event.TypeVisitFromOpponent:
+			visitCount++
+			payload, ok := ev.Payload.(event.VisitFromOpponent)
+			if !ok {
+				t.Errorf("TypeVisitFromOpponent 的 Payload 类型 = %T, 期望 event.VisitFromOpponent", ev.Payload)
+				continue
+			}
+			if payload.User.UID != strconv.Itoa(visitorUID) {
+				t.Errorf("串门事件的 User.UID = %q, 期望 %q", payload.User.UID, strconv.Itoa(visitorUID))
+			}
+		case event.TypeUserEnter:
+			userEnterCount++
+		}
+	}
+
+	if visitCount != 1 {
+		t.Errorf("TypeVisitFromOpponent 出现 %d 次，期望恰好 1 次", visitCount)
+	}
+	if userEnterCount != 0 {
+		t.Errorf("TypeUserEnter 出现 %d 次，期望 0 次——命中方向 A 的进场事件不该再被当作普通进场转发一遍，"+
+			"否则「内置/进房欢迎」与「内置/PK串门欢迎」会各播一条，跟界面文案承诺的"+
+			"「与常规进房欢迎区分」矛盾", userEnterCount)
+	}
+}
+
 // ---------- PK_BATTLE_END 触发 EndPK ----------
 
 // TestPKPipelineEndsOnBattleEndPushed 用支持「连接建立后按需推送」的假
@@ -567,6 +694,147 @@ func TestPKPipelineEndsOnBattleEndPushed(t *testing.T) {
 	hostConn.WriteMessage(websocket.BinaryMessage, pkBattleEndMsg())
 
 	waitUntil(t, 2*time.Second, func() bool { return c.PKLink() == nil })
+}
+
+// ---------- 终审 Important-3：PK_BATTLE_END 丢失时的超时兜底 ----------
+
+// pkInfoRawWithEndTime 跟 pkInfoRaw 一样，但 end_time 可以显式指定——
+// 专供超时兜底测试用，需要控制「end_time 距离现在还有多久」来让
+// endTimeFallbackGrace 在测试可接受的时间内触发，不依赖 pkInfoRaw 里
+// 「跟真实 PK 时长量级一致」的默认 +300s。
+func pkInfoRawWithEndTime(hostRoom, oppRoom, pkID string, endTime time.Time) []byte {
+	return []byte(fmt.Sprintf(`{
+		"cmd":"PK_INFO",
+		"data":{
+			"members":[
+				{"room_id":%s,"uid":11111111,"uname":"host-anchor","face":"h.jpg","votes":10,"is_winner":0},
+				{"room_id":%s,"uid":22222222,"uname":"opp-anchor","face":"o.jpg","votes":20,"is_winner":1}
+			],
+			"pk_basic":{"pk_id":"%s","start_time":1700000000,"end_time":%d}
+		}
+	}`, hostRoom, oppRoom, pkID, endTime.Unix()))
+}
+
+// TestPKPipelineEndTimeFallbackEndsStalePKWhenBattleEndMissing 是终审
+// Important-3 的核心回归测试：真实场景里 PK_BATTLE_END 有可能被 256
+// 缓冲的 c.events 挤丢（PK 接通瞬间恰好是弹幕礼物最密集的时刻），丢了
+// 之后没有任何后续 CMD 会补发它——旧代码在这种情况下会让 PkLink 无限期
+// 存活、对面连接一直挂着重连、ClassifyVisit 一直把戴对面勋章的观众当
+// 串门来客欢迎，直到几小时后下一场 PK 才会自愈。这里完全不发送
+// PK_BATTLE_END，只靠 pk_basic.end_time 驱动的超时兜底，断言 PK 最终
+// 还是会被结束。
+//
+// end_time 设成「300ms 之后」而不是「已经过去」：如果设成已经过去，
+// wait 会钳到 0，超时兜底幾乎立即触发，可能在 c.StartPK() 内部完成
+// 注册之前就跑完（见 watchEndTimeFallback 上方「已知的极窄边角」的
+// 说明）——那不是这条测试要验证的东西，会引入不必要的时序不确定性。
+// 用一个略微滞后的截止时间，让 PK 先正常接通（观察到快照事件、
+// c.PKLink() 非 nil），再等超时兜底把它收尾，跟生产环境的时序关系一致。
+func TestPKPipelineEndTimeFallbackEndsStalePKWhenBattleEndMissing(t *testing.T) {
+	const hostRoom = "21452505"
+	const oppRoom = "33333"
+
+	ts := newPKPipelineTestServer(t)
+
+	// end_time 在每次实际发送消息时才重新计算（而不是像早期版本那样在
+	// 测试 setup 阶段算一次、之后重连每次都复用同一条固化了旧时间戳的
+	// 消息）——multiRoomFakeServer 固定 500ms 断开重连一次，握手、鉴权、
+	// 首次连接建立都要占用一部分时间，如果 end_time 是发送前很久就算好
+	// 的，实际送达时留给「PK 建连 + 抓快照」的缓冲会被悄悄吃掉一部分，
+	// 在系统繁忙时这个测试曾经因此变得不稳定（-count=5 全部超时）。
+	// grace 给到 1.5s，远大于本地 httptest 服务器上完成快照抓取通常需要
+	// 的时间（正常在几十毫秒量级），把「注册/建连/抓快照」的自然耗时
+	// 与「超时兜底该等多久」这两件事的时间量级彻底拉开，不再共享同一个
+	// 紧绷的预算。
+	fs := newMultiRoomFakeServer(t, func(c *websocket.Conn, roomID string) {
+		if roomID != hostRoom {
+			return
+		}
+		msg := wire.Encode(wire.OpMessage,
+			pkInfoRawWithEndTime(hostRoom, oppRoom, "pk-missing-end", time.Now()))
+		c.WriteMessage(websocket.BinaryMessage, msg)
+	})
+
+	c := newPKPipelineTestClient(t, fs, ts, hostRoom)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go c.Run(ctx)
+
+	pl := NewPKPipeline(c)
+	pl.endTimeFallbackGrace = 1500 * time.Millisecond
+	out := pl.Run(ctx)
+
+	drainUntil(t, out, 2*time.Second, func(ev event.Event) bool {
+		b, ok := ev.Payload.(event.Battle)
+		return ok && b.SubCommand == PKOpponentSnapshotSubCommand
+	})
+	if c.PKLink() == nil {
+		t.Fatal("PK 接通后 c.PKLink() 不应为 nil")
+	}
+
+	// 完全不发送 PK_BATTLE_END，只等超时兜底生效。
+	waitUntil(t, 4*time.Second, func() bool { return c.PKLink() == nil })
+}
+
+// TestPKPipelineEndTimeFallbackDoesNotDoubleEndWhenBattleEndArrivesFirst
+// 验证正常路径（PK_BATTLE_END 按时到达）不会被超时兜底干扰：即使把
+// endTimeFallbackGrace 调得很短，只要 PK_BATTLE_END 先到，兜底触发时
+// pl.activePkID 早就被正常路径清空，watchEndTimeFallback 里的
+// endActivePK 会发现「不是当前这场」而直接放弃，不会误伤下一场 PK、
+// 也不会重复调用 EndPK 造成任何可观察的异常。
+func TestPKPipelineEndTimeFallbackDoesNotDoubleEndWhenBattleEndArrivesFirst(t *testing.T) {
+	const hostRoom = "21452505"
+	const oppRoom = "33333"
+
+	ts := newPKPipelineTestServer(t)
+
+	hostConnReady := make(chan *websocket.Conn, 1)
+	fs := newMultiRoomFakeServer(t, func(c *websocket.Conn, roomID string) {
+		if roomID != hostRoom {
+			return
+		}
+		c.WriteMessage(websocket.BinaryMessage,
+			wire.Encode(wire.OpMessage,
+				pkInfoRawWithEndTime(hostRoom, oppRoom, "pk-end-before-fallback", time.Now().Add(time.Hour))))
+		select {
+		case hostConnReady <- c:
+		default:
+		}
+	})
+
+	c := newPKPipelineTestClient(t, fs, ts, hostRoom)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go c.Run(ctx)
+
+	pl := NewPKPipeline(c)
+	pl.endTimeFallbackGrace = 200 * time.Millisecond
+	out := pl.Run(ctx)
+
+	drainUntil(t, out, 2*time.Second, func(ev event.Event) bool {
+		b, ok := ev.Payload.(event.Battle)
+		return ok && b.SubCommand == PKOpponentSnapshotSubCommand
+	})
+
+	var hostConn *websocket.Conn
+	select {
+	case hostConn = <-hostConnReady:
+	case <-time.After(time.Second):
+		t.Fatal("未能取得宿主连接")
+	}
+	hostConn.WriteMessage(websocket.BinaryMessage, pkBattleEndMsg())
+	waitUntil(t, 2*time.Second, func() bool { return c.PKLink() == nil })
+
+	// end_time 是一小时之后，endTimeFallbackGrace 只有 200ms——如果兜底
+	// 逻辑有问题（比如不看 pkID 是否匹配就无脑触发 EndPK），这里等一小段
+	// 时间之后 c.PKLink() 应该仍然稳定为 nil，不会因为兜底重新触发什么
+	// 副作用；至少证明兜底触发不会 panic、不会把状态搞乱。
+	time.Sleep(300 * time.Millisecond)
+	if c.PKLink() != nil {
+		t.Fatal("PK 已经通过正常路径结束，c.PKLink() 不应该又变回非 nil")
+	}
 }
 
 // ---------- 复审 Important-3：方向 A 判定不该等 FetchOpponentSnapshots ----------

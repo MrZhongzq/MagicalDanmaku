@@ -83,14 +83,21 @@ type PKPipeline struct {
 	activePkID    string  // 当前已触发 StartPK 的 pk_id，用于按 pk_id 去重
 	lastEndedPkID string  // 最近一次触发过 EndPK 的 pk_id，见 handleBattle 上方的注释
 	link          *PkLink // 当前 PK 的对面连接管理器，供 ClassifyVisit 判方向 A 用；无 PK 时为 nil
+
+	// endTimeFallbackGrace 是 watchEndTimeFallback 的可覆盖预算，默认
+	// 等于 pkEndTimeFallbackGrace（30s）。字段化而不是直接用包级常量，
+	// 跟 shutdownGraceLimit 是同一个理由：测试需要把 30s 缩短到毫秒级，
+	// 不然没法在合理时间内验证「超时兜底真的会触发」。
+	endTimeFallbackGrace time.Duration
 }
 
 // NewPKPipeline 创建一个绑定到 c 的 PKPipeline。
 func NewPKPipeline(c *Client) *PKPipeline {
 	return &PKPipeline{
-		client:             c,
-		out:                make(chan event.Event, eventBufferSize),
-		shutdownGraceLimit: pkTeardownGraceLimit,
+		client:               c,
+		out:                  make(chan event.Event, eventBufferSize),
+		shutdownGraceLimit:   pkTeardownGraceLimit,
+		endTimeFallbackGrace: pkEndTimeFallbackGrace,
 	}
 }
 
@@ -113,19 +120,47 @@ func (pl *PKPipeline) Run(ctx context.Context) <-chan event.Event {
 func (pl *PKPipeline) loop(ctx context.Context) {
 	defer pl.shutdown()
 	for ev := range pl.client.Events() {
-		pl.forward(ev)
-
-		if b, ok := ev.Payload.(event.Battle); ok {
-			pl.handleBattle(ctx, b)
-		}
-
 		// ev 来自 Client.Events()，RoomID 恒等于宿主自己的房间号，
 		// ClassifyVisit 内部据此只会走方向 A（对面的人跑来我方）。
 		// 方向 B 在 startPK 里消费 link.Events() 时单独判。
+		visitEv, isVisit := event.Event{}, false
 		if link := pl.currentLink(); link != nil {
-			if visitEv, ok := link.ClassifyVisit(ev); ok {
+			visitEv, isVisit = link.ClassifyVisit(ev)
+		}
+
+		// 【终审 Critical-1 第二部分】一个人「进场」这个动作只应该被
+		// 欢迎一次，不该同时收到「内置/进房欢迎」（on: user_enter）与
+		// 「内置/PK串门欢迎」（on: pk_visit_from_opponent）各一条——这两条
+		// 规则各自独立处理各自的事件，spec.Rule.Suppress 救不了：它是
+		// 单次 Engine.Handle 内的局部状态，这里是两条独立事件、两次
+		// Handle 调用（见 visit.go 顶部对这个场景的说明）。
+		//
+		// 选择「只转发串门欢迎、压下这条原始 UserEnter」而不是「两条都
+		// 发」或「文案上打太极」：PkPanel.vue 的界面文案原话是「对面观众
+		// 串门时用单独欢迎语（与常规进房欢迎区分）」——用户看到的承诺是
+		// 只有一条欢迎语，不是「同一次进场收到两条不同语气的欢迎」。
+		//
+		// 权衡（刻意的，不是遗漏）：这条被压下的 UserEnter 不会进
+		// activity_logs（logging/sink.go 的 loggedEventTypes 白名单只认
+		// TypeUserEnter，串门信号类型不在表里），这一次「对面观众进场」
+		// 的业务日志行会缺失。范围很窄——只影响「PK 期间、这个人这一轮
+		// 唯一一次被判定为串门来客的那一条 UserEnter」（下一次同一个人
+		// 再进场，welcomedFromOpponent 已经记过，ClassifyVisit 不会再
+		// 命中，UserEnter 正常转发正常入库）；这个人在 PK 期间如果还有
+		// 弹幕/送礼等其它互动，那些事件走各自的类型正常记录，不受影响。
+		// 换来的是不会给直播间刷两条欢迎语，符合界面文案的承诺。
+		suppressRawUserEnter := isVisit && ev.Type == event.TypeUserEnter
+		if suppressRawUserEnter {
+			pl.forward(visitEv)
+		} else {
+			pl.forward(ev)
+			if isVisit {
 				pl.forward(visitEv)
 			}
+		}
+
+		if b, ok := ev.Payload.(event.Battle); ok {
+			pl.handleBattle(ctx, b)
 		}
 	}
 }
@@ -243,26 +278,120 @@ func (pl *PKPipeline) handleBattle(ctx context.Context, b event.Battle) {
 		if isNew {
 			pl.wg.Add(1)
 			go pl.startPK(ctx, b)
+
+			// 【终审 Important-3】PK_BATTLE_END 超时兜底：只在这里、
+			// 判定为「新一场 PK」时启动一次，与 startPK 用同一个 isNew
+			// 门槛，保证一场 PK 至多一个兜底计时器，不会重复触发也不会
+			// 误伤下一场新 PK。b.EndTime 为 0 时（理论上 PK_INFO 不应该
+			// 缺这个字段，但协议层从不假设报文一定完整）没有依据可算
+			// 截止时间，跳过，不是「不兜底」而是「没有数据兜底」。
+			if b.EndTime != 0 {
+				go pl.watchEndTimeFallback(ctx, b)
+			}
 		}
 	}
 
 	if b.SubCommand == pkBattleEndSubCommand {
-		pl.mu.Lock()
-		endedPkID := pl.activePkID
-		hadActive := endedPkID != ""
-		if hadActive {
-			pl.lastEndedPkID = endedPkID
-		}
+		// 真实的 PK_BATTLE_END 报文不带 pk_id 可用——mapBattle（battle.go）
+		// 只归一化 SubCommand，从不解析 pk_basic，只有 PK_INFO 走的
+		// mapPkInfo 才解析；requirePkID 传空字符串，表示「不要求匹配，
+		// 直接结束当前活跃的这一场」，语义与去掉这次重构之前的旧代码
+		// （`hadActive := pl.activePkID != ""`）完全一致。
+		pl.endActivePK("")
+	}
+}
+
+// endActivePK 是「结束当前这场 PK」的编排动作本身：清掉去重状态、清掉
+// 供 ClassifyVisit 用的 link 引用，真正断开对面连接的 c.EndPK() 丢进
+// 独立 goroutine（网络/等待操作，不能同步跑在调用方所在的 goroutine
+// 里）。CMD 驱动的正常结束（handleBattle 的 pkBattleEndSubCommand 分支）
+// 与超时兜底（watchEndTimeFallback）共用这一份逻辑，不重复写两遍容易
+// 漏同步。
+//
+// requirePkID 为空字符串时无条件结束当前活跃的这一场——CMD 驱动的正常
+// 结束路径用这个，因为真实的 PK_BATTLE_END 报文压根不携带 pk_id（见
+// 上面调用处的说明），没有办法要求匹配，也没必要：能收到这条 CMD 就
+// 说明这一场确实结束了。requirePkID 非空时，只有它与 pl.activePkID
+// 相等才会真的触发——超时兜底路径（watchEndTimeFallback）传入它启动时
+// 记住的 pk_id，如果这场 PK 已经被真正的 PK_BATTLE_END 结束、或被一场
+// 新 PK 顶替，pl.activePkID 早就不是这个值了，直接放弃，不会误伤。
+func (pl *PKPipeline) endActivePK(requirePkID string) bool {
+	pl.mu.Lock()
+	hadActive := pl.activePkID != "" && (requirePkID == "" || pl.activePkID == requirePkID)
+	if hadActive {
+		pl.lastEndedPkID = pl.activePkID
 		pl.activePkID = ""
 		pl.link = nil
-		pl.mu.Unlock()
+	}
+	pl.mu.Unlock()
 
-		if hadActive {
-			// c.EndPK() 内部按 c.pkLink（不是我们这里的本地缓存）操作，
-			// 即使 startPK 那个 goroutine 还没来得及把 link 登记到
-			// pl.link，也不影响它找到真正需要断开的连接。
-			go pl.client.EndPK()
-		}
+	if hadActive {
+		// c.EndPK() 内部按 c.pkLink（不是我们这里的本地缓存）操作，
+		// 即使 startPK 那个 goroutine 还没来得及把 link 登记到
+		// pl.link，也不影响它找到真正需要断开的连接。
+		go pl.client.EndPK()
+	}
+	return hadActive
+}
+
+// pkEndTimeFallbackGrace 是超时兜底相对 pk_basic.end_time 额外多等的
+// 缓冲——end_time 是 B 站预告的（大概率）战斗结束时间，不是「收尾完成
+// 时间」，网络抖动、结算阶段的延迟都可能让真正的 PK_BATTLE_END 比它晚
+// 到几秒到几十秒；给一个宽松但有限的缓冲，避免一场其实还没真正结束的
+// PK 被误判成「CMD 丢了」。跟 pkTeardownGraceLimit/shutdownGraceLimit
+// 不是同一类窗口（那两个兜的是「清理动作本身卡住」），这里兜的是
+// 「PK_BATTLE_END 这条 CMD 本身从未到达」。
+const pkEndTimeFallbackGrace = 30 * time.Second
+
+// watchEndTimeFallback 是 PK_BATTLE_END 丢失时的兜底。
+//
+// c.events 只有 eventBufferSize（256）缓冲，PK 接通瞬间恰好是弹幕礼物
+// 最密集、最容易把某一条 CMD 挤丢的时刻——Client.handleMessage 满溢时
+// 走 default 分支直接丢弃，不重试不告警。如果丢的正好是
+// PK_BATTLE_END，后果不是「少一次收尾」：没有任何后续 CMD 会补发它，
+// pl.link/c.pkLink/pkRound 全部保持存活，对面那条 WebSocket 一直挂着、
+// 持续重连，ClassifyVisit 会一直把戴对面勋章的人当串门来客欢迎，直到
+// 下一场 PK 接通时 StartPK 内部的防御性收尾（c.endPKLocked，"不允许两场
+// PK 的连接叠加"）才会自愈——中间可能隔几小时。
+//
+// pk_basic.end_time 早在 PK_INFO 阶段就已经拿到（event.Battle.EndTime，
+// cmdmap/battle.go 的 mapPkInfo），用它做一个几乎零成本的超时兜底：
+// 真正的 PK_BATTLE_END 到来时 pl.activePkID 已经被清空/被新一场顶替，
+// endActivePK 传入的 pkID 参数会跟当前的 activePkID 对不上，兜底直接
+// 放弃，不会误伤已经正常结束或已经是下一场的 PK。
+//
+// 【已知的极窄边角，不修】如果 end_time 在 PK_INFO 抵达时就已经过期
+// （wait 被钳到 0），这个 goroutine 会几乎立即调用 endActivePK/EndPK，
+// 理论上可能跟同一时刻 handleBattle 并发起的 startPK 里那次
+// c.StartPK() 竞争 c.pkMu：如果 EndPK 抢先拿到锁，此时 c.pkLink 还是
+// nil（StartPK 还没来得及注册），EndPK 会是空操作，随后 StartPK 才把
+// 真实连接注册上去——这个新连接不会被这次已经空跑过的 EndPK 收尾，
+// 要等下一场 PK 的防御性收尾才会清理，退化成了这个兜底本来要解决的
+// 那个问题。这个窗口在正常场景下不可达：end_time 通常是几分钟之后，
+// 远大于 c.StartPK() 内部「注册 + 起 goroutine」这几行代码的耗时，只有
+// 「end_time 送达时就已经过期」这种本身就不该发生的报文异常才会撞上。
+func (pl *PKPipeline) watchEndTimeFallback(ctx context.Context, b event.Battle) {
+	grace := pl.endTimeFallbackGrace
+	if grace <= 0 {
+		grace = pkEndTimeFallbackGrace
+	}
+	wait := time.Until(time.Unix(b.EndTime, 0).Add(grace))
+	if wait < 0 {
+		wait = 0
+	}
+
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return
+	case <-timer.C:
+	}
+
+	if pl.endActivePK(b.PkID) {
+		pl.client.log.Warn("PK 超过预告的 end_time 仍未收到 PK_BATTLE_END，触发超时兜底收尾",
+			"room", pl.client.roomID, "pkId", b.PkID, "endTime", b.EndTime)
 	}
 }
 

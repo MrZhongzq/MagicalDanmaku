@@ -1,6 +1,9 @@
 package rules
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -619,6 +622,9 @@ func TestAggregateByBlindBoxSeparatesProfitByName(t *testing.T) {
 	if s, _ := LookupPath(lucky.Vars, "blindBox.profitYuan"); s != "5.4" {
 		t.Errorf("幸运盲盒 blindBox.profitYuan = %v，期望 \"5.4\"", s)
 	}
+	if s, _ := LookupPath(lucky.Vars, "blindBox.profitAbsYuan"); s != "5.4" {
+		t.Errorf("幸运盲盒 blindBox.profitAbsYuan = %v，期望 \"5.4\"（正数时跟 profitYuan 一样）", s)
+	}
 	if s, _ := LookupPath(lucky.Vars, "blindBox.costYuan"); s != "15" {
 		t.Errorf("幸运盲盒 blindBox.costYuan = %v，期望 \"15\"", s)
 	}
@@ -645,6 +651,12 @@ func TestAggregateByBlindBoxSeparatesProfitByName(t *testing.T) {
 	if s, _ := LookupPath(heartbeat.Vars, "blindBox.profitYuan"); s != "-11" {
 		t.Errorf("心动盲盒 blindBox.profitYuan = %v，期望 \"-11\"", s)
 	}
+	// profitAbsYuan 是终审 Important-2 的修复点：亏损时不带负号，专供
+	// 播报模板搭配「亏了」这类已经带方向的措辞使用，避免 profitYuan
+	// 自带的负号跟模板里的「亏了」叠成「亏了 -11 元」这种双重否定。
+	if s, _ := LookupPath(heartbeat.Vars, "blindBox.profitAbsYuan"); s != "11" {
+		t.Errorf("心动盲盒 blindBox.profitAbsYuan = %v，期望 \"11\"（负数时取绝对值，不带负号）", s)
+	}
 }
 
 // TestFormatYuan 钉住「元」展示字符串的换算：原始值单位是 1/100 电池，
@@ -670,5 +682,30 @@ func TestFormatYuan(t *testing.T) {
 		if got := formatYuan(c.raw); got != c.want {
 			t.Errorf("formatYuan(%d) = %q，期望 %q", c.raw, got, c.want)
 		}
+	}
+}
+
+// TestFormatYuanDivisorMatchesFrontendLiteral 是终审 Important-4 的低
+// 成本封堵：「1 电池 = 0.1 元，原始值是 1/100 电池，元 = 原始值 / 1000」
+// 这个换算系数在 Go（这里的 formatYuan）与前端（web/src/pages/Stats.vue
+// 的 formatBlindBoxProfit）各写一份字面量，没有共享来源。
+//
+// 两边都绿不等于两边一致——只改一侧，两边各自的测试都不会红：这正是
+// 本批次曾经真实发生过的事故（P4-4 Task 7 复现：Stats.vue 一度写成
+// `/ 100`，同一笔盈亏在弹幕答谢与统计页两条展示路径上相差 10 倍，两边
+// 独立的单元测试各自钉死了错误值，谁都没报警）。跟 pk_pipeline_test.go
+// 的 TestPKOpponentSnapshotSubCommandMatchesFrontendLiteral 同一个思路：
+// 让「改了一边忘了改另一边」在 go test 阶段就报错，不是长期方案（真正的
+// 方案是把这个系数也做成后端下发的常量），但足够低成本。
+func TestFormatYuanDivisorMatchesFrontendLiteral(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "web", "src", "pages", "Stats.vue")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("读取 Stats.vue 失败（路径 %s 是否还对）: %v", path, err)
+	}
+	if !strings.Contains(string(b), "profitCentiBattery / 1000") {
+		t.Errorf("Stats.vue 里没有找到 \"profitCentiBattery / 1000\"——" +
+			"formatBlindBoxProfit 的换算系数应该跟这里的 formatYuan（raw / 1000）保持一致，" +
+			"不一致的表现是同一笔盲盒盈亏在弹幕答谢与统计页两条展示路径上数字不一样，且不会有任何报错")
 	}
 }

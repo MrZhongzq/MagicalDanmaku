@@ -113,6 +113,49 @@ type pkRound struct {
 	// 用户可见行为（Task 7 拿它取对面主播名播报），改成遍历这个有序
 	// 切片、命中第一个就返回，消除这个不确定性。
 	opponentRoomIDsOrdered []string
+
+	// welcomeMu/welcomedFromOpponent 是终审 Critical-1 的核心修复：方向 A
+	// 的两个判据（粉丝勋章、观众集合）都是「只要这一刻成立就命中」的
+	// 瞬时判断，userOf 覆盖 Danmaku/Gift/GiftCombo/GuardBuy/SuperChat/
+	// UserEnter/UserFollow/UserShare/UserLike/UserBlocked 十种事件类型，
+	// 一个戴着对面勋章的观众在我方房间每发一条弹幕、每点一次赞、每次
+	// 进场都会重新命中——PK 期间对面观众涌入正是这个功能的目标场景，
+	// 不加节流就是打开即刷屏。
+	//
+	// 这里选择的节流粒度是「一场 PK 里同一个 uid 只欢迎一次」，而不是
+	// 频率限流（如冷却时间）：欢迎语的本质是「认出一个新来的人」，一个
+	// 人反复被欢迎在语义上就是错的，不是「欢迎得太频繁」，节流应该跟着
+	// 语义走，不是随便挑一个能压住刷屏的手段。冷却组（cooldownGroup）
+	// 仍然保留在 PkPanel.vue 的内置规则上作为第二道防线——它管的是「不同
+	// 的人涌入时不要连续发」，跟这里「同一个人不要重复欢迎」是两个互补
+	// 的维度，不是同一件事的两种写法。
+	//
+	// 生命周期绑定单场 PK：这个字段挂在 pkRound 上而不是 PkLink 上，
+	// 每次 connect() 建立新一轮 PK 就是全新的 pkRound、全新的空 map——
+	// 上一场 PK 欢迎过的人，下一场 PK 重新出现时应该被当作新来的客人
+	// 欢迎一次，而不是被上一场的记录永久压制。
+	welcomeMu            sync.Mutex
+	welcomedFromOpponent map[string]struct{}
+}
+
+// markWelcomedFromOpponent 记录「这个 uid 在这一轮 PK 里已经被判定过
+// 一次方向 A 的串门欢迎」，返回 true 表示这是第一次（调用方应该继续
+// 产出欢迎信号），返回 false 表示已经欢迎过、这次应该跳过。
+//
+// map 用懒初始化而不是要求 connect() 必须先初始化好：opponent_link_test.go
+// 里有大量测试直接用 `&pkRound{...}` 构造字面量、跳过 connect()，如果
+// 这里假设 map 一定非 nil 会在那些测试里写 nil map 直接 panic。
+func (r *pkRound) markWelcomedFromOpponent(uid string) bool {
+	r.welcomeMu.Lock()
+	defer r.welcomeMu.Unlock()
+	if r.welcomedFromOpponent == nil {
+		r.welcomedFromOpponent = make(map[string]struct{})
+	}
+	if _, already := r.welcomedFromOpponent[uid]; already {
+		return false
+	}
+	r.welcomedFromOpponent[uid] = struct{}{}
+	return true
 }
 
 // closedEventsPlaceholder 是没有进行中 PK 时 Events() 返回的占位通道：
@@ -173,6 +216,7 @@ func (p *PkLink) connect(ctx context.Context, members []event.PkMember) {
 		done:                   make(chan struct{}),
 		opponentRoomIDs:        opponentRoomIDSet(opponents),
 		opponentRoomIDsOrdered: opponentRoomIDsOrdered(opponents),
+		welcomedFromOpponent:   make(map[string]struct{}),
 	}
 
 	p.mu.Lock()

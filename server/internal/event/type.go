@@ -8,7 +8,9 @@ type Platform string
 const PlatformBilibili Platform = "bilibili"
 
 // Type 是归一化后的事件类型。
-// 87 个 B 站 CMD 收敛到这 18 种类型。
+// 87 个 B 站 CMD 收敛到这 21 种类型（含 PK 串门信号 TypeVisitFromOpponent/
+// TypeVisitToOpponent，两者不是 B 站 CMD 归一化的产物，是 P4-4 新增的
+// 派生信号类型，见下方注释）。
 type Type string
 
 // 全部归一化事件类型。
@@ -41,3 +43,27 @@ const (
 	TypeVisitFromOpponent Type = "pk_visit_from_opponent" // 对面的人跑来我方串门（欢迎语气）
 	TypeVisitToOpponent   Type = "pk_visit_to_opponent"   // 我方观众跑去对面串门（警示语气）
 )
+
+// allTypes 按声明顺序排列，AllTypes 依赖这个顺序。
+//
+// 手工维护而非反射枚举——const 块本身就是这份枚举唯一的权威来源，
+// 这里只是把它变成一份可供测试遍历、可供 /api/meta/event-types 之类的
+// 下发接口逐条比对的切片。新增一个 Type 常量却忘了把它加进这里，
+// TestEventAllTypesMatchesConstBlock（type_test.go）会失败——这正是
+// httpapi/meta_handler.go 的 aggregateByLabels 曾经踩过的坑（新增枚举值
+// 时白名单式断言"至少包含哪几个"抓不住漏登记，见该文件 Important-1 的
+// 教训），这里从一开始就按强断言的写法来。
+var allTypes = []Type{
+	TypeDanmaku, TypeSuperChat, TypeSuperChatDelete, TypeGift, TypeGiftCombo,
+	TypeGuardBuy, TypeUserEnter, TypeUserFollow, TypeUserShare, TypeUserLike,
+	TypeLiveStart, TypeLiveStop, TypeRoomChange, TypeUserBlocked,
+	TypeOnlineRankUpdate, TypeRoomStatsUpdate, TypeBattle, TypeManual, TypeUnknown,
+	TypeVisitFromOpponent, TypeVisitToOpponent,
+}
+
+// AllTypes 返回全部归一化事件类型的副本。
+func AllTypes() []Type {
+	out := make([]Type, len(allTypes))
+	copy(out, allTypes)
+	return out
+}

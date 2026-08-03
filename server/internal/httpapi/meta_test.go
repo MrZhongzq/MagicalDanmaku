@@ -5,7 +5,9 @@ import (
 	"net/http"
 	"testing"
 
+	"github.com/MrZhongzq/MagicalDanmaku/server/internal/event"
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/perm"
+	"github.com/MrZhongzq/MagicalDanmaku/server/internal/rules"
 )
 
 type metaItem struct {
@@ -51,13 +53,23 @@ func TestMetaPermissionsMatchesPermPackage(t *testing.T) {
 	}
 }
 
+// TestMetaEventTypesNonEmpty 曾经是白名单式弱断言（只检查「至少包含
+// 哪几个」+「总数不少于 10」），跟 TestMetaAggregateBy 修复前是同一类
+// 结构性缺陷：新增或删除一个 event.Type 都不会让它报红，除非恰好撞在
+// 白名单列出的那几个值上——这正是本文件里 TestMetaEventTypesIncludesManual
+// /TestMetaEventTypesIncludesPKVisitDirections 这两条「事后补丁」测试
+// 存在的原因，它们是这个弱点被踩过之后一条条追加上去的。改成跟
+// event.AllTypes() 逐条双向对照之后，这两条补丁测试的断言范围已被
+// 完全覆盖，但保留它们不撤——各自的注释记录了当年具体踩过的坑，删掉
+// 会丢失这段历史。
 func TestMetaEventTypesNonEmpty(t *testing.T) {
 	srv, st := newTestServer(t)
 	c := loginAs(t, srv, st, "张三", false)
 
 	got := fetchMeta(t, c, srv.URL+"/api/meta/event-types")
-	if len(got) < 10 {
-		t.Errorf("事件类型太少: %d", len(got))
+	all := event.AllTypes()
+	if len(got) != len(all) {
+		t.Fatalf("事件类型数 = %d, 期望 %d", len(got), len(all))
 	}
 	have := make(map[string]bool, len(got))
 	for _, it := range got {
@@ -66,8 +78,8 @@ func TestMetaEventTypesNonEmpty(t *testing.T) {
 			t.Errorf("事件类型 %q 缺少中文说明", it.Value)
 		}
 	}
-	for _, want := range []string{"danmaku", "gift", "guard_buy", "user_enter", "super_chat"} {
-		if !have[want] {
+	for _, want := range all {
+		if !have[string(want)] {
 			t.Errorf("元数据缺少事件类型 %q", want)
 		}
 	}
@@ -116,17 +128,28 @@ func TestMetaEventTypesIncludesPKVisitDirections(t *testing.T) {
 	}
 }
 
+// TestMetaActionTypes 是白名单式弱断言改成强断言的第二处（第一处见
+// TestMetaAggregateBy 上方的说明）：跟 rules.AllActionTypes() 逐条
+// 双向对照，而不是只检查「至少包含哪几个」——后者的结构性缺陷是新增
+// 动作类型时即使 meta_handler.go 忘了同步，这条测试也不会报红。
 func TestMetaActionTypes(t *testing.T) {
 	srv, st := newTestServer(t)
 	c := loginAs(t, srv, st, "张三", false)
 
 	got := fetchMeta(t, c, srv.URL+"/api/meta/action-types")
+	all := rules.AllActionTypes()
+	if len(got) != len(all) {
+		t.Fatalf("动作类型数 = %d, 期望 %d", len(got), len(all))
+	}
 	have := make(map[string]bool, len(got))
 	for _, it := range got {
 		have[it.Value] = true
+		if it.Label == "" {
+			t.Errorf("动作类型 %q 缺少中文说明", it.Value)
+		}
 	}
-	for _, want := range []string{"danmaku", "block", "script", "log"} {
-		if !have[want] {
+	for _, want := range all {
+		if !have[string(want)] {
 			t.Errorf("元数据缺少动作类型 %q", want)
 		}
 	}
@@ -235,17 +258,36 @@ func TestMetaVariables(t *testing.T) {
 	}
 }
 
+// TestMetaAggregateBy 是终审 Important-1 的回归测试。
+//
+// 旧版本只检查「至少包含 type/user/gift 这三个」——这是一种结构上不
+// 可能发现新增值漏登记的白名单式断言：aggregateByLabels 曾经是一份
+// 独立于 rules.AggregateBy 常量的手抄清单，Task 3 新增
+// AggregateByBlindBox 之后，这份清单没有同步，导致自定义规则页的
+// 「分组方式」下拉框里选不出「盲盒」，而这条测试全程绿灯，因为它压根
+// 不会去检查「清单里是不是有多出来的项漏了」。
+//
+// 改成跟 TestMetaPermissionsMatchesPermPackage 同一种强度的写法：先比
+// len，再跟权威来源（rules.AllAggregateBy()）逐条双向对照——多一个、
+// 少一个都会报红。
 func TestMetaAggregateBy(t *testing.T) {
 	srv, st := newTestServer(t)
 	c := loginAs(t, srv, st, "张三", false)
 
 	got := fetchMeta(t, c, srv.URL+"/api/meta/aggregate-by")
+	all := rules.AllAggregateBy()
+	if len(got) != len(all) {
+		t.Fatalf("分组方式数 = %d, 期望 %d", len(got), len(all))
+	}
 	have := make(map[string]bool, len(got))
 	for _, it := range got {
 		have[it.Value] = true
+		if it.Label == "" {
+			t.Errorf("分组方式 %q 缺少中文说明", it.Value)
+		}
 	}
-	for _, want := range []string{"type", "user", "gift"} {
-		if !have[want] {
+	for _, want := range all {
+		if !have[string(want)] {
 			t.Errorf("元数据缺少分组方式 %q", want)
 		}
 	}

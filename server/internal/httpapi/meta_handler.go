@@ -59,15 +59,14 @@ var eventTypeLabels = []struct {
 	{event.TypeUnknown, "未识别事件"},
 }
 
-// actionTypeLabels 是动作类型的中文说明。
-var actionTypeLabels = []struct {
-	Type  rules.ActionType
-	Label string
-}{
-	{rules.ActionDanmaku, "发送弹幕"},
-	{rules.ActionBlock, "禁言"},
-	{rules.ActionScript, "执行脚本"},
-	{rules.ActionLog, "只记日志（调试规则用）"},
+// actionTypeLabelText 是动作类型的中文说明，与 rules.AllActionTypes()
+// 一起使用：说明缺失时用值本身兜底，新增动作类型忘了写说明也不会让
+// 前端渲染不出那一项（同 permissionLabels 的写法）。
+var actionTypeLabelText = map[rules.ActionType]string{
+	rules.ActionDanmaku: "发送弹幕",
+	rules.ActionBlock:   "禁言",
+	rules.ActionScript:  "执行脚本",
+	rules.ActionLog:     "只记日志（调试规则用）",
 }
 
 // operatorLabels 是条件操作符的中文说明。
@@ -85,15 +84,21 @@ var operatorLabels = []metaItem{
 	{"in", "属于列表之一"},
 }
 
-// aggregateByLabels 是合并窗口分组方式的中文说明。
+// aggregateByLabelText 是合并窗口分组方式的中文说明，与
+// rules.AllAggregateBy() 一起使用。
 //
-// 用 rules.AggregateByType/User/Gift 常量而不是字符串字面量：
-// 紧邻的 actionTypeLabels 已经这么做了，字面量在这里只是把
-// 「写死会悄悄漂移」的问题从前端搬到了后端。
-var aggregateByLabels = []metaItem{
-	{string(rules.AggregateByType), "按事件类型：窗口内全部合成一条"},
-	{string(rules.AggregateByUser), "按类型 + 用户：仅去重不聚合"},
-	{string(rules.AggregateByGift), "按类型 + 用户 + 礼物：数量累加"},
+// 【终审 Important-1】这里曾经是一份独立于 rules.AggregateBy 常量的
+// 手抄清单（`[]metaItem{...}` 字面量），Task 3 新增 AggregateByBlindBox
+// 时只改了 rule.go 的 const 块，这份清单没有同步——盲盒聚合本身在后端
+// 完全可用（示例配置也在用），但自定义规则页的「分组方式」下拉框里
+// 选不出「盲盒」，用户在 UI 上配不出这条规则。改成从
+// rules.AllAggregateBy() 生成，说明缺失时用值本身兜底（同
+// permissionLabels 的写法），避免同一类漏登记再发生第二次。
+var aggregateByLabelText = map[rules.AggregateBy]string{
+	rules.AggregateByType:     "按事件类型：窗口内全部合成一条",
+	rules.AggregateByUser:     "按类型 + 用户：仅去重不聚合",
+	rules.AggregateByGift:     "按类型 + 用户 + 礼物：数量累加",
+	rules.AggregateByBlindBox: "按类型 + 用户 + 盲盒名称：盲盒单独聚合、结算盈亏",
 }
 
 func (s *Server) handleMetaPermissions(w http.ResponseWriter, _ *http.Request) {
@@ -117,9 +122,14 @@ func (s *Server) handleMetaEventTypes(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) handleMetaActionTypes(w http.ResponseWriter, _ *http.Request) {
-	out := make([]metaItem, 0, len(actionTypeLabels))
-	for _, it := range actionTypeLabels {
-		out = append(out, metaItem{Value: string(it.Type), Label: it.Label})
+	all := rules.AllActionTypes()
+	out := make([]metaItem, 0, len(all))
+	for _, t := range all {
+		label := actionTypeLabelText[t]
+		if label == "" {
+			label = string(t) // 兜底：新增动作类型忘了加说明也不该让前端渲染不出来
+		}
+		out = append(out, metaItem{Value: string(t), Label: label})
 	}
 	respondJSON(w, http.StatusOK, out)
 }
@@ -129,7 +139,16 @@ func (s *Server) handleMetaOperators(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) handleMetaAggregateBy(w http.ResponseWriter, _ *http.Request) {
-	respondJSON(w, http.StatusOK, aggregateByLabels)
+	all := rules.AllAggregateBy()
+	out := make([]metaItem, 0, len(all))
+	for _, by := range all {
+		label := aggregateByLabelText[by]
+		if label == "" {
+			label = string(by) // 兜底：新增分组方式忘了加说明也不该让前端渲染不出来
+		}
+		out = append(out, metaItem{Value: string(by), Label: label})
+	}
+	respondJSON(w, http.StatusOK, out)
 }
 
 // variablesResponse 是 /api/meta/variables 的响应结构：公共变量 + 按
