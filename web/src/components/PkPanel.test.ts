@@ -52,6 +52,18 @@ describe('PkPanel 纯函数：build/parse 往返', () => {
     expect(rule.do).toEqual([{ type: 'danmaku', template: draft.visitTemplates }])
   })
 
+  it('buildPkVisitRule 带 aggregate，PK 接通瞬间对面多个不同的人涌入时不会各触发一条弹幕', () => {
+    // 终审复审指出的 C-1 残留一半：后端的 welcomedFromOpponent 只堵死了
+    // "同一个人刷屏"，堵不住"同一时刻不同的人一起涌入"——这条规则此前
+    // 完全没有 aggregate，N 个不同的人 = N 条弹幕。跟 buildEnterRule
+    // （Danmaku.vue）同款做法，加一个"窗口内全部合并"的 aggregate。
+    const draft = defaultPkDraft()
+    const rule = buildPkVisitRule(draft)
+    expect(rule.aggregate).toBeTruthy()
+    expect(rule.aggregate?.by).toBe('type')
+    expect(rule.aggregate?.window).toMatch(/^\d+s$/)
+  })
+
   it('buildPkVisitRule 的 enabled 直接反映 visitGreetingEnabled', () => {
     const draft = defaultPkDraft()
     expect(buildPkVisitRule(draft).enabled).toBe(false)

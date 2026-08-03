@@ -155,17 +155,28 @@ func TestMetaActionTypes(t *testing.T) {
 	}
 }
 
+// TestMetaOperators 是终审收尾时补的强断言——此前一直是白名单式弱断言
+// （只查"至少包含这 11 个"），跟 TestMetaAggregateBy 修复前一模一样的
+// 结构性缺陷，只是当时加固 aggregateByLabels/actionTypeLabels/
+// eventTypeLabels 时唯独跳过了它。改成跟 rules.AllOperators() 逐条
+// 双向对照。
 func TestMetaOperators(t *testing.T) {
 	srv, st := newTestServer(t)
 	c := loginAs(t, srv, st, "张三", false)
 
 	got := fetchMeta(t, c, srv.URL+"/api/meta/operators")
+	all := rules.AllOperators()
+	if len(got) != len(all) {
+		t.Fatalf("操作符数 = %d, 期望 %d", len(got), len(all))
+	}
 	have := make(map[string]bool, len(got))
 	for _, it := range got {
 		have[it.Value] = true
+		if it.Label == "" {
+			t.Errorf("操作符 %q 缺少中文说明", it.Value)
+		}
 	}
-	for _, want := range []string{"eq", "ne", "gt", "gte", "lt", "lte",
-		"contains", "prefix", "suffix", "regex", "in"} {
+	for _, want := range all {
 		if !have[want] {
 			t.Errorf("元数据缺少操作符 %q", want)
 		}

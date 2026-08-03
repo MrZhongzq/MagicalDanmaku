@@ -698,11 +698,15 @@ func TestPKPipelineEndsOnBattleEndPushed(t *testing.T) {
 
 // ---------- 终审 Important-3：PK_BATTLE_END 丢失时的超时兜底 ----------
 
-// pkInfoRawWithEndTime 跟 pkInfoRaw 一样，但 end_time 可以显式指定——
-// 专供超时兜底测试用，需要控制「end_time 距离现在还有多久」来让
-// endTimeFallbackGrace 在测试可接受的时间内触发，不依赖 pkInfoRaw 里
-// 「跟真实 PK 时长量级一致」的默认 +300s。
-func pkInfoRawWithEndTime(hostRoom, oppRoom, pkID string, endTime time.Time) []byte {
+// pkInfoRawWithAbsoluteTimes 跟 pkInfoRaw 一样，但 start_time/end_time
+// 都可以显式指定绝对时刻——专供超时兜底测试用。跟 pkInfoRaw 的默认
+// 「跟真实 PK 时长量级一致的 +300s」不同，这里两个时间戳完全由调用方
+// 控制，既能构造「正常场景」（start_time=现在），也能构造「时钟偏移/
+// 惩罚阶段迟到重推」这类 start_time/end_time 本身跟真实墙钟脱节的场景
+// ——见 pkInfoRawWithDuration 的说明，多数测试应该用那个更简单的封装，
+// 只有需要精确控制绝对时刻本身（比如模拟"这条 PK_INFO 送达时 end_time
+// 早就已经过期"）时才直接用这个。
+func pkInfoRawWithAbsoluteTimes(hostRoom, oppRoom, pkID string, startTime, endTime time.Time) []byte {
 	return []byte(fmt.Sprintf(`{
 		"cmd":"PK_INFO",
 		"data":{
@@ -710,9 +714,20 @@ func pkInfoRawWithEndTime(hostRoom, oppRoom, pkID string, endTime time.Time) []b
 				{"room_id":%s,"uid":11111111,"uname":"host-anchor","face":"h.jpg","votes":10,"is_winner":0},
 				{"room_id":%s,"uid":22222222,"uname":"opp-anchor","face":"o.jpg","votes":20,"is_winner":1}
 			],
-			"pk_basic":{"pk_id":"%s","start_time":1700000000,"end_time":%d}
+			"pk_basic":{"pk_id":"%s","start_time":%d,"end_time":%d}
 		}
-	}`, hostRoom, oppRoom, pkID, endTime.Unix()))
+	}`, hostRoom, oppRoom, pkID, startTime.Unix(), endTime.Unix()))
+}
+
+// pkInfoRawWithDuration 是 pkInfoRawWithAbsoluteTimes 的便利封装：
+// start_time 固定取调用时刻（"现在"），end_time = start_time + duration
+// ——终审复审订正 Important-3 (a) 之后，watchEndTimeFallback 只关心
+// end_time-start_time 这个相对时长，不再直接拿 end_time 的绝对值跟本地
+// 时钟比较，所以大多数超时兜底测试只需要控制这个相对时长，不需要关心
+// 两个时间戳的绝对值本身。
+func pkInfoRawWithDuration(hostRoom, oppRoom, pkID string, duration time.Duration) []byte {
+	start := time.Now()
+	return pkInfoRawWithAbsoluteTimes(hostRoom, oppRoom, pkID, start, start.Add(duration))
 }
 
 // TestPKPipelineEndTimeFallbackEndsStalePKWhenBattleEndMissing 是终审
@@ -724,12 +739,13 @@ func pkInfoRawWithEndTime(hostRoom, oppRoom, pkID string, endTime time.Time) []b
 // PK_BATTLE_END，只靠 pk_basic.end_time 驱动的超时兜底，断言 PK 最终
 // 还是会被结束。
 //
-// end_time 设成「300ms 之后」而不是「已经过去」：如果设成已经过去，
-// wait 会钳到 0，超时兜底幾乎立即触发，可能在 c.StartPK() 内部完成
-// 注册之前就跑完（见 watchEndTimeFallback 上方「已知的极窄边角」的
-// 说明）——那不是这条测试要验证的东西，会引入不必要的时序不确定性。
-// 用一个略微滞后的截止时间，让 PK 先正常接通（观察到快照事件、
-// c.PKLink() 非 nil），再等超时兜底把它收尾，跟生产环境的时序关系一致。
+// duration 传 0（start_time=end_time=调用时刻）：这条测试只关心「兜底
+// 最终会不会触发」，不关心相对时长本身的取值，所以让 wait 完全由
+// endTimeFallbackGrace（下面设成 1.5s）决定，独立变量更少。「PK_INFO
+// 送达时相对时长已经是 0/负数会不会跟 c.StartPK() 竞态」这个问题由
+// TestPKPipelineEndTimeFallbackImmuneToClockSkew 专门覆盖，这条测试的
+// PK 先正常接通（观察到快照事件、c.PKLink() 非 nil）再等兜底收尾，走的
+// 是不涉及竞态窗口的主路径。
 func TestPKPipelineEndTimeFallbackEndsStalePKWhenBattleEndMissing(t *testing.T) {
 	const hostRoom = "21452505"
 	const oppRoom = "33333"
@@ -751,7 +767,7 @@ func TestPKPipelineEndTimeFallbackEndsStalePKWhenBattleEndMissing(t *testing.T) 
 			return
 		}
 		msg := wire.Encode(wire.OpMessage,
-			pkInfoRawWithEndTime(hostRoom, oppRoom, "pk-missing-end", time.Now()))
+			pkInfoRawWithDuration(hostRoom, oppRoom, "pk-missing-end", 0))
 		c.WriteMessage(websocket.BinaryMessage, msg)
 	})
 
@@ -796,7 +812,7 @@ func TestPKPipelineEndTimeFallbackDoesNotDoubleEndWhenBattleEndArrivesFirst(t *t
 		}
 		c.WriteMessage(websocket.BinaryMessage,
 			wire.Encode(wire.OpMessage,
-				pkInfoRawWithEndTime(hostRoom, oppRoom, "pk-end-before-fallback", time.Now().Add(time.Hour))))
+				pkInfoRawWithDuration(hostRoom, oppRoom, "pk-end-before-fallback", time.Hour)))
 		select {
 		case hostConnReady <- c:
 		default:
@@ -835,6 +851,73 @@ func TestPKPipelineEndTimeFallbackDoesNotDoubleEndWhenBattleEndArrivesFirst(t *t
 	if c.PKLink() != nil {
 		t.Fatal("PK 已经通过正常路径结束，c.PKLink() 不应该又变回非 nil")
 	}
+}
+
+// TestPKPipelineEndTimeFallbackImmuneToClockSkew 是终审复审订正
+// Important-3 (a) 的回归测试：复审用真实抓包核实过——PK 进入惩罚阶段后
+// B 站仍会周期性重推 PK_INFO，其中的 end_time 早已过期（复审样本里过期
+// 了 65 秒）；工具在惩罚阶段启动、或此时新建一个 PKPipeline，收到的
+// 第一条 PK_INFO 就可能是这种「end_time 已经过期」的报文，效果等同于
+// 本地时钟相对服务器超前，或者服务器发来一条本身就滞后的报文。
+//
+// 旧算法直接拿 end_time 的绝对值跟本地 time.Now() 比较，这种场景下 wait
+// 会被钳到 0，几乎立即触发 EndPK，真实跟同一时刻 startPK 内部的
+// c.StartPK() 竞争 c.pkMu——复审实测 8 轮里 3 轮泄漏（EndPK 抢先拿到锁时
+// c.pkLink 还是 nil，空跑；StartPK 随后注册的真实连接不再被这次已经空
+// 跑过的兜底收尾）。新算法改用「end_time - start_time」的相对时长，不管
+// 这条 PK_INFO 送达时绝对时间戳看起来是不是已经过期，只要这对时间戳的
+// 差值本身健康，等待时长就该是那个健康的量级，不会被钳成 0。
+//
+// 构造方式：start_time/end_time 都设成十分钟前（模拟"送达时早已过期"），
+// 但两者只相差 1 秒——如果代码错误地拿绝对值判断，这里会立即触发兜底
+// 收尾（PK 建连后几乎立刻被拆除）；如果按相对时长正确处理，PK 应该正常
+// 存活约 1 秒（+grace）之后才被收尾，不多不少。
+func TestPKPipelineEndTimeFallbackImmuneToClockSkew(t *testing.T) {
+	const hostRoom = "21452505"
+	const oppRoom = "33333"
+
+	ts := newPKPipelineTestServer(t)
+
+	staleStart := time.Now().Add(-10 * time.Minute)
+	staleEnd := staleStart.Add(1 * time.Second) // 相对时长只有 1s，但绝对值已经"过期"了将近 10 分钟
+
+	fs := newMultiRoomFakeServer(t, func(c *websocket.Conn, roomID string) {
+		if roomID != hostRoom {
+			return
+		}
+		msg := wire.Encode(wire.OpMessage,
+			pkInfoRawWithAbsoluteTimes(hostRoom, oppRoom, "pk-clock-skew", staleStart, staleEnd))
+		c.WriteMessage(websocket.BinaryMessage, msg)
+	})
+
+	c := newPKPipelineTestClient(t, fs, ts, hostRoom)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go c.Run(ctx)
+
+	pl := NewPKPipeline(c)
+	pl.endTimeFallbackGrace = 300 * time.Millisecond // 相对时长 1s + grace 300ms ≈ 1.3s
+	out := pl.Run(ctx)
+
+	drainUntil(t, out, 2*time.Second, func(ev event.Event) bool {
+		b, ok := ev.Payload.(event.Battle)
+		return ok && b.SubCommand == PKOpponentSnapshotSubCommand
+	})
+
+	// 关键断言：PK 接通之后一小段时间内（远小于 1.3s 的相对等待时长，
+	// 但足够让 c.StartPK() 完成注册），c.PKLink() 必须还是非 nil——如果
+	// 代码退回到拿绝对 end_time 跟本地时钟比较，这里几乎立刻就会被兜底
+	// 拆除，这个断言会失败。
+	time.Sleep(400 * time.Millisecond)
+	if c.PKLink() == nil {
+		t.Fatal("PK 建连后 400ms 内就被拆除了——超时兜底疑似还在拿 end_time 的绝对值跟本地时钟比较，" +
+			"没有改用「end_time - start_time」的相对时长")
+	}
+
+	// 之后按相对时长（约 1.3s）正常收尾，证明"免疫时钟偏移"不是靠碰巧
+	// 永远不触发兜底混过去的——兜底该生效的时候还是会生效。
+	waitUntil(t, 3*time.Second, func() bool { return c.PKLink() == nil })
 }
 
 // ---------- 复审 Important-3：方向 A 判定不该等 FetchOpponentSnapshots ----------

@@ -69,19 +69,21 @@ var actionTypeLabelText = map[rules.ActionType]string{
 	rules.ActionLog:     "只记日志（调试规则用）",
 }
 
-// operatorLabels 是条件操作符的中文说明。
-var operatorLabels = []metaItem{
-	{"eq", "等于"},
-	{"ne", "不等于"},
-	{"gt", "大于"},
-	{"gte", "大于等于"},
-	{"lt", "小于"},
-	{"lte", "小于等于"},
-	{"contains", "包含"},
-	{"prefix", "以……开头"},
-	{"suffix", "以……结尾"},
-	{"regex", "匹配正则"},
-	{"in", "属于列表之一"},
+// operatorLabelText 是条件操作符的中文说明，与 rules.AllOperators()
+// 一起使用（同 actionTypeLabelText/aggregateByLabelText 的写法：说明
+// 缺失时用值本身兜底）。
+var operatorLabelText = map[string]string{
+	"eq":       "等于",
+	"ne":       "不等于",
+	"gt":       "大于",
+	"gte":      "大于等于",
+	"lt":       "小于",
+	"lte":      "小于等于",
+	"contains": "包含",
+	"prefix":   "以……开头",
+	"suffix":   "以……结尾",
+	"regex":    "匹配正则",
+	"in":       "属于列表之一",
 }
 
 // aggregateByLabelText 是合并窗口分组方式的中文说明，与
@@ -135,7 +137,16 @@ func (s *Server) handleMetaActionTypes(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) handleMetaOperators(w http.ResponseWriter, _ *http.Request) {
-	respondJSON(w, http.StatusOK, operatorLabels)
+	all := rules.AllOperators()
+	out := make([]metaItem, 0, len(all))
+	for _, op := range all {
+		label := operatorLabelText[op]
+		if label == "" {
+			label = op // 兜底：新增操作符忘了加说明也不该让前端渲染不出来
+		}
+		out = append(out, metaItem{Value: op, Label: label})
+	}
+	respondJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) handleMetaAggregateBy(w http.ResponseWriter, _ *http.Request) {

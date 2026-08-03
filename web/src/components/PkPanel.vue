@@ -110,6 +110,28 @@ export function buildPkRule(draft: PkDraft): Rule {
 }
 
 /**
+ * PK_VISIT_AGGREGATE_WINDOW_SECONDS 是串门欢迎的合并窗口——终审复审
+ * 指出的 C-1 残留一半：`welcomedFromOpponent`（后端）只堵死了「同一个人
+ * 刷屏」，堵不住「PK 接通瞬间对面 N 个不同的人一起涌入」，这条规则此前
+ * 完全没有 `aggregate`，N 个人 = N 条弹幕，被账号级限流拉成一串串行
+ * 发送、把礼物答谢等其它规则挤到后面。跟 `buildEnterRule`（`Danmaku.vue`）
+ * 同款做法：加一个「窗口内全部合并」的 `aggregate`（`by: 'type'`，不设
+ * `minCount`——0/1 都表示「总是合并」，见 `rules.AggregateSpec.MinCount`
+ * 的注释），把这个窗口内的全部串门事件收成一条 Trigger，只触发一次
+ * danmaku 动作，而不是每个人各触发一次。
+ *
+ * 窗口内只有一个人时行为不变（模板仍然读到这唯一一个人的
+ * `user.username`，见 `rules/aggregate.go` `mergeBuckets`：单元素分组的
+ * `vars` 就是那一个事件自己的 vars，`MergeVars` 不会覆盖非空字段）；
+ * 窗口内多人涌入时只播出分组里第一个人的名字，不是完整地一一欢迎——
+ * 但这仍然是从「N 条弹幕刷屏」到「1 条弹幕」的严格改善，不是回归。真要
+ * 做「欢迎 A、B、C 等 N 位朋友」这种多人文案，需要仿照
+ * `buildEnterRule`/`EnterDraft` 那套 `templateMulti` + `groupMode` UI，
+ * 范围明显更大，这次不做。
+ */
+const PK_VISIT_AGGREGATE_WINDOW_SECONDS = 5
+
+/**
  * buildPkVisitRule 组装「PK 串门欢迎」规则——只覆盖欢迎方向
  * （`pk_visit_from_opponent`），警示方向（`pk_visit_to_opponent`，我方
  * 观众跑去对面）没有对应的自动播报 UI，避免把两个语气相反的方向在
@@ -121,6 +143,7 @@ export function buildPkVisitRule(draft: PkDraft): Rule {
     name: PK_VISIT_RULE_NAME,
     enabled: draft.visitGreetingEnabled,
     on: [PK_VISIT_ON],
+    aggregate: { window: `${PK_VISIT_AGGREGATE_WINDOW_SECONDS}s`, by: 'type' },
     do: [{ type: 'danmaku', template: draft.visitTemplates.filter((t) => t.trim() !== '') }],
   }
 }

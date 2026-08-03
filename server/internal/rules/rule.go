@@ -71,13 +71,37 @@ func AllAggregateBy() []AggregateBy {
 	return out
 }
 
-// validOps 是条件支持的全部操作符。
-var validOps = map[string]bool{
-	"eq": true, "ne": true,
-	"gt": true, "gte": true, "lt": true, "lte": true,
-	"contains": true, "prefix": true, "suffix": true, "regex": true,
-	"in": true,
+// allOperators 是条件支持的全部操作符，按此顺序暴露给 AllOperators()/
+// /api/meta/operators 的下拉框。
+//
+// 【终审收尾】httpapi/meta_handler.go 的 operatorLabels 曾经是一份跟这里
+// 完全独立的手抄清单（TestMetaOperators 也只查"至少包含这 11 个"这种
+// 白名单式断言，跟 TestMetaAggregateBy 修复前一模一样，是 Important-1
+// 同一类风险，只是当时没跟着一起加固）——这里补上唯一权威来源，
+// validOps（Condition.Validate 用的 O(1) 查表）从它派生，不再各写一份。
+var allOperators = []string{
+	"eq", "ne",
+	"gt", "gte", "lt", "lte",
+	"contains", "prefix", "suffix", "regex",
+	"in",
 }
+
+// AllOperators 返回全部条件操作符的副本。
+func AllOperators() []string {
+	out := make([]string, len(allOperators))
+	copy(out, allOperators)
+	return out
+}
+
+// validOps 是条件支持的全部操作符，供 Condition.Validate 做 O(1) 查表，
+// 从 allOperators 派生。
+var validOps = func() map[string]bool {
+	m := make(map[string]bool, len(allOperators))
+	for _, op := range allOperators {
+		m[op] = true
+	}
+	return m
+}()
 
 // Rule 是一条规则。
 //

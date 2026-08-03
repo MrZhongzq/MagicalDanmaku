@@ -292,11 +292,16 @@ func (pl *PKPipeline) handleBattle(ctx context.Context, b event.Battle) {
 	}
 
 	if b.SubCommand == pkBattleEndSubCommand {
-		// 真实的 PK_BATTLE_END 报文不带 pk_id 可用——mapBattle（battle.go）
-		// 只归一化 SubCommand，从不解析 pk_basic，只有 PK_INFO 走的
-		// mapPkInfo 才解析；requirePkID 传空字符串，表示「不要求匹配，
-		// 直接结束当前活跃的这一场」，语义与去掉这次重构之前的旧代码
-		// （`hadActive := pl.activePkID != ""`）完全一致。
+		// b.PkID 在这条路径上恒为空字符串，但不是因为报文没有这个字段
+		// ——终审复审用真实抓包核实过（server/blindbox.jsonl:306），
+		// PK_BATTLE_END 的 pk_id 就在 JSON 顶层、跟 cmd 平级：
+		//   {"cmd":"PK_BATTLE_END","data":{...},"pk_id":398603316,...}
+		// 只是 mapBattle（battle.go）从不解析它——PK_BATTLE_* 系列 CMD
+		// 只归一化 SubCommand，pk_id/pk_basic 只有 PK_INFO 走的 mapPkInfo
+		// 才解析，event.Battle.PkID 因此在这条 CMD 上从来没被填过。
+		// requirePkID 传空字符串，表示「不要求匹配，直接结束当前活跃的
+		// 这一场」——语义跟这次重构之前的旧代码（`hadActive :=
+		// pl.activePkID != ""`）完全一致，没有变化。
 		pl.endActivePK("")
 	}
 }
@@ -309,12 +314,14 @@ func (pl *PKPipeline) handleBattle(ctx context.Context, b event.Battle) {
 // 漏同步。
 //
 // requirePkID 为空字符串时无条件结束当前活跃的这一场——CMD 驱动的正常
-// 结束路径用这个，因为真实的 PK_BATTLE_END 报文压根不携带 pk_id（见
-// 上面调用处的说明），没有办法要求匹配，也没必要：能收到这条 CMD 就
-// 说明这一场确实结束了。requirePkID 非空时，只有它与 pl.activePkID
-// 相等才会真的触发——超时兜底路径（watchEndTimeFallback）传入它启动时
-// 记住的 pk_id，如果这场 PK 已经被真正的 PK_BATTLE_END 结束、或被一场
-// 新 PK 顶替，pl.activePkID 早就不是这个值了，直接放弃，不会误伤。
+// 结束路径用这个，因为 event.Battle.PkID 在这条路径上恒为空（mapBattle
+// 不解析 pk_id，见上面调用处的说明；不是报文没有这个字段，是解析层没
+// 取它），没有办法要求匹配，也没必要：能收到这条 CMD 就说明这一场确实
+// 结束了。requirePkID 非空时，只有它与 pl.activePkID 相等才会真的触发
+// ——超时兜底路径（watchEndTimeFallback）传入它启动时记住的 pk_id
+// （这个值来自 PK_INFO，mapPkInfo 真的解析了 pk_id，非空），如果这场
+// PK 已经被真正的 PK_BATTLE_END 结束、或被一场新 PK 顶替，pl.activePkID
+// 早就不是这个值了，直接放弃，不会误伤。
 func (pl *PKPipeline) endActivePK(requirePkID string) bool {
 	pl.mu.Lock()
 	hadActive := pl.activePkID != "" && (requirePkID == "" || pl.activePkID == requirePkID)
@@ -334,13 +341,12 @@ func (pl *PKPipeline) endActivePK(requirePkID string) bool {
 	return hadActive
 }
 
-// pkEndTimeFallbackGrace 是超时兜底相对 pk_basic.end_time 额外多等的
-// 缓冲——end_time 是 B 站预告的（大概率）战斗结束时间，不是「收尾完成
-// 时间」，网络抖动、结算阶段的延迟都可能让真正的 PK_BATTLE_END 比它晚
-// 到几秒到几十秒；给一个宽松但有限的缓冲，避免一场其实还没真正结束的
-// PK 被误判成「CMD 丢了」。跟 pkTeardownGraceLimit/shutdownGraceLimit
-// 不是同一类窗口（那两个兜的是「清理动作本身卡住」），这里兜的是
-// 「PK_BATTLE_END 这条 CMD 本身从未到达」。
+// pkEndTimeFallbackGrace 是超时兜底相对「这场 PK 的预告时长」额外多等的
+// 缓冲——网络抖动、结算阶段的延迟都可能让真正的 PK_BATTLE_END 比预告的
+// 结束时刻晚到几秒到几十秒；给一个宽松但有限的缓冲，避免一场其实还没
+// 真正结束的 PK 被误判成「CMD 丢了」。跟 pkTeardownGraceLimit/
+// shutdownGraceLimit 不是同一类窗口（那两个兜的是「清理动作本身卡
+// 住」），这里兜的是「PK_BATTLE_END 这条 CMD 本身从未到达」。
 const pkEndTimeFallbackGrace = 30 * time.Second
 
 // watchEndTimeFallback 是 PK_BATTLE_END 丢失时的兜底。
@@ -354,30 +360,50 @@ const pkEndTimeFallbackGrace = 30 * time.Second
 // 下一场 PK 接通时 StartPK 内部的防御性收尾（c.endPKLocked，"不允许两场
 // PK 的连接叠加"）才会自愈——中间可能隔几小时。
 //
-// pk_basic.end_time 早在 PK_INFO 阶段就已经拿到（event.Battle.EndTime，
-// cmdmap/battle.go 的 mapPkInfo），用它做一个几乎零成本的超时兜底：
-// 真正的 PK_BATTLE_END 到来时 pl.activePkID 已经被清空/被新一场顶替，
-// endActivePK 传入的 pkID 参数会跟当前的 activePkID 对不上，兜底直接
-// 放弃，不会误伤已经正常结束或已经是下一场的 PK。
+// 【终审复审两处订正，均已修复】
 //
-// 【已知的极窄边角，不修】如果 end_time 在 PK_INFO 抵达时就已经过期
-// （wait 被钳到 0），这个 goroutine 会几乎立即调用 endActivePK/EndPK，
-// 理论上可能跟同一时刻 handleBattle 并发起的 startPK 里那次
-// c.StartPK() 竞争 c.pkMu：如果 EndPK 抢先拿到锁，此时 c.pkLink 还是
-// nil（StartPK 还没来得及注册），EndPK 会是空操作，随后 StartPK 才把
-// 真实连接注册上去——这个新连接不会被这次已经空跑过的 EndPK 收尾，
-// 要等下一场 PK 的防御性收尾才会清理，退化成了这个兜底本来要解决的
-// 那个问题。这个窗口在正常场景下不可达：end_time 通常是几分钟之后，
-// 远大于 c.StartPK() 内部「注册 + 起 goroutine」这几行代码的耗时，只有
-// 「end_time 送达时就已经过期」这种本身就不该发生的报文异常才会撞上。
+// (a) 用「结束时间 - 开始时间」的相对时长，不用绝对的服务器 epoch
+// 直接跟本地时钟比：旧实现拿 `time.Unix(b.EndTime,0)` 跟本地 `time.Now()`
+// 比较，前提是两边时钟同步——复审用真实抓包核实过这个前提不成立：
+// PK 进入惩罚阶段后 B 站仍会周期性重推 PK_INFO，其中的 end_time 早已
+// 过期（复审样本里过期了 65 秒）；工具在惩罚阶段启动、或此时新建一个
+// PKPipeline，收到的第一条 PK_INFO 就是这种「end_time 已过期」的报文。
+// 旧实现下 wait 被钳到 0，几乎立即触发 EndPK，真实跟同一时刻 startPK
+// 内部的 c.StartPK() 竞争 c.pkMu——复审实测 8 轮里 3 轮 EndPK 抢先拿到
+// 锁（此时 c.pkLink 还是 nil，EndPK 空跑），StartPK 随后注册的真实连接
+// 就此不再被这次已经空跑过的兜底收尾，泄漏到下一场 PK 才能自愈，退化
+// 成了这个兜底本来要解决的问题——这不是「正常场景不可达」的边角，是
+// 真实存在的失效路径，本轮改用相对时长后天然免疫：不管这条 PK_INFO
+// 是刚接通时收到的，还是惩罚阶段里一次迟到的重推，只要 start_time/
+// end_time 这对差值本身健康（正常几分钟量级），从「本地收到这条
+// PK_INFO 的那一刻」起算的等待时长就总是那个健康的量级，不会因为
+// end_time 的绝对值已经"过期"就被钳成 0。
+//
+// (b) wait 兜底钳到至少 1 秒——这是防御性的第二层，不是当前能被真实
+// 触发的主路径：`grace` 在上面已经被钳成「配置值 或 30s 默认值」，
+// 恒为正；`duration` 也已经钳成非负。两者之和在现有代码路径下不可能
+// `<= 0`，这条 `if` 目前是死代码。保留它是为了防止未来有人改动上面
+// 任一处钳位逻辑时，`wait` 重新变得可能非正而无人察觉——那样会重新
+// 引入 (a) 描述的那个竞态窗口。**不要把这条误读成"当前场景下真的会
+// 触发的兜底"**——终审这批曾经有过"把没验证过的断言当作事实写进注释"
+// 的教训（见 final-fix-report.md），这里特意写清楚，避免同样的事发生
+// 在这条注释自己身上。
 func (pl *PKPipeline) watchEndTimeFallback(ctx context.Context, b event.Battle) {
 	grace := pl.endTimeFallbackGrace
 	if grace <= 0 {
 		grace = pkEndTimeFallbackGrace
 	}
-	wait := time.Until(time.Unix(b.EndTime, 0).Add(grace))
-	if wait < 0 {
-		wait = 0
+
+	// 相对时长，不碰绝对 epoch——见上方 (a) 的说明。EndTime<=StartTime
+	// 时（异常数据）钳成 0，不产出负数/荒谬的超大正数。
+	duration := time.Duration(b.EndTime-b.StartTime) * time.Second
+	if duration < 0 {
+		duration = 0
+	}
+
+	wait := duration + grace
+	if wait <= 0 {
+		wait = time.Second // 见上方 (b) 的说明
 	}
 
 	timer := time.NewTimer(wait)
