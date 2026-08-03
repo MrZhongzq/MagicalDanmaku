@@ -111,8 +111,19 @@ func TestQueryStatsByDayExcludesGiftCombo(t *testing.T) {
 
 // TestQueryStatsByDaySumsBlindBoxProfitByBattery 验证盈亏是按每一条盲盒
 // 送礼事件的原始电池数量（Price*Count - TotalCoin）累加，不是按礼物名
-// 分组再取某一种——两条盲盒记录爆出的礼物名完全不同也要能正确累加，
-// 且非盲盒的普通礼物（BlindBox 为 JSON null）完全不计入。
+// 分组再取某一种——两条盲盒记录爆出的礼物名完全不同也要能正确累加。
+//
+// 普通礼物那一行的 detail **故意写成 `"BlindBox":null`（显式 JSON
+// null），不是干脆省略这个键**——event.Gift 没有 json tag、没有
+// omitempty，`json.Marshal` 对非盲盒礼物真实产出的就是这个形状（已用
+// 一次性脚本核实过）。这个细节曾经真实掉过坑：SQL 侧一度写成
+// `detail->'BlindBox' IS NOT NULL`（`->` 取 jsonb），PostgreSQL 对
+// 「值是 JSON null」返回的 jsonb 值本身不是 SQL NULL，`IS NOT NULL` 对它
+// 判真——如果测试 fixture 图省事省略这个键（等价于键缺失，`->` 对键
+// 缺失能正确返回 SQL NULL），这个 bug 不会被任何测试测出来，是「测试
+// 数据形状偏离真实生产序列化路径」的又一个真实案例。现在 SQL 已经改用
+// `->>`（取文本，JSON null 与键缺失两种情况下都正确返回 SQL NULL），
+// 这条测试的 fixture 也换成生产真实形状，两边对齐。
 func TestQueryStatsByDaySumsBlindBoxProfitByBattery(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -129,9 +140,12 @@ func TestQueryStatsByDaySumsBlindBoxProfitByBattery(t *testing.T) {
 			Detail: []byte(`{"GiftName":"棒棒糖","Count":1,"Price":1000,"TotalCoin":3000,` +
 				`"BlindBox":{"Name":"心动盲盒","Price":3000,"TipPrice":1000}}`),
 			OccurredAt: statsFixedTime.Add(time.Minute)},
-		// 普通礼物（非盲盒）：不应计入盈亏，哪怕总价很大
+		// 普通礼物（非盲盒）：Price*Count-TotalCoin = 100*100-9000 = 1000，
+		// 刻意选一个非零值——如果 SQL 误判成盲盒，这一行会把 BlindBoxProfit
+		// 的断言也一起带错（不只是 GiftCount/GiftKinds 两个断言），不依赖
+		// 凑巧抵消成 0 才能抓住这个坑。
 		{AccountID: accID, Kind: ActivityEvent, EventType: "gift",
-			Detail:     []byte(`{"GiftName":"小心心","Count":100,"Price":100,"TotalCoin":10000}`),
+			Detail:     []byte(`{"GiftName":"小心心","Count":100,"Price":100,"TotalCoin":9000,"BlindBox":null}`),
 			OccurredAt: statsFixedTime.Add(2 * time.Minute)},
 	}); err != nil {
 		t.Fatalf("写入报错: %v", err)
@@ -144,8 +158,20 @@ func TestQueryStatsByDaySumsBlindBoxProfitByBattery(t *testing.T) {
 	b := statsBucketFor(t, got, "2026-07-31")
 	const want = 200 - 2000 // 两条盲盒记录按电池数量相加，与礼物名无关
 	if b.BlindBoxProfit != want {
-		t.Errorf("BlindBoxProfit = %d, 期望 %d（幸运赚 200、心动亏 2000，按电池数量分别累加）",
+		t.Errorf("BlindBoxProfit = %d, 期望 %d（幸运赚 200、心动亏 2000，按电池数量分别累加，"+
+			"普通礼物那一行——哪怕 detail 显式带 BlindBox:null——完全不应计入）",
 			b.BlindBoxProfit, want)
+	}
+
+	// 计划文件硬性要求：礼物件数/种类不含盲盒（用户原话「盲盒类单独
+	// 计算」）。3 条 gift 行里 2 条是盲盒，只有普通礼物那 1 条应该计入
+	// GiftCount/GiftKinds；盲盒爆出的「星光铃铛」「棒棒糖」两个礼物名
+	// 不该污染 GiftKinds。
+	if b.GiftCount != 1 {
+		t.Errorf("GiftCount = %d, 期望 1（3 条 gift 里 2 条是盲盒，礼物件数不含盲盒）", b.GiftCount)
+	}
+	if b.GiftKinds != 1 {
+		t.Errorf("GiftKinds = %d, 期望 1（盲盒爆出的礼物名不该进礼物种类统计）", b.GiftKinds)
 	}
 }
 

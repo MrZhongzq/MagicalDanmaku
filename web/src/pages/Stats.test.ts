@@ -165,8 +165,10 @@ describe('Stats 页', () => {
     expect(grid.text()).toContain('盲盒盈亏')
     expect(grid.text()).not.toContain('待后端支持')
     expect(wrapper.text()).not.toContain('待后端支持')
-    // 20050（1/100 电池）= 200.50 元，正数带 + 号
-    expect(grid.text()).toContain('+200.50 元')
+    // 换算系数是 1/1000（1 电池 = 0.1 元），不是 1/100——曾经错写成
+    // /100 把这个值显示成 +200.50 元（差 10 倍），这条断言就是钉住
+    // 正确系数的回归测试：20050（1/100 电池）= 20.05 元，正数带 + 号。
+    expect(grid.text()).toContain('+20.05 元')
   })
 
   it('盲盒盈亏为负时显示负号，不做绝对值处理（真实体现"亏了"）', async () => {
@@ -176,7 +178,8 @@ describe('Stats 页', () => {
     await flushPromises()
 
     const grid = wrapper.find('.stats-grid')
-    expect(grid.text()).toContain('-56.00 元')
+    // -5600（1/100 电池）= -5.60 元
+    expect(grid.text()).toContain('-5.60 元')
   })
 
   it('没有分桶数据时盲盒盈亏卡片显示占位符——不能把「算不出来」显示成「盈亏为 0」', async () => {

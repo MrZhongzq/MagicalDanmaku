@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -565,4 +567,232 @@ func TestPKPipelineEndsOnBattleEndPushed(t *testing.T) {
 	hostConn.WriteMessage(websocket.BinaryMessage, pkBattleEndMsg())
 
 	waitUntil(t, 2*time.Second, func() bool { return c.PKLink() == nil })
+}
+
+// ---------- 复审 Important-3：方向 A 判定不该等 FetchOpponentSnapshots ----------
+
+// TestPKPipelinePublishesLinkBeforeSnapshotFetchCompletes 是 Important-3
+// 的回归测试：pl.link 曾经要等 StartPK **和** FetchOpponentSnapshots 都
+// 返回才发布，等于把方向 A 判定（粉丝勋章判据零成本可用，round 建立时
+// 就绪）的生效时刻绑死在 FetchOpponentSnapshots 的预算上——PK 接通头
+// 几秒恰恰是对面观众涌入的窗口，这段时间的欢迎信号会被静默漏判、且
+// 不会补判。这里把 roomOnline 接口拖慢到 2s，断言方向 A 的串门信号
+// 在远小于 2s 的时间内就能通过合流通道收到，证明 pl.link 在快照抓完
+// 之前就已经发布。
+func TestPKPipelinePublishesLinkBeforeSnapshotFetchCompletes(t *testing.T) {
+	const hostRoom = "21452505"
+	const oppRoom = "33333"
+
+	ts := newPKPipelineTestServer(t)
+	ts.delay["roomOnline"] = 1200 * time.Millisecond
+
+	trigger := danmakuMsgWithMedal(22222222, "opp-anchor", "串门A", oppRoom)
+	fs := newMultiRoomFakeServer(t, func(c *websocket.Conn, roomID string) {
+		if roomID != hostRoom {
+			return
+		}
+		c.WriteMessage(websocket.BinaryMessage, pkInfoMsg(hostRoom, oppRoom, "pk-early-link"))
+		// 重发触发消息直到 round 建立——见
+		// TestPKPipelineClassifiesBothVisitDirections 的说明，同样的
+		// 时序考量，不依赖精确的跨 goroutine 同步信号。
+		for i := 0; i < 10; i++ {
+			c.WriteMessage(websocket.BinaryMessage, trigger)
+			time.Sleep(60 * time.Millisecond)
+		}
+	})
+
+	c := newPKPipelineTestClient(t, fs, ts, hostRoom)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go c.Run(ctx)
+
+	out := NewPKPipeline(c).Run(ctx)
+
+	// 600ms 远小于 roomOnline 的 1.2s 延迟——如果 pl.link 的发布仍然被
+	// FetchOpponentSnapshots 拖住，这里必然超时失败。
+	drainUntil(t, out, 600*time.Millisecond, func(ev event.Event) bool {
+		return ev.Type == event.TypeVisitFromOpponent
+	})
+}
+
+// ---------- 复审 Important-2：关闭上限，不能被卡住的 startPK 拖到无限久 ----------
+
+// TestPKPipelineShutdownRespectsGraceLimitWhenStartPKGoroutineStuck 是
+// Important-2 的回归测试：一个 startPK goroutine 如果卡在
+// `for ev := range link.Events()`（对应已知遗留——conn.WriteMessage
+// 没有 SetWriteDeadline，对端接收窗口打满时可能无限阻塞），旧实现的
+// `wg.Wait(); close(out)` 会被这一个 goroutine 拖到无限久，宿主的
+// 优雅退出流程跟着卡死。
+//
+// 真实触发这个卡住场景需要把对端 TCP 接收窗口打满，在单元测试里没有
+// 可靠、快速的构造方式（这也是这个遗留问题至今没有专门测试的原因，
+// 见 opponent_link.go 对 pkTeardownGraceLimit 的注释）。这里直接模拟
+// 它的后果——wg 里有一个永远不调用 Done() 的 goroutine——测的是
+// PKPipeline.shutdown() 这个兜底机制本身：不管 wg 里卡了什么，
+// shutdownGraceLimit 到期后必须放弃等待、关闭 out，且此后任何迟到的
+// forward() 调用都必须是安全的 no-op，不能 panic。
+func TestPKPipelineShutdownRespectsGraceLimitWhenStartPKGoroutineStuck(t *testing.T) {
+	fs := newMultiRoomFakeServer(t, nil)
+	c := newPKHostClient(t, fs, "21452505")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go c.Run(ctx)
+	waitUntil(t, time.Second, func() bool { return fs.authCount() >= 1 })
+
+	pl := NewPKPipeline(c)
+	pl.shutdownGraceLimit = 200 * time.Millisecond
+	out := pl.Run(ctx)
+
+	// 模拟一个卡住的 startPK goroutine：Add(1) 但永不 Done()。
+	pl.wg.Add(1)
+	t.Cleanup(pl.wg.Done) // 测试结束后放它走，避免这份状态影响其它测试
+
+	start := time.Now()
+	cancel() // 触发宿主 Run 退出 -> c.Events() 关闭 -> loop 退出 -> shutdown()
+
+	select {
+	case _, ok := <-out:
+		if ok {
+			t.Error("out 不应该再产出事件")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("out 迟迟没有关闭——shutdown 没有遵守 shutdownGraceLimit 上限，" +
+			"PK 编排会卡死宿主的优雅退出流程")
+	}
+
+	elapsed := time.Since(start)
+	if elapsed < pl.shutdownGraceLimit {
+		t.Errorf("out 关闭得太快（耗时 %v < 上限 %v）——没有真的在等 wg，"+
+			"上限形同虚设", elapsed, pl.shutdownGraceLimit)
+	}
+	if elapsed > pl.shutdownGraceLimit+time.Second {
+		t.Errorf("out 关闭耗时 %v，明显超过 shutdownGraceLimit=%v，上限没有生效",
+			elapsed, pl.shutdownGraceLimit)
+	}
+
+	// 关闭之后，一次迟到的 forward() 调用必须是安全的 no-op，不能 panic
+	// ——这正是"不能简单给 wg.Wait() 加超时"的原因：换成简单超时的话，
+	// 超时后 close(out) 会跟一个不知道已经超时、还在往 out 发送的
+	// forward() 撞车。
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("out 关闭之后调用 forward() 不应该 panic，实际: %v", r)
+			}
+		}()
+		pl.forward(event.Event{Type: event.TypeUnknown})
+	}()
+}
+
+// ---------- 跨语言字面量：低成本封堵，不是彻底修复 ----------
+
+// TestPKOpponentSnapshotSubCommandMatchesFrontendLiteral 是复审指出的
+// 跨语言耦合的低成本封堵：PKOpponentSnapshotSubCommand 这个值被
+// PkPanel.vue 的 buildPkRule 写死成规则的 when 条件，且这条规则会被
+// 保存进数据库——一旦 Go 侧改了这个常量而前端没跟着改，不是"下次保存
+// 就会自愈"，是历史数据里固化了过期字面量，PK 播报从此再也不会触发，
+// 且没有任何运行时信号能发现。这里只是让"改了一边忘了改另一边"在
+// go test 阶段就报错，不是长期方案——真正的方案是把这个值也做成一个
+// /api/meta/* 端点下发（meta_handler.go 顶部注释说得很清楚：写死会
+// 悄悄漂移），已记进报告的后续项。
+func TestPKOpponentSnapshotSubCommandMatchesFrontendLiteral(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "..", "web", "src", "components", "PkPanel.vue")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("读取 PkPanel.vue 失败（路径 %s 是否还对）: %v", path, err)
+	}
+	literal := "'" + PKOpponentSnapshotSubCommand + "'"
+	if !strings.Contains(string(b), literal) {
+		t.Errorf("PkPanel.vue 里没有找到 %s——它应该在 PK_SNAPSHOT_SUBCOMMAND 常量里，"+
+			"跟 bilibili.PKOpponentSnapshotSubCommand（当前值 %q）保持一致，"+
+			"不一致的表现是 PK 播报规则从此再也不触发，且不会有任何错误提示",
+			literal, PKOpponentSnapshotSubCommand)
+	}
+}
+
+// ---------- 低成本保险：结束过的 pk_id 不重新触发 ----------
+
+// TestPKPipelineIgnoresPKInfoForAlreadyEndedPkID 验证 handleBattle 上方
+// 注释里的那道保险：一场 PK 结束（PK_BATTLE_END）之后，如果又收到同一个
+// pk_id 的 PK_INFO（真实触发条件未知，是否发生过没有样本可查），不应该
+// 重新触发 StartPK、不应该产出第二条快照事件。
+// 设计说明：multiRoomFakeServer 每条连接固定存活 500ms 后自己断开
+// （见该类型定义），Client 的重连退避在测试里被调快到 10~30ms——这意味着
+// 如果 onConnected 在**每一次**连接（含重连）都重发同一条 PK_INFO，
+// "PK 结束后同一个 pk_id 又收到一次 PK_INFO" 这个场景会在重连时自然
+// 发生，不需要手工複用一个可能已经被服务端关闭的旧连接去补发第二条
+// 消息去模拟——第一版测试就是这么写的，产生的问题是：由于 EndPK 走完、
+// waitUntil 等多次轮询已经耗时接近或超过服务端那 500ms 的自动断开
+// 窗口，手工复用的旧连接很可能已经被关闭，第二次 WriteMessage 静默
+// 失败，测试断言"没有第二次快照"永远成立——不是因为保险生效，是因为
+// 第二条消息压根没送到，去掉保险代码后这条测试依然会通过（已用变异
+// 验证过，见任务报告）。改成让 onConnected 在每次连接都发一遍，靠
+// Client 自身的重连机制驱动出真实的"同一个 pk_id 再次收到 PK_INFO"，
+// 断言窗口也不再依赖手工连接对象是否还活着。
+func TestPKPipelineIgnoresPKInfoForAlreadyEndedPkID(t *testing.T) {
+	const hostRoom = "21452505"
+	const oppRoom = "33333"
+	const pkID = "pk-repeat"
+
+	ts := newPKPipelineTestServer(t)
+
+	hostConnReady := make(chan *websocket.Conn, 1)
+	fs := newMultiRoomFakeServer(t, func(c *websocket.Conn, roomID string) {
+		if roomID != hostRoom {
+			return
+		}
+		// 每一次连接（含重连）都重发同一个 pk_id 的 PK_INFO。
+		c.WriteMessage(websocket.BinaryMessage, pkInfoMsg(hostRoom, oppRoom, pkID))
+		select {
+		case hostConnReady <- c:
+		default:
+		}
+	})
+
+	c := newPKPipelineTestClient(t, fs, ts, hostRoom)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go c.Run(ctx)
+
+	out := NewPKPipeline(c).Run(ctx)
+
+	isSnapshot := func(ev event.Event) bool {
+		b, ok := ev.Payload.(event.Battle)
+		return ok && b.SubCommand == PKOpponentSnapshotSubCommand
+	}
+	first := drainUntil(t, out, 2*time.Second, isSnapshot)
+	if b := first.Payload.(event.Battle); b.PkID != pkID {
+		t.Fatalf("PkID = %q, 期望 %q", b.PkID, pkID)
+	}
+
+	// 立刻（不做任何其它等待）在第一条连接上推 PK_BATTLE_END，趁它还没
+	// 被服务端的 500ms 定时器关闭。
+	var hostConn *websocket.Conn
+	select {
+	case hostConn = <-hostConnReady:
+	case <-time.After(time.Second):
+		t.Fatal("未能取得宿主连接")
+	}
+	if err := hostConn.WriteMessage(websocket.BinaryMessage, pkBattleEndMsg()); err != nil {
+		t.Fatalf("推送 PK_BATTLE_END 失败: %v", err)
+	}
+	waitUntil(t, 2*time.Second, func() bool { return c.PKLink() == nil })
+
+	// 接下来 2s 内，Client 会因为服务端每 500ms 主动断开而反复重连，
+	// 每次重连 onConnected 都会重发同一个 pk_id 的 PK_INFO——真实驱动出
+	// "PK 结束后同一个 pk_id 又来一次" 这个场景，不需要手工模拟。
+	// 有保险时不应该再看到第二条快照事件；没有保险时会看到。
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case ev := <-out:
+			if isSnapshot(ev) {
+				t.Fatal("已经结束的 pk_id 因重连重新收到 PK_INFO，不应该再触发一次快照播报")
+			}
+		case <-deadline:
+			return // 2s 内没有第二条快照事件，保险生效
+		}
+	}
 }

@@ -60,11 +60,19 @@ const PLACEHOLDER = '—'
 
 /**
  * formatBlindBoxProfit 把 1/100 电池的原始整数换算成「元」展示。
+ *
+ * **除数是 1000，不是 100**——1 电池 = 0.1 元，原始值是 1/100 电池，
+ * 所以「元 = 原始值 / 1000」。跟 `server/internal/rules/aggregate.go`
+ * 的 `formatYuan`（弹幕答谢模板里 `{{.blindBox.profitYuan}}` 用的就是
+ * 它）必须是同一个换算系数——这里曾经错写成 `/100`，同一笔盲盒在弹幕
+ * 答谢（0.2 元）与统计页（当时错误地显示 2.00 元）之间差了 10 倍，
+ * 已修正并在这条注释里把系数钉死，防止第三次漂移。
+ *
  * 正数前缀 `+` 号强调「赚了」，负数 `toFixed` 自带负号不需要额外处理，
  * 0 既不加号也不减号（不赔不赚）。
  */
 function formatBlindBoxProfit(profitCentiBattery: number): string {
-  const yuan = profitCentiBattery / 100
+  const yuan = profitCentiBattery / 1000
   const sign = yuan > 0 ? '+' : ''
   return `${sign}${yuan.toFixed(2)} 元`
 }

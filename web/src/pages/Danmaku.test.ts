@@ -586,7 +586,13 @@ describe('Danmaku 页面：保存（Task 13 接上 useDraft）', () => {
   // P4-4 Task 7：盲盒单列开关与 PK 串门欢迎开关不再是纯 UI 装饰——
   // 勾选后必须真的在保存的规则列表里带上一条 enabled:true 的独立规则，
   // 否则用户点了勾选、以为已经生效，实际上后端什么都没收到。
-  it('勾选"盲盒礼物单独一类"并保存，PUT 请求体里出现 enabled:true 的盲盒答谢规则', async () => {
+  //
+  // 【复审 Important-4 订正】blindBoxSeparate 的默认值改成了 true
+  // （计划文件硬性要求「盲盒类单独计算」是正确行为的陈述，不是可选
+  // 偏好）——这条测试不再需要先点一下checkbox 才能验证"分离生效"，
+  // 默认状态本身就该是分离的；点击变成了验证"关闭开关能退回混合模式"
+  // 这个反方向。
+  it('默认状态下（不碰盲盒开关）保存，PUT 请求体里就已经有 enabled:true 的盲盒答谢规则', async () => {
     let putBody: RuleView[] | null = null
     stubSaveFetch({
       rules: [],
@@ -597,8 +603,11 @@ describe('Danmaku 页面：保存（Task 13 接上 useDraft）', () => {
     setupStores()
     const wrapper = await mountDanmaku()
 
-    const checkbox = wrapper.findAll('.n-checkbox').find((c) => c.text() === '盲盒礼物单独一类，不并入常规答谢')
-    await checkbox!.trigger('click')
+    // 保存按钮要 dirty 才可点——改动一个跟盲盒完全无关的字段（单人欢迎语
+    // 模板）触发 dirty，不碰 blindBoxSeparate 本身，这样落到 PUT 请求体
+    // 里的盲盒开关值就是纯粹的默认值，不是被测试代码顺手点出来的。
+    const firstTemplateInput = wrapper.find('input[placeholder="单人欢迎语模板"]')
+    await firstTemplateInput.setValue('改过的模板')
     await flushPromises()
 
     const saveBtn = () => wrapper.findAll('button').find((b) => b.text() === '保存并生效')!
@@ -611,9 +620,35 @@ describe('Danmaku 页面：保存（Task 13 接上 useDraft）', () => {
     expect(blindBoxRule!.enabled).toBe(true)
     expect(blindBoxRule!.on).toEqual(['gift'])
 
-    // 通用礼物答谢这时必须排除盲盒，否则同一次投喂会被两条规则各答谢一遍。
+    // 通用礼物答谢默认就该排除盲盒，否则同一次投喂会被两条规则各答谢一遍。
     const giftRule = putBody!.find((r) => r.name === GIFT_RULE_NAME)
     expect(giftRule!.when).toEqual({ field: 'gift.isBlindBox', op: 'eq', value: false })
+  })
+
+  it('取消勾选"盲盒礼物单独一类"并保存，盲盒答谢规则变成 enabled:false，通用答谢不再排除盲盒', async () => {
+    let putBody: RuleView[] | null = null
+    stubSaveFetch({
+      rules: [],
+      onPut: (body) => {
+        putBody = body as RuleView[]
+      },
+    })
+    setupStores()
+    const wrapper = await mountDanmaku()
+
+    const checkbox = wrapper.findAll('.n-checkbox').find((c) => c.text() === '盲盒礼物单独一类，不并入常规答谢')
+    await checkbox!.trigger('click') // 默认是勾选状态，点一下变成取消勾选
+    await flushPromises()
+
+    const saveBtn = () => wrapper.findAll('button').find((b) => b.text() === '保存并生效')!
+    await saveBtn().trigger('click')
+    await flushPromises()
+
+    expect(putBody).not.toBeNull()
+    const blindBoxRule = putBody!.find((r) => r.name === BLINDBOX_RULE_NAME)
+    expect(blindBoxRule!.enabled).toBe(false)
+    const giftRule = putBody!.find((r) => r.name === GIFT_RULE_NAME)
+    expect(giftRule!.when).toBeUndefined()
   })
 
   it('打开"PK 串门欢迎"开关并保存，PUT 请求体里出现 enabled:true 的 PK 串门欢迎规则', async () => {

@@ -9,10 +9,19 @@
  *
  * `Danmaku.vue`/`PkPanel.vue` 用固定 `name`（`内置/进房欢迎` 等）从
  * `GET /api/bindings/{id}/rules` 里"认领"规则，认领不到的规则对那两个
- * 页面而言不存在。这一页反过来：**排除掉那七个固定名字之后剩下的规则
- * 都是"自定义规则"**，`isCustomRule` 就是这道过滤。用户在这页新建的
- * 规则也只需要避免撞上那七个保留名——具体重名校验留给后端保存时做
- * （用户的原则：后端接口统一最后处理）。
+ * 页面而言不存在。这一页反过来：**排除掉 `BUILTIN_RULE_NAMES` 里那些
+ * 固定名字之后剩下的规则都是"自定义规则"**，`isCustomRule` 就是这道
+ * 过滤。
+ *
+ * **重名/占用内置命名空间的校验，前端也做一道**（P4-4 Task 7 复审
+ * 加的）：新建或改名的自定义规则如果以 `内置/` 开头，会在下次保存时
+ * 被 `isCustomRule` 判成"内置规则"，从而在合并逻辑里被本页新组装的
+ * `customRules` 悄悄顶掉——用户辛苦配的规则不会报任何错，就这么在下一次
+ * 保存时消失了。`isReservedRuleName` 在两处拦这个前缀：名字输入框旁
+ * 实时显示错误提示（v-model 驱动，不用等失焦）、`onSave` 里再兜底拦一次
+ * 拒绝保存——不指望用户先踩一次坑才知道不能这么起名（后端接口统一最后
+ * 处理的原则不变，后端仍然是最终防线，这里只是把最容易踩的一种误用
+ * 提前到界面上挡住）。
  *
  * ## 条件树：委托给 ConditionTree.vue
  *
@@ -44,14 +53,14 @@
  * 通用功能"，典型场景是"给某位舰长配了专属进房欢迎，就不该再触发通用
  * 进房欢迎"。P4-3 后端加上了 `spec.Rule.Suppress`
  * （`server/internal/rules/spec/spec.go` 第 49-56 行），多选框列出
- * Task 9/10 建立的七个内置规则名，`CustomRuleDraft.excludeBuiltinRules`
+ * `BUILTIN_RULE_NAMES` 里的全部内置规则名，`CustomRuleDraft.excludeBuiltinRules`
  * 现在原样进 `buildCustomRule` 组装出的 `rule.suppress`。
  *
  * **后端两条校验决定了前端要防两件事**：
  *
  * 1. 压制不存在的规则名——`NewEngine` 在重建引擎（也就是保存后热重载）
  *    时才会报错，前端拦不住也不用拦：既然只能从 `BUILTIN_RULE_OPTIONS`
- *    （固定的七个内置名）里选，选出来的名字天然存在，除非哪天这七条
+ *    （固定的内置名单）里选，选出来的名字天然存在，除非哪天这些
  *    内置规则被整体停用/改名——那种情况留给后端在保存时报错足够。
  * 2. 定时触发（`schedule`）的规则配 `suppress` 会被 `Validate()` 直接
  *    拒绝——压制只在"同一次事件触发命中多条规则"时才有意义，定时规则
@@ -67,8 +76,8 @@
  *
  * 与 Danmaku.vue 同一套约定：改动先只进内存草稿；`SaveBar` 的 `save`
  * 事件接的是 `onSave`（本文件下方 `<script setup>` 部分），走 `useDraft`
- * 提供的统一流程：GET 现有规则 → 合并（保留内置七条，替换本页管的自定义
- * 规则）→ PUT 写库 → POST reload。第 2 步失败时 `dirty` 不归假，界面会
+ * 提供的统一流程：GET 现有规则 → 合并（保留全部内置规则，替换本页管的
+ * 自定义规则）→ PUT 写库 → POST reload。第 2 步失败时 `dirty` 不归假，界面会
  * 给一条持久的「已保存到数据库，但重载失败」提示，具体行为见下方
  * `onSave` 与 `partialFailureMessage` 处的注释。
  */
@@ -159,9 +168,31 @@ export function buildFieldOptions(resp: VariablesResponse): { label: string; val
   return out
 }
 
-/** isCustomRule 判断一条从后端拉回来的规则是不是"自定义规则"——不在七个内置名单里就是。 */
+/** isCustomRule 判断一条从后端拉回来的规则是不是"自定义规则"——不在内置名单（BUILTIN_RULE_NAMES）里就是。 */
 export function isCustomRule(rule: RuleView): boolean {
   return !BUILTIN_RULE_NAMES.includes(rule.name ?? '')
+}
+
+/**
+ * RESERVED_RULE_NAME_PREFIX 是全部内置规则名共用的命名空间。
+ *
+ * `isCustomRule` 只按"是不是恰好等于 BUILTIN_RULE_NAMES 里的某一个"来
+ * 判断，不检查前缀——所以理论上用户可以新建一条叫 `内置/盲盒答谢` 的
+ * 自定义规则，这条规则本身合法（后端不校验名字前缀），但只要它的名字
+ * 恰好等于任意一个内置名，下次从 `Danmaku.vue`/本页各自加载时，
+ * `isCustomRule`/`isOwnedByCustomPage` 就会把它误判成"属于对方"，
+ * 合并保存时被静默顶掉——不报错，用户配的规则就这么消失了。
+ *
+ * 更常见的触发方式不需要恰好撞上九个名字之一：只要用户新建/改名成任意
+ * 一个以 `内置/` 开头的名字，就已经进了这个高风险地带（哪天再新增一条
+ * 内置规则，撞名的概率就上升一次）。`isReservedRuleName` 拦的是整个
+ * 前缀，不是九个具体名字的精确匹配，把这类误用提前到界面上挡住。
+ */
+export const RESERVED_RULE_NAME_PREFIX = '内置/'
+
+/** isReservedRuleName 判断一个（可能还没保存的）规则名是否落进了内置命名空间。 */
+export function isReservedRuleName(name: string): boolean {
+  return name.trim().startsWith(RESERVED_RULE_NAME_PREFIX)
 }
 
 // ---- 时长 <-> 秒数：与 Danmaku.vue 同样的转换规则，各页自成一份，见该文件同名函数的注释 ----
@@ -299,8 +330,8 @@ export interface CustomRuleDraft {
   cooldownGroup: string
   actions: CustomActionDraft[]
   /**
-   * 排除通用规则——对应 spec.Rule.Suppress，只列出 Task 9/10 建立的七个
-   * 内置规则名供选。**只在 triggerMode === 'on' 时才会被
+   * 排除通用规则——对应 spec.Rule.Suppress，只列出 `BUILTIN_RULE_NAMES`
+   * 里的内置规则名供选。**只在 triggerMode === 'on' 时才会被
    * `buildCustomRule` 写进 `rule.suppress`**，见文件头注释第 2 点：
    * 定时触发的规则配 suppress 会被后端拒绝，切换触发方式不清空这份草稿，
    * 靠组装时的判断兜底。
@@ -513,7 +544,7 @@ async function loadMeta() {
   }
 }
 
-// ---- 自定义规则列表：草稿态，加载时从"排除内置七条之后剩下的规则"里还原 ----
+// ---- 自定义规则列表：草稿态，加载时从"排除全部内置规则之后剩下的规则"里还原 ----
 
 const customRules = reactive<CustomRuleDraft[]>([])
 
@@ -522,9 +553,10 @@ function currentDraftsSnapshot(): string {
 }
 
 /**
- * 本页管的是「不在内置七条名单里」的一切规则——与 Danmaku.vue 互补。
- * 合并保存时，凡是不属于内置七条的现有规则，都被本页新组装的
- * customRules 整批替换；内置七条原样保留，不受本页保存影响。
+ * 本页管的是「不在 BUILTIN_RULE_NAMES 名单里」的一切规则——与
+ * Danmaku.vue 互补。合并保存时，凡是不属于内置规则的现有规则，都被
+ * 本页新组装的 customRules 整批替换；内置规则原样保留，不受本页保存
+ * 影响。
  */
 function isOwnedByCustomPage(name: string): boolean {
   return !BUILTIN_RULE_NAMES.includes(name)
@@ -640,9 +672,23 @@ function removeAction(draft: CustomRuleDraft, index: number) {
 
 /**
  * onSave 接 useDraft 的保存流程，与 Danmaku.vue 同一套约定：
- * GET 现有规则 → 合并（保留内置七条，替换本页管的自定义规则）→ PUT → POST reload。
+ * GET 现有规则 → 合并（保留全部内置规则，替换本页管的自定义规则）→ PUT → POST reload。
+ *
+ * 保存前先拦一道 `RESERVED_RULE_NAME_PREFIX` 校验——见该常量注释：
+ * 撞进内置命名空间的规则会在下一次加载时被静默顶掉，不报任何错，比
+ * 后端拒绝这次保存更难发现。在这里挡住比等用户哪天发现规则"消失了"
+ * 再回头排查省心得多。
  */
 async function onSave() {
+  const reserved = customRules.filter((d) => isReservedRuleName(d.name))
+  if (reserved.length > 0) {
+    message.error(
+      `规则名不能以「${RESERVED_RULE_NAME_PREFIX}」开头（${reserved
+        .map((d) => d.name || '（未命名）')
+        .join('、')}）——这是内置规则专用的命名空间，撞名会导致这条规则在下次加载时被静默替换掉`,
+    )
+    return
+  }
   try {
     await save()
     message.success('已保存并生效')
@@ -706,11 +752,17 @@ function dismissPartialFailure() {
           content-style="padding-top: 12px"
         >
           <template #header>
-            <NInput
-              v-model:value="draft.name"
-              placeholder="规则名（如：舰长专属欢迎）"
-              style="width: 280px"
-            />
+            <div class="rule-name-field">
+              <NInput
+                v-model:value="draft.name"
+                placeholder="规则名（如：舰长专属欢迎）"
+                style="width: 280px"
+                :status="isReservedRuleName(draft.name) ? 'error' : undefined"
+              />
+              <span v-if="isReservedRuleName(draft.name)" class="reserved-name-hint">
+                不能以「{{ RESERVED_RULE_NAME_PREFIX }}」开头——这是内置规则的命名空间，撞名会导致这条规则被静默替换掉
+              </span>
+            </div>
           </template>
           <template #header-extra>
             <div class="header-extra">
@@ -915,6 +967,15 @@ function dismissPartialFailure() {
 }
 .rule-card {
   margin-bottom: 16px;
+}
+.rule-name-field {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.reserved-name-hint {
+  font-size: 12px;
+  color: var(--n-error-color, #d03050);
 }
 .header-extra {
   display: flex;

@@ -388,8 +388,12 @@ export interface GiftDraft {
    * 盲盒礼物单列一类，不并入常规答谢——真实生效：勾选后通用答谢规则
    * （GIFT_RULE_NAME）会加上 `when: gift.isBlindBox == false` 排除盲盒，
    * 同时启用独立的 `BLINDBOX_RULE_NAME` 规则专门答谢盲盒，见
-   * `buildBlindBoxRule`。不勾选时盲盒仍旧混在通用答谢里，跟以前的
-   * 行为一致。
+   * `buildBlindBoxRule`。取消勾选时盲盒仍会混进通用答谢。
+   *
+   * **默认值是 `true`，不是可选偏好**——计划文件的硬性要求、用户原话
+   * 「盲盒类单独计算」说的是正确行为该是什么样，不是"某些人可能想要
+   * 分开"。开关留着是给想混着谢的人一个退出的自由，但新用户第一次
+   * 打开这页看到的必须是正确行为。
    */
   blindBoxSeparate: boolean
   /**
@@ -408,7 +412,7 @@ export function defaultGiftDraft(): GiftDraft {
     minCount: 2,
     pickMode: 'random',
     templates: ['感谢 {{join .users "、"}} 的 {{join .gifts "、"}}，您的支持就是对主播最大的鼓励'],
-    blindBoxSeparate: false,
+    blindBoxSeparate: true,
     blindBoxProfitTracking: false,
   }
 }

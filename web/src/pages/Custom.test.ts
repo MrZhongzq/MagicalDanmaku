@@ -5,7 +5,7 @@ import { NRadioGroup, NSelect, NSwitch } from 'naive-ui'
 import type { Permission } from '@/api'
 
 // Custom 是「自定义弹幕姬」页，P4-2 最难的组件的落地场景。核心断言分三层：
-//   1. 纯函数：isCustomRule（排除内置七条）、buildCustomRule/parseCustomRuleDraft
+//   1. 纯函数：isCustomRule（排除全部内置规则名）、buildCustomRule/parseCustomRuleDraft
 //      互为逆过程、buildCustomAction 按 type 只取相关字段
 //   2. 元数据必须来自 GET /api/meta/*，不硬编码——同 Task 8 MemberEditor
 //      的既定模式，用"后端只回一部分时界面也只渲染那一部分"来证明
@@ -25,6 +25,8 @@ vi.mock('naive-ui', async () => {
 const Custom = await import('./Custom.vue')
 const {
   isCustomRule,
+  isReservedRuleName,
+  RESERVED_RULE_NAME_PREFIX,
   BUILTIN_RULE_NAMES,
   buildCustomRule,
   buildCustomAction,
@@ -554,6 +556,66 @@ describe('Custom 页：新增与删除自定义规则', () => {
     await flushPromises()
 
     expect(wrapper.findAll('.rule-card')).toHaveLength(0)
+  })
+})
+
+// P4-4 Task 7 复审加的：撞进内置命名空间的自定义规则会在下次加载时被
+// isCustomRule 误判成"内置规则"、被合并逻辑静默顶掉，不报任何错。这组
+// 测试证明前端在两个层面都拦住了这个坑：纯函数判断 + 界面上真的能看到
+// 提示 + 保存会被真正挡住（不会把 PUT 发出去）。
+describe('Custom 页：规则名不能落进内置命名空间（RESERVED_RULE_NAME_PREFIX）', () => {
+  it('isReservedRuleName 纯函数：以 内置/ 开头才算，普通名字不算', () => {
+    expect(isReservedRuleName('内置/盲盒答谢')).toBe(true)
+    expect(isReservedRuleName('内置/随便起的名字')).toBe(true)
+    expect(isReservedRuleName('舰长专属欢迎')).toBe(false)
+    expect(isReservedRuleName('')).toBe(false)
+    // 前导/尾随空白不该绕过校验
+    expect(isReservedRuleName('  内置/藏在空白里 ')).toBe(true)
+  })
+
+  it('新建规则改名成 内置/ 开头时，输入框旁边出现错误提示', async () => {
+    setupStores()
+    stubFetch({ rules: [] })
+    const wrapper = await mountCustom()
+
+    const addBtn = wrapper.findAll('button').find((b) => b.text().includes('新增自定义规则'))
+    await addBtn!.trigger('click')
+    await flushPromises()
+
+    const nameInput = wrapper.find('.rule-card input')
+    await nameInput.setValue(RESERVED_RULE_NAME_PREFIX + '盲盒答谢')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('不能以「' + RESERVED_RULE_NAME_PREFIX + '」开头')
+  })
+
+  it('保存时如果有规则名撞进内置命名空间，弹错误提示且不发起 PUT 请求', async () => {
+    setupStores()
+    let putCalled = false
+    stubFetch({
+      rules: [],
+      onWrite: (url, init) => {
+        if (url === '/api/bindings/1/rules' && init.method === 'PUT') putCalled = true
+      },
+    })
+    const wrapper = await mountCustom()
+
+    const addBtn = wrapper.findAll('button').find((b) => b.text().includes('新增自定义规则'))
+    await addBtn!.trigger('click')
+    await flushPromises()
+
+    const nameInput = wrapper.find('.rule-card input')
+    await nameInput.setValue(RESERVED_RULE_NAME_PREFIX + 'PK播报')
+    await flushPromises()
+
+    const saveBtn = wrapper.findAll('button').find((b) => b.text() === '保存并生效')!
+    await saveBtn.trigger('click')
+    await flushPromises()
+
+    expect(messageMock.error).toHaveBeenCalled()
+    const errMsg = messageMock.error.mock.calls[messageMock.error.mock.calls.length - 1][0] as string
+    expect(errMsg).toContain(RESERVED_RULE_NAME_PREFIX)
+    expect(putCalled, 'PUT 请求不应该被发出去').toBe(false)
   })
 })
 

@@ -78,26 +78,42 @@ func statsWhere(accountID, bindingID int64) ([]string, []any) {
 	return where, args
 }
 
+// isBlindBoxGiftSQL 判断一条 gift 行是不是盲盒——**必须用 `->>`（取
+// 文本），不能用 `->`（取 jsonb）**。event.Gift 序列化后 BlindBox 字段
+// 不是盲盒时是 JSON **null**（不是键缺失——没有 json tag、没有
+// omitempty，`json.Marshal` 老老实实输出 `"BlindBox":null"`），是盲盒时
+// 是一个对象。PostgreSQL 的 `jsonb ->` 对「值是 JSON null」返回的是
+// jsonb 的 null（一个非 SQL NULL 的值），`(x -> 'k') IS NOT NULL` 对这种
+// 情况会判成真——这是这里真实踩过的一个坑：写成 `->` 时，全部普通礼物
+// 都会被误判成盲盒，Price*Count-TotalCoin 会把普通礼物的价格也算进
+// 「盲盒盈亏」，数字全错但不报错、看起来还挺正常。`->>`（取文本）在
+// JSON null 与键缺失两种情况下都老实返回 SQL NULL，只有真的是对象时
+// 才返回非 NULL 文本，两个场景（真实生产序列化的 `"BlindBox":null`、
+// 手写测试 JSON 里干脆不写这个键）都能正确处理。
+const isBlindBoxGiftSQL = `detail->>'BlindBox' IS NOT NULL`
+
 // countExprs 是六个业务计数的 SQL 表达式，QueryStatsByDay（GROUP BY）与
 // aggregateEventCounts（单行）共用，避免两处口径漂移。
 //
-// blind_box_profit 只对 detail->'BlindBox' 非 null 的 gift 行求和——
-// event.Gift 序列化后 BlindBox 字段要么是 JSON null（不是盲盒），要么
-// 是一个对象（是盲盒），JSONB 的 IS NOT NULL 天然区分这两种情况，不需要
-// 额外的标记字段。三个数字字段都用 ->> 取成文本再转 bigint：detail 是
-// event.Gift 整个结构体的原样 JSON，Price/Count/TotalCoin 键名与 Go
-// 字段名相同（没有 json tag）。COALESCE 是因为一个分桶如果压根没有盲盒
-// 行，SUM 会是 SQL NULL，不该让调用方看到「拿不到」——这里统计的是
-// 「这个时间段有没有盲盒」，没有就是真的 0，不是外部接口失败那种需要
-// 区分「未知」的场景（那类区分只用在 PK 对面快照上，见
-// connector/bilibili/opponent_snapshot.go）。
+// **gift_count/gift_kinds 不含盲盒**——计划文件明文的硬性要求（用户
+// 原话「盲盒类单独计算」）：盲盒送礼行不计入礼物件数，爆出的礼物名
+// （星光铃铛/棒棒糖/…）也不进 `COUNT(DISTINCT GiftName)`，否则「礼物
+// 种类」会被盲盒池的开奖结果污染。
+//
+// blind_box_profit 只对是盲盒的 gift 行求和，三个数字字段都用 ->> 取成
+// 文本再转 bigint：detail 是 event.Gift 整个结构体的原样 JSON，
+// Price/Count/TotalCoin 键名与 Go 字段名相同（没有 json tag）。COALESCE
+// 是因为一个分桶如果压根没有盲盒行，SUM 会是 SQL NULL，不该让调用方
+// 看到「拿不到」——这里统计的是「这个时间段有没有盲盒」，没有就是真的
+// 0，不是外部接口失败那种需要区分「未知」的场景（那类区分只用在 PK
+// 对面快照上，见 connector/bilibili/opponent_snapshot.go）。
 const countExprs = `COUNT(*) FILTER (WHERE event_type = 'danmaku') AS danmaku_count,
 	COUNT(*) FILTER (WHERE event_type = 'user_enter') AS enter_count,
-	COUNT(*) FILTER (WHERE event_type = 'gift') AS gift_count,
-	COUNT(DISTINCT detail->>'GiftName') FILTER (WHERE event_type = 'gift') AS gift_kinds,
+	COUNT(*) FILTER (WHERE event_type = 'gift' AND NOT (` + isBlindBoxGiftSQL + `)) AS gift_count,
+	COUNT(DISTINCT detail->>'GiftName') FILTER (WHERE event_type = 'gift' AND NOT (` + isBlindBoxGiftSQL + `)) AS gift_kinds,
 	COUNT(*) FILTER (WHERE event_type = 'guard_buy') AS guard_count,
 	COALESCE(SUM(
-		CASE WHEN event_type = 'gift' AND detail->'BlindBox' IS NOT NULL
+		CASE WHEN event_type = 'gift' AND ` + isBlindBoxGiftSQL + `
 			THEN (detail->>'Price')::bigint * (detail->>'Count')::bigint - (detail->>'TotalCoin')::bigint
 			ELSE 0 END
 	), 0) AS blind_box_profit`
