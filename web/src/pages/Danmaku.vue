@@ -33,8 +33,9 @@
  *
  * 改动先只进内存草稿，`dirty` 变真；右上角 `SaveBar` 的 `save` 事件接的
  * 是 `onSave`（本文件下方 `<script setup>` 部分），走 `useDraft` 提供的
- * 统一流程：GET 现有规则 → 与本页管的七条规则合并（不误删别的页面建的
- * 自定义规则）→ PUT 写库 → POST reload 让规则引擎拿到新配置。第 2 步
+ * 统一流程：GET 现有规则 → 与本页管的全部内置规则（`OWNED_RULE_NAMES`，
+ * 见下方定义，目前九条）合并（不误删别的页面建的自定义规则）→ PUT
+ * 写库 → POST reload 让规则引擎拿到新配置。第 2 步
  * （reload）失败时 `dirty` 不会归假，界面会给一条持久的「已保存到数据库，
  * 但重载失败」提示，具体行为见下方 `onSave` 与 `partialFailureMessage`
  * 处的注释。

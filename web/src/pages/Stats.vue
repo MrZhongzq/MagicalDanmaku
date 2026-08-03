@@ -214,14 +214,16 @@ const STAT_CARDS = computed<StatCardDef[]>(() => [
     label: '礼物种类',
     value: hasBuckets.value ? String(totals.value.giftKinds) : PLACEHOLDER,
     hint: hasBuckets.value
-      ? `各${dimensionLabel.value}种类数之和：同一件礼物如果在多个${dimensionLabel.value}都出现过，会被重复计入，不是这段时间内去重后的真实种类数`
+      ? `各${dimensionLabel.value}种类数之和：同一件礼物如果在多个${dimensionLabel.value}都出现过，会被重复计入，不是这段时间内去重后的真实种类数；不含盲盒（盲盒爆出的礼物名不计入种类），盲盒单独看下面「盲盒盈亏」卡片`
       : noBucketsHint.value,
   },
   {
     key: 'giftCount',
     label: '礼物数量',
     value: hasBuckets.value ? String(totals.value.giftCount) : PLACEHOLDER,
-    hint: hasBuckets.value ? '本维度内送出的礼物总件数' : noBucketsHint.value,
+    hint: hasBuckets.value
+      ? '本维度内送出的礼物总件数，不含盲盒——盲盒单独看下面「盲盒盈亏」卡片'
+      : noBucketsHint.value,
   },
   {
     key: 'guardCount',

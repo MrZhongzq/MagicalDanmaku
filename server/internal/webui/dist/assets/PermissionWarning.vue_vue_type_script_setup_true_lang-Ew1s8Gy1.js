@@ -1,1 +1,0 @@
-import{e as t,H as a,a7 as r,E as o,L as s,a8 as n,F as i}from"./index-M2ANDU26.js";import{N as p}from"./Alert-DZEKi4x6.js";const l=t({__name:"PermissionWarning",props:{text:{}},setup(e){return(m,c)=>(a(),r(i(p),{type:"warning",bordered:!1,style:{"margin-bottom":"12px"}},{default:o(()=>[s(n(e.text),1)]),_:1}))}});export{l as _};

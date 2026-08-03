@@ -16,8 +16,9 @@ import type { Rule, RuleView } from '@/api/rule-types'
  * ## 整组替换的坑：合并而不是覆盖
  *
  * `PUT /api/bindings/{id}/rules` 是整组替换——发过去什么，库里就只剩什么。
- * 弹幕姬页管七条内置规则，自定义弹幕姬页管用户自建的若干条，两边各自
- * 调用这个 composable、各自传一份 `isOwned`。保存时：
+ * 弹幕姬页管全部内置规则（`Danmaku.vue` 的 `OWNED_RULE_NAMES`，
+ * 目前九条），自定义弹幕姬页管用户自建的若干条，两边各自调用这个
+ * composable、各自传一份 `isOwned`。保存时：
  *
  *   1. 先 GET 一次现有的全部规则
  *   2. 用 `isOwned` 挑出「不归本页管」的规则，原样保留

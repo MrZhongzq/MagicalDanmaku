@@ -20,8 +20,14 @@ func TestQueryStatsByDay(t *testing.T) {
 	seedActivity(t, st, bid,
 		store.ActivityRow{Kind: store.ActivityEvent, EventType: "danmaku", OccurredAt: seedTime},
 		store.ActivityRow{Kind: store.ActivityEvent, EventType: "danmaku", OccurredAt: seedTime.Add(time.Minute)},
+		// BlindBox 显式写成 null（不是省略这个键）——对齐 event.Gift 真实
+		// json.Marshal 的输出形状（没有 json tag、没有 omitempty）。
+		// 省略键在 SQL 侧用 ->> 判断时结果一样，但复审指出「测试数据
+		// 形状偏离生产序列化路径」本身就是 store/stats.go 那条 ->/->>
+		// bug 长期没被测出来的根因，这里顺手改成生产真实形状，不留同一
+		// 类隐患。
 		store.ActivityRow{Kind: store.ActivityEvent, EventType: "gift",
-			Detail: []byte(`{"GiftName":"辣条"}`), OccurredAt: seedTime},
+			Detail: []byte(`{"GiftName":"辣条","BlindBox":null}`), OccurredAt: seedTime},
 		store.ActivityRow{Kind: store.ActivityEvent, EventType: "user_enter", OccurredAt: seedTime},
 		store.ActivityRow{Kind: store.ActivityEvent, EventType: "guard_buy", OccurredAt: seedTime},
 	)

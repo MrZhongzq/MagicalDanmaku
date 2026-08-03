@@ -162,16 +162,33 @@ func (pl *PKPipeline) forward(ev event.Event) {
 
 // shutdown 是 loop 退出后的收尾：等全部 startPK goroutine 收尾，但不会
 // 无限等——超过 shutdownGraceLimit 就放弃等待、记录警告，直接关闭
-// out。语义与 PkLink.disconnect() 对 pkTeardownGraceLimit 的处理完全
-// 对称：两者兜的是同一类风险（一个卡住的对面连接，根因是
-// conn.WriteMessage 从未设过 SetWriteDeadline），这里补的是
-// wg.Wait() 本身没有上限这个洞。
+// out。兜的是跟 PkLink.disconnect() 对 pkTeardownGraceLimit 同一类
+// 风险（一个卡住的对面连接，根因是 conn.WriteMessage 从未设过
+// SetWriteDeadline），补的是 wg.Wait() 本身没有上限这个洞——但**两个
+// 15s 窗口是并列关系，不是嵌套关系，语义不完全对称**（第二轮复审
+// Minor-B 订正）：`startPK` 在真正卡住的场景下会先卡在
+// `link.Events()`（等 `disconnect()` 的收尾），而 `disconnect()` 自己
+// 那 15s 走完、真的把 `round.done` 关掉之后，`wg.Wait()` 才会解除——
+// 也就是说合法的最坏情况下，`disconnect()` 用满自己的 15s 才让
+// `startPK` 退出，`shutdown()` 这边的计时几乎是从同一时刻起算的，
+// 两个窗口几乎同时到期，`shutdown()` 的 15s 很可能也几乎被用满，
+// 从而打出一条「超过等待上限」的**误报**警告（此时 `startPK` 其实
+// 刚刚正常收尾，不是真的卡死）。这条警告本身不代表功能损坏——超时
+// 路径无论是不是误报都只是"放弃同步等待、转为 no-op 安全关闭"，不会
+// panic 也不会漏数据——只是排查时不能把这条日志直接当成"真的卡住了"
+// 的证据，需要结合有没有紧跟着收到真实的连接异常一起看。
 //
 // 用 closeMu 的写锁 + closed 标志保证「设置 closed、关闭 out」这个组合
 // 操作与 forward() 的「检查 closed、发送」互斥，不管超时与否，
 // close(out) 之后不会再有任何一次 forward() 执行到发送语句——
 // 这正是不能简单给 wg.Wait() 加超时的原因：那样超时后 close 依然会跟
 // 一个不知道已经超时、还在往 out 发送的 forward() 撞车。
+//
+// 【已知遗留，复审 Minor-C，可忽略】超时分支放弃等待之后，上面起的
+// `go func(){ pl.wg.Wait(); close(done) }()` 并不会跟着退出，会一直
+// 活到 wg 真正归零那一刻才结束——理论上是一次 goroutine 泄漏，但每个
+// PKPipeline 生命周期内至多发生一次，且只出现在宿主退出这条路径上，
+// 进程本身很快也会退出，代价可以忽略，不值得为它引入额外的取消机制。
 func (pl *PKPipeline) shutdown() {
 	done := make(chan struct{})
 	go func() {
@@ -182,7 +199,8 @@ func (pl *PKPipeline) shutdown() {
 	select {
 	case <-done:
 	case <-time.After(pl.shutdownGraceLimit):
-		pl.client.log.Warn("PK 编排收尾超过等待上限，放弃同步等待，交由各自的连接自行收尾",
+		pl.client.log.Warn("PK 编排收尾超过等待上限，放弃同步等待，交由各自的连接自行收尾"+
+			"（注意：这条警告可能是与 pkTeardownGraceLimit 同时到期导致的误报，不一定代表真的卡死）",
 			"room", pl.client.roomID, "limit", pl.shutdownGraceLimit)
 	}
 
