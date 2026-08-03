@@ -429,6 +429,136 @@ func TestClassifyVisitToOpponentIgnoresOpponentsOwnAudience(t *testing.T) {
 	}
 }
 
+// ---------- P5-5 7c：对面高能榜过去 10 秒滚动窗口（方向 A 的动态补充判据） ----------
+//
+// onlineRankUpdateFrom 构造一条来自对手房间连接的 ONLINE_RANK_V3 归一化
+// 事件，供 trackOppositeEnergyRank 摆数据用。真实管道里这条事件跟触发
+// classifyVisitFromOpponent 的宿主房间事件（弹幕/送礼/……）来自完全不同
+// 的两条连接（对手连接 vs 宿主连接），天然不存在 P4-4 那种「同一条事件
+// 自己把自己写脏」的自污染风险——这里手工构造也是如实反映这个事实，不是
+// 抄近路。
+func onlineRankUpdateFrom(roomID string, uids ...string) event.Event {
+	top := make([]event.RankUser, 0, len(uids))
+	for i, uid := range uids {
+		top = append(top, event.RankUser{User: event.User{UID: uid}, Rank: i + 1})
+	}
+	return event.Event{
+		RoomID:  roomID,
+		Type:    event.TypeOnlineRankUpdate,
+		Payload: event.OnlineRankUpdate{Count: -1, Top: top},
+	}
+}
+
+// TestClassifyVisitFromOpponentByOppositeEnergyRankWindow 验证第四套
+// 集合本身能命中：u1 刚出现在对面高能榜上（没有戴任何粉丝牌，也从没有
+// 通过弹幕/送礼这类事件被 trackOpposite 累积过），仅凭高能榜滚动窗口
+// 就应该判定为方向 A 的串门。
+func TestClassifyVisitFromOpponentByOppositeEnergyRankWindow(t *testing.T) {
+	p := newTestPkLinkWithRound("self", "opp")
+	p.trackOppositeEnergyRank("opp", onlineRankUpdateFrom("opp", "u1"))
+
+	ev := danmakuFrom("self", "u1", nil)
+	p.observeMine(ev) // 真实管道顺序：client.go 的钩子会先同步跑一遍
+
+	got, ok := p.ClassifyVisit(ev)
+	if !ok {
+		t.Fatal("刚出现在对面高能榜（过去 10 秒滚动窗口）上，应该判定为方向 A 的串门")
+	}
+	if got.Type != event.TypeVisitFromOpponent {
+		t.Errorf("Type = %v, 期望 %v", got.Type, event.TypeVisitFromOpponent)
+	}
+	payload := got.Payload.(event.VisitFromOpponent)
+	if payload.MatchedBy != event.VisitMatchedByEnergyRank {
+		t.Errorf("MatchedBy = %q, 期望 %q", payload.MatchedBy, event.VisitMatchedByEnergyRank)
+	}
+	if payload.OpponentRoomID != "opp" {
+		t.Errorf("OpponentRoomID = %q, 期望 %q", payload.OpponentRoomID, "opp")
+	}
+}
+
+// TestClassifyVisitFromOpponentOppositeEnergyRankExpiresAfterWindow 是
+// 「动态」这个要求本身的核心回归测试：用户原话「串门有个退出再进的
+// 延迟」要求的是一个会过期的滚动窗口，不是又一份只增不减的累积状态
+// ——如果有人把过期检查删掉（等价于「PK 全程累积」），这条测试必须变红。
+//
+// 用可注入的时钟模拟"超过 10 秒"，不真的等待 10 秒——保持测试快速。
+func TestClassifyVisitFromOpponentOppositeEnergyRankExpiresAfterWindow(t *testing.T) {
+	p := newTestPkLinkWithRound("self", "opp")
+	now := time.Unix(1700000000, 0)
+	p.now = func() time.Time { return now }
+
+	p.trackOppositeEnergyRank("opp", onlineRankUpdateFrom("opp", "u1"))
+	now = now.Add(oppositeEnergyRankWindow + time.Second) // 超过滚动窗口
+
+	ev := danmakuFrom("self", "u1", nil)
+	p.observeMine(ev)
+
+	if got, ok := p.ClassifyVisit(ev); ok {
+		t.Fatalf("已经超出对面高能榜滚动窗口（10 秒），不应该再判定为串门，实际 %+v", got)
+	}
+}
+
+// TestClassifyVisitFromOpponentOppositeEnergyRankStillFreshWithinWindow
+// 是上一条的对照组：确认没有过度修剪——窗口内的数据必须仍然有效，不能
+// 把「会过期」实现成「立刻过期」。
+func TestClassifyVisitFromOpponentOppositeEnergyRankStillFreshWithinWindow(t *testing.T) {
+	p := newTestPkLinkWithRound("self", "opp")
+	now := time.Unix(1700000000, 0)
+	p.now = func() time.Time { return now }
+
+	p.trackOppositeEnergyRank("opp", onlineRankUpdateFrom("opp", "u1"))
+	now = now.Add(oppositeEnergyRankWindow - time.Second) // 仍在窗口内
+
+	ev := danmakuFrom("self", "u1", nil)
+	p.observeMine(ev)
+
+	if _, ok := p.ClassifyVisit(ev); !ok {
+		t.Fatal("仍在 10 秒滚动窗口内，应该判定为串门")
+	}
+}
+
+// TestClassifyVisitFromOpponentEnergyRankExcludesOwnRegular 验证第四套
+// 集合复用跟第二套集合（opposite）完全同一条排除判据——mineSeed（冻结
+// 快照）：我方 PK 前就已经是常驻观众的人，哪怕中途也出现在对面高能榜
+// 上（比如两边直播间都开着），也不该被判定成「对面来的客人」。这与
+// classifyVisitFromOpponent 已有的排除逻辑保持一致，不是新发明一套
+// 例外。
+func TestClassifyVisitFromOpponentEnergyRankExcludesOwnRegular(t *testing.T) {
+	p := newTestPkLinkWithRound("self", "opp")
+	p.seedMine("u1") // PK 前就已经是我方常驻观众（冻结快照）
+
+	p.trackOppositeEnergyRank("opp", onlineRankUpdateFrom("opp", "u1"))
+
+	ev := danmakuFrom("self", "u1", nil)
+	p.observeMine(ev)
+
+	if got, ok := p.ClassifyVisit(ev); ok {
+		t.Fatalf("我方常驻观众不应该仅因为出现在对面高能榜上就被判定成「对面来的客人」，实际 %+v", got)
+	}
+}
+
+// TestClassifyVisitFromOpponentEnergyRankOnlyMatchesOwnOpponentRoom 验证
+// 高能榜窗口按对手房间号分开维护——多人 PK 下 u1 出现在 oppB 的高能榜
+// 上，判定命中时 OpponentRoomID 必须是 oppB，不能因为遍历顺序或存储
+// 结构上的疏忽而张冠李戴。
+func TestClassifyVisitFromOpponentEnergyRankOnlyMatchesOwnOpponentRoom(t *testing.T) {
+	p := newTestPkLinkWithRound("self", "oppA", "oppB")
+	p.trackOppositeEnergyRank("oppB", onlineRankUpdateFrom("oppB", "u1"))
+
+	ev := danmakuFrom("self", "u1", nil)
+	p.observeMine(ev)
+
+	got, ok := p.ClassifyVisit(ev)
+	if !ok {
+		t.Fatal("应该命中")
+	}
+	payload := got.Payload.(event.VisitFromOpponent)
+	if payload.OpponentRoomID != "oppB" {
+		t.Errorf("OpponentRoomID = %q, 期望 %q（u1 是在 oppB 的高能榜上出现的，不是 oppA）",
+			payload.OpponentRoomID, "oppB")
+	}
+}
+
 // ---------- 事件来源房间号不属于当前这轮 PK：不产生信号 ----------
 
 func TestClassifyVisitFromUnrelatedRoomProducesNothing(t *testing.T) {

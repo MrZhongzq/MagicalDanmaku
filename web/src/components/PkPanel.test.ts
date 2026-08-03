@@ -4,9 +4,12 @@ import PkPanel, {
   PK_RULE_NAME,
   PK_VISIT_RULE_NAME,
   buildPkRule,
+  buildPkVisitCondition,
   buildPkVisitRule,
   defaultPkDraft,
+  defaultPkVisitFilter,
   parsePkDraft,
+  parsePkVisitFilter,
 } from './PkPanel.vue'
 
 // PkPanel 是「PK 播报」整块——P4-4 Task 7 之前后端完全没有对面数据，
@@ -184,5 +187,180 @@ describe('PkPanel 组件：控件全部渲染，不再挂待后端支持标签',
     // 重复断言一遍。
     const wrapper = mount(PkPanel, { props: { modelValue: defaultPkDraft() } })
     expect(wrapper.text()).toContain('PK 匹配信息 + PK 串门欢迎')
+  })
+
+  // P5-5 7a：变量说明改成表格，跟 Danmaku.vue 的 ENTER_TEMPLATE_VAR_ROWS/
+  // GIFT_TEMPLATE_VAR_ROWS 同一种写法——断言表格真的渲染出了关键变量，
+  // 不再只靠一整段 NTooltip 大白话。
+  it('PK 匹配信息与 PK 串门欢迎都渲染出「可用变量」表格，覆盖关键字段', () => {
+    const wrapper = mount(PkPanel, { props: { modelValue: defaultPkDraft() } })
+    const tables = wrapper.findAll('.var-hint-table')
+    expect(tables.length).toBe(2)
+
+    const matchTableText = tables[0].text()
+    expect(matchTableText).toContain('pk.opponent.uname')
+    expect(matchTableText).toContain('pk.opponent.online')
+    expect(matchTableText).toContain('pk.pkId')
+
+    const visitTableText = tables[1].text()
+    expect(visitTableText).toContain('user.username')
+    expect(visitTableText).toContain('visit.opponentRoomId')
+    expect(visitTableText).toContain('visit.matchedBy')
+  })
+})
+
+describe('PkPanel 纯函数：7b 串门欢迎筛选（buildPkVisitCondition/parsePkVisitFilter）', () => {
+  it('三个筛选都不勾选时不拼 when 条件', () => {
+    expect(buildPkVisitCondition(defaultPkVisitFilter())).toBeUndefined()
+  })
+
+  it('只勾选"只欢迎佩戴对面粉丝牌的用户"时，只拼 visit.matchedBy == fan_medal 一条', () => {
+    const filter = { ...defaultPkVisitFilter(), opponentMedalOnly: true }
+    expect(buildPkVisitCondition(filter)).toEqual({
+      field: 'visit.matchedBy',
+      op: 'eq',
+      value: 'fan_medal',
+    })
+  })
+
+  it('只勾选"粉丝牌等级下限"时，拼出 matchedBy 前提 + level 两条 all 树', () => {
+    const filter = {
+      ...defaultPkVisitFilter(),
+      minOpponentMedalLevelEnabled: true,
+      minOpponentMedalLevel: 10,
+    }
+    expect(buildPkVisitCondition(filter)).toEqual({
+      all: [
+        { field: 'visit.matchedBy', op: 'eq', value: 'fan_medal' },
+        { field: 'user.medal.level', op: 'gte', value: 10 },
+      ],
+    })
+  })
+
+  // minOpponentMedalLevelEnabled 为假时，即使 minOpponentMedalLevel 有值
+  // 也不该拼出条件——跟 EnterFilter 的同名开关同一条纪律（P5-4 5a）。
+  it('minOpponentMedalLevelEnabled 为假时，即使 minOpponentMedalLevel 有值也不拼条件', () => {
+    const filter = {
+      ...defaultPkVisitFilter(),
+      minOpponentMedalLevelEnabled: false,
+      minOpponentMedalLevel: 20,
+    }
+    expect(buildPkVisitCondition(filter)).toBeUndefined()
+  })
+
+  it('只勾选"只欢迎对面大航海"时，拼出 matchedBy 前提 + guardLevel in 一档数值', () => {
+    const filter = {
+      ...defaultPkVisitFilter(),
+      opponentGuardOnly: true,
+      opponentGuardTier: 'governor' as const,
+    }
+    expect(buildPkVisitCondition(filter)).toEqual({
+      all: [
+        { field: 'visit.matchedBy', op: 'eq', value: 'fan_medal' },
+        { field: 'user.medal.guardLevel', op: 'in', value: [1] },
+      ],
+    })
+  })
+
+  // 【核心：条件叠加（AND），不是互斥】三个筛选同时勾选时，matchedBy
+  // 前提只出现一次（不是三份重复），level/guardLevel 各自一条，AND 拼在
+  // 同一棵 all 树里——这是这条 P5-5 7b 任务最核心的行为断言：如果有人
+  // 把三个筛选实现成"选中最后一个生效"的互斥 radio，这条测试必须变红。
+  it('三个筛选同时勾选时是 AND 叠加，matchedBy 前提只出现一次', () => {
+    const filter = {
+      opponentMedalOnly: true,
+      minOpponentMedalLevelEnabled: true,
+      minOpponentMedalLevel: 15,
+      opponentGuardOnly: true,
+      opponentGuardTier: 'admiral' as const,
+    }
+    const cond = buildPkVisitCondition(filter)
+    expect(cond).toEqual({
+      all: [
+        { field: 'visit.matchedBy', op: 'eq', value: 'fan_medal' },
+        { field: 'user.medal.level', op: 'gte', value: 15 },
+        { field: 'user.medal.guardLevel', op: 'in', value: [1, 2] },
+      ],
+    })
+    // matchedBy 前提只应该出现一次，不是每个筛选各自重复拼一遍。
+    const all = (cond as { all: unknown[] }).all
+    const matchedByLeaves = all.filter(
+      (leaf) => (leaf as { field?: string }).field === 'visit.matchedBy',
+    )
+    expect(matchedByLeaves.length).toBe(1)
+  })
+
+  it('parsePkVisitFilter 是 buildPkVisitCondition 的逆过程（等级+大航海组合）', () => {
+    const filter = {
+      opponentMedalOnly: false,
+      minOpponentMedalLevelEnabled: true,
+      minOpponentMedalLevel: 8,
+      opponentGuardOnly: true,
+      opponentGuardTier: 'captain' as const,
+    }
+    const cond = buildPkVisitCondition(filter)
+    expect(parsePkVisitFilter(cond)).toEqual(filter)
+  })
+
+  it('parsePkVisitFilter(undefined) 返回默认筛选（全不勾选）', () => {
+    expect(parsePkVisitFilter(undefined)).toEqual(defaultPkVisitFilter())
+  })
+
+  it('大航海档位用 in 一组数值而不是 gte——因为编号越小档位越高（与 EnterFilter 同一条规则）', () => {
+    const filter = { ...defaultPkVisitFilter(), opponentGuardOnly: true, opponentGuardTier: 'captain' as const }
+    // opponentGuardOnly 会连带拼出 matchedBy 前提，结果是 all 树，不是单条叶子
+    // （跟 EnterFilter 的 guardOnly 不需要额外前提、直接是单条叶子不同）。
+    const cond = buildPkVisitCondition(filter) as { all: { field: string; value: number[] }[] }
+    const guardLeaf = cond.all.find((leaf) => leaf.field === 'user.medal.guardLevel')
+    expect(guardLeaf?.value).toEqual([1, 2, 3])
+  })
+})
+
+describe('PkPanel 组件：7b 三个筛选控件独立勾选、条件叠加', () => {
+  it('三个筛选复选框都渲染且默认不勾选', () => {
+    const wrapper = mount(PkPanel, { props: { modelValue: defaultPkDraft() } })
+    const labels = ['只欢迎佩戴对面主播粉丝牌的用户', '只欢迎对面粉丝牌等级达到', '只欢迎对面大航海（舰长/提督/总督）用户']
+    for (const label of labels) {
+      const checkbox = wrapper.findAll('.n-checkbox').find((c) => c.text().includes(label))
+      expect(checkbox, `复选框「${label}」应该存在`).toBeTruthy()
+    }
+  })
+
+  it('勾选"只欢迎对面大航海"后 emit 出的草稿正确翻转该字段，其余筛选不受影响', async () => {
+    const draft = defaultPkDraft()
+    const wrapper = mount(PkPanel, { props: { modelValue: draft } })
+
+    const checkbox = wrapper
+      .findAll('.n-checkbox')
+      .find((c) => c.text().includes('只欢迎对面大航海（舰长/提督/总督）用户'))
+    await checkbox!.trigger('click')
+
+    const emitted = wrapper.emitted('update:modelValue')
+    expect(emitted).toBeTruthy()
+    const patched = emitted![emitted!.length - 1][0] as ReturnType<typeof defaultPkDraft>
+    expect(patched.visitFilter.opponentGuardOnly).toBe(true)
+    expect(patched.visitFilter.opponentMedalOnly).toBe(false)
+    expect(patched.visitFilter.minOpponentMedalLevelEnabled).toBe(false)
+  })
+
+  it('buildPkVisitRule 把 visitFilter 拼进 when 条件里，保存后能被 parsePkDraft 还原', () => {
+    const draft = defaultPkDraft()
+    draft.visitFilter = {
+      opponentMedalOnly: false,
+      minOpponentMedalLevelEnabled: true,
+      minOpponentMedalLevel: 12,
+      opponentGuardOnly: false,
+      opponentGuardTier: 'captain',
+    }
+    const rule = buildPkVisitRule(draft)
+    expect(rule.when).toEqual({
+      all: [
+        { field: 'visit.matchedBy', op: 'eq', value: 'fan_medal' },
+        { field: 'user.medal.level', op: 'gte', value: 12 },
+      ],
+    })
+
+    const restored = parsePkDraft(null, rule)
+    expect(restored.visitFilter).toEqual(draft.visitFilter)
   })
 })

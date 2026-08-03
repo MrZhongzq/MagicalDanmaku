@@ -2,6 +2,7 @@ package bilibili
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"google.golang.org/protobuf/encoding/protowire"
 
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/connector/bilibili/api"
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/connector/bilibili/auth"
@@ -961,6 +963,88 @@ func TestPKAudienceSetsUpdateLiveFromBothRooms(t *testing.T) {
 		oppRoom := opposite["33333"]
 		_, hasOpp := oppRoom["7002"]
 		return hasMine && hasOpp
+	})
+
+	c.EndPK()
+}
+
+// ---------- P5-5 7c：对面高能榜滚动窗口，走真实管道 ----------
+
+// onlineRankV3WireMessage 构造一条真实的 ONLINE_RANK_V3 wire 帧（protobuf
+// 编码 + base64，跟 cmdmap/onlinerankv3_test.go 的构造方式一致，只是那边
+// 的 pbVarint/pbString/pbMessage 是 cmdmap 包内 unexported 的测试辅助，
+// 这里的字段号照抄 cmdmap/onlinerankv3.go 里的常量：field 1=uid（榜单项
+// 内），field 3=榜单项（外层）。
+func onlineRankV3WireMessage(uids ...string) []byte {
+	var pb []byte
+	for _, uid := range uids {
+		n, err := strconv.ParseUint(uid, 10, 64)
+		if err != nil {
+			panic(err) // 测试构造数据，出错就是测试本身写错了
+		}
+		item := protowire.AppendTag(nil, 1, protowire.VarintType)
+		item = protowire.AppendVarint(item, n)
+
+		pb = protowire.AppendTag(pb, 3, protowire.BytesType)
+		pb = protowire.AppendBytes(pb, item)
+	}
+
+	payload := map[string]any{
+		"cmd":  "ONLINE_RANK_V3",
+		"data": map[string]any{"pb": base64.StdEncoding.EncodeToString(pb)},
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		panic(err)
+	}
+	return wire.Encode(wire.OpMessage, raw)
+}
+
+// TestPKOppositeEnergyRankWindowUpdatesFromRealOnlineRankV3 是 P5-5 7c
+// 新增第四套集合（oppositeEnergyRank）的管道级验证：不是直接摆内部状态
+// （那部分已经在 visit_test.go 用 trackOppositeEnergyRank 覆盖过判定
+// 逻辑本身），而是证明 runOpponent 真的把对手连接收到的真实
+// ONLINE_RANK_V3 wire 帧接进了这套集合——从 wire 字节、经 child.Client
+// 的真实握手/解包/cmdmap 归一化，到 runOpponent 循环里的
+// trackOppositeEnergyRank 调用，一条不缺。
+//
+// 断言直接读 link.oppositeEnergyRank（同包白盒访问）而不是新增一个导出
+// 的调试用 getter——Audiences() 是 P6 消费方要用的公开只读快照，这套
+// 内部集合目前只服务于 visit.go 自己，没有必要为了这一条测试扩大公开
+// 面。
+func TestPKOppositeEnergyRankWindowUpdatesFromRealOnlineRankV3(t *testing.T) {
+	rankMsg := onlineRankV3WireMessage("9001")
+
+	fs := newMultiRoomFakeServer(t, func(c *websocket.Conn, roomID string) {
+		if roomID != "21452505" { // 只推给对手连接，宿主连接不需要
+			c.WriteMessage(websocket.BinaryMessage, rankMsg)
+		}
+	})
+	c := newPKHostClient(t, fs, "21452505")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go c.Run(ctx)
+
+	link := c.StartPK(ctx, []event.PkMember{
+		{RoomID: "21452505", UID: "u-self"},
+		{RoomID: "33333", UID: "u-opp-anchor"},
+	})
+
+	go func() {
+		for range c.Events() {
+		}
+	}()
+	go func() {
+		for range link.Events() {
+		}
+	}()
+
+	waitUntil(t, 2*time.Second, func() bool {
+		link.audMu.Lock()
+		defer link.audMu.Unlock()
+		_, ok := link.oppositeEnergyRank["33333"]["9001"]
+		return ok
 	})
 
 	c.EndPK()

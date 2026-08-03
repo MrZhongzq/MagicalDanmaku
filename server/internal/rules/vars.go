@@ -399,7 +399,8 @@ func VariableCatalog() (common []Variable, byEvent map[event.Type][]Variable) {
 		},
 		event.TypeVisitFromOpponent: append(append([]Variable{}, user...), []Variable{
 			{Path: "visit.opponentRoomId", Label: "来访者所属的对手直播间号"},
-			{Path: "visit.matchedBy", Label: "判定依据：fan_medal 粉丝勋章 / audience 观众集合"},
+			{Path: "visit.matchedBy", Label: "判定依据：fan_medal 粉丝勋章 / audience 观众集合" +
+				"（PK 期间累计，只增不减） / energy_rank 对面高能榜过去 10 秒滚动窗口（P5-5 7c 新增，会过期）"},
 		}...),
 		event.TypeVisitToOpponent: append(append([]Variable{}, user...), []Variable{
 			{Path: "visit.opponentRoomId", Label: "我方观众跑去的那个对手直播间号"},

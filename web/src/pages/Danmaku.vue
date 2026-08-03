@@ -87,6 +87,12 @@
 import type { Action, Aggregate, Condition, Rule, RuleView } from '@/api/rule-types'
 import { PICK_MODE_OPTIONS, parsePickMode, type PickMode } from '@/api/rule-types'
 import { PK_RULE_NAME, PK_VISIT_RULE_NAME } from '@/components/PkPanel.vue'
+import {
+  GUARD_TIER_OPTIONS,
+  GUARD_TIER_VALUES,
+  guardTierFromValues,
+  type GuardTier,
+} from '@/utils/guardTier'
 
 /** 进房欢迎规则的固定名字，前端靠它从规则列表里认领已保存的配置。 */
 export const ENTER_RULE_NAME = '内置/进房欢迎'
@@ -104,33 +110,6 @@ const GIFT_ON = 'gift'
  */
 export function claimRule(rules: Rule[], name: string): Rule | null {
   return rules.find((r) => r.name === name) ?? null
-}
-
-// ---- 大航海档位：event.GuardGovernor=1 / GuardAdmiral=2 / GuardCaptain=3。
-// 数值越小档位越高（总督最贵、数值最小），"及以上" 因此要用 in 一组数值
-// 而不是简单的 gte——gte 在这种反向编号下语义会反过来。 ----
-
-export type GuardTier = 'captain' | 'admiral' | 'governor'
-
-/** 每个档位对应「这个档位及以上」包含的 guardLevel 数值集合。 */
-const GUARD_TIER_VALUES: Record<GuardTier, number[]> = {
-  captain: [1, 2, 3], // 舰长即可：三档都算
-  admiral: [1, 2], // 提督及以上
-  governor: [1], // 仅总督
-}
-
-export const GUARD_TIER_OPTIONS: { label: string; value: GuardTier }[] = [
-  { label: '舰长即可（不限档位）', value: 'captain' },
-  { label: '提督及以上', value: 'admiral' },
-  { label: '仅总督', value: 'governor' },
-]
-
-function arraysEqualUnordered(a: number[], b: unknown): boolean {
-  if (!Array.isArray(b)) return false
-  if (a.length !== b.length) return false
-  const sortedA = [...a].sort()
-  const sortedB = [...b].sort()
-  return sortedA.every((v, i) => v === sortedB[i])
 }
 
 // ---- 进房欢迎 ----
@@ -207,9 +186,7 @@ export function parseEnterFilter(condition: Condition | undefined): EnterFilter 
       filter.minMedalLevel = leaf.value
     }
     if (leaf.field === 'user.guardLevel' && leaf.op === 'in') {
-      const tier = (Object.keys(GUARD_TIER_VALUES) as GuardTier[]).find((k) =>
-        arraysEqualUnordered(GUARD_TIER_VALUES[k], leaf.value),
-      )
+      const tier = guardTierFromValues(leaf.value)
       if (tier) {
         filter.guardOnly = true
         filter.guardTier = tier

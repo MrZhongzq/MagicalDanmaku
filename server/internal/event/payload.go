@@ -179,8 +179,9 @@ type Unknown struct {
 type VisitMatchedBy string
 
 const (
-	VisitMatchedByFanMedal VisitMatchedBy = "fan_medal" // 戴着对方主播的粉丝勋章
-	VisitMatchedByAudience VisitMatchedBy = "audience"  // 命中 PK 期间维护的观众集合
+	VisitMatchedByFanMedal   VisitMatchedBy = "fan_medal"   // 戴着对方主播的粉丝勋章
+	VisitMatchedByAudience   VisitMatchedBy = "audience"    // 命中 PK 期间累积的观众集合（自 PK 接通起只增不减，见 opponent_link.go 的 opposite）
+	VisitMatchedByEnergyRank VisitMatchedBy = "energy_rank" // 命中对面高能榜过去 10 秒滚动窗口（P5-5 7c 新增，只用于方向 A：欢迎，见 opponent_link.go 的 oppositeEnergyRank）
 )
 
 // VisitFromOpponent 表示 PK 期间对面房间的人（观众或主播本人）跑来了

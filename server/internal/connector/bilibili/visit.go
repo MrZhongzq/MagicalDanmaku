@@ -119,6 +119,25 @@ func (p *PkLink) classifyVisitFromOpponent(ev event.Event, round *pkRound) (even
 					break
 				}
 			}
+			// P5-5 7c：opposite（判据 2 上面那一路）只增不减，命中一次
+			// 就记一辈子，不是用户要的"过去 10 秒"动态窗口。这里补上
+			// 第二条命中路径——查第四套集合 oppositeEnergyRank（对面
+			// 高能榜过去 10 秒滚动窗口），两条路径共享同一条 mineSeed
+			// 排除判据、同样按 opponentRoomIDsOrdered 的确定顺序遍历。
+			// 不拿它替换上面那一路：见 PkLink 结构体上 oppositeEnergyRank
+			// 字段注释里"决策：第四套，不是替换"一节——黄金样本
+			// TestClassifyVisitGoldenSampleOpponentAnchorGiftsHostRoom
+			// 依赖 opposite 里"对面主播本人 connect 时就已播种"这件事，
+			// 高能榜窗口给不了这个信号（对面主播不会持续出现在自己的
+			// 高能榜广播里）。
+			if !matched {
+				for _, roomID := range round.opponentRoomIDsOrdered {
+					if p.inOppositeEnergyRankLocked(roomID, user.UID) {
+						matched, opponentRoomID, matchedBy = true, roomID, event.VisitMatchedByEnergyRank
+						break
+					}
+				}
+			}
 		}
 		p.audMu.Unlock()
 	}

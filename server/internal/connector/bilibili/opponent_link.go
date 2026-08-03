@@ -83,7 +83,73 @@ type PkLink struct {
 	// 到底是哪个对手房间的观众，要重建就得重新打一遍接口。按房间分开
 	// 保留成本几乎为零，实时更新那一路（trackOpposite）本来就知道
 	// 事件来自哪个对手连接，也天然能对上号。
+
+	// ---------- 第四套集合：P5-5 7c 新增 ----------
+	//
+	// 到这里为止 PkLink 上已经有两套语义不同的观众集合（见上面两块
+	// 注释）：
+	//   - mineSeed/oppositeSeed：冻结快照，seedAudiences 播种时写一次，
+	//     此后不再变。专供两个方向的**排除判据**（"排除掉 PK 前就已经
+	//     是常驻观众的人"）。
+	//   - mine/opposite：实时集合，播种时初始化，此后被 observeMine/
+	//     trackOpposite 持续追加，从 PK 接通到结束只增不减。专供两个
+	//     方向的**成员判据**（"这个人是不是这场 PK 期间跟对面/我方有过
+	//     任意一种互动"）。
+	//
+	// 用户真机反馈（P5-5 7c）：串门（尤其是方向 A「欢迎」）不该只靠
+	// 「PK 期间有没有发生过一次可追踪的互动」这种只增不减的判断——
+	// 「有人是手机看的，不会同时在两个直播间，串门有个退出再进的延迟」，
+	// 需要的是一个真正会过期的、反映「最近是否还在对面活跃」的信号，
+	// 而不是「PK 期间有没有出现过一次」。数据源用对面连接本来就会收到
+	// 的 ONLINE_RANK_V3（高能榜广播）：出现在对面高能榜上，是"正在对面
+	// 花钱互动"这件事本身几乎零延迟的直接证据。
+	//
+	// oppositeEnergyRank 就是这第四套集合：按对手房间号分开记录每个
+	// uid「最近一次出现在该房间高能榜上」的时间戳，查询时只认过去
+	// oppositeEnergyRankWindow（10 秒）内的记录——过期自动失效，不需要
+	// 专门的清理协程。
+	//
+	// 【决策：第四套，不是替换】没有拿它替换 opposite/oppositeSeed 中的
+	// 任何一套：
+	//   - 不能替换 oppositeSeed（排除判据）：排除判据回答的是「这个人是
+	//     不是 PK 之前就已经存在的既成事实」，本质上是个「PK 前」的
+	//     概念，跟「现在」无关，改成动态没有意义，反而会引入新的自污染
+	//     风险——如果拿同一条对手连接上的 ONLINE_RANK_V3 广播去更新一个
+	//     用于排除判据的动态窗口，且这个广播恰好与触发判定的送礼事件
+	//     前后脚到达（现实中高能榜确实会因为送礼而刷新），排除判据会被
+	//     "这次送礼本身"实时污染，跟 Task 6b 那个坑同一个类——即使这里
+	//     数据源不同、大概率不会真的撞上，也没有必要为了一个「PK 前」
+	//     语义的判据去冒这个险。
+	//   - 不能替换 opposite（成员判据）：opposite 除了喂 visit.go 的
+	//     成员判据，还是 Audiences() 对外暴露的公开状态（供 P6 的偷塔/
+	//     串门播报只读查询），且黄金样本测试
+	//     TestClassifyVisitGoldenSampleOpponentAnchorGiftsHostRoom 依赖
+	//     "对面主播本人在 connect 时就已经被种进 opposite" 这个事实
+	//     （对面主播不会持续出现在自己房间的高能榜广播里，尤其是只送出
+	//     不收礼的时候）——拿高能榜窗口整个取代 opposite 会让这条真实
+	//     案例的回归测试失败。所以高能榜窗口是**追加的第二条命中路径**：
+	//     classifyVisitFromOpponent 先试 opposite（不变），不中再试
+	//     oppositeEnergyRank（新增），命中其一即算数，两者共享同一条
+	//     mineSeed 排除判据。
+	//
+	// 结论（回答简报要求的问题）：
+	//   - 排除判据：两个方向都不变，继续用 mineSeed/oppositeSeed。
+	//   - 成员判据：方向 A（欢迎）从"只查 opposite"变成"查 opposite
+	//     或 oppositeEnergyRank，命中其一即算"；方向 B（警示）不变，
+	//     继续只查 mine——高能榜数据源是"对面房间"的广播，天然只对
+	//     "对面是谁"这个问题有意义，方向 B 的成员判据问的是"是不是我方
+	//     观众"，跟对面高能榜无关，没有可套用的地方。
+	oppositeEnergyRank map[string]map[string]time.Time
+
+	// now 是可注入的时钟，只给 oppositeEnergyRank 的写入/过期判断用——
+	// 测试要模拟"超过 10 秒"，不应该真的等待 10 秒。默认 time.Now，
+	// 跟 rules.NewCooldown 的 now 字段同一个写法。
+	now func() time.Time
 }
+
+// oppositeEnergyRankWindow 是对面高能榜滚动窗口的长度。用户原话
+// 「计算过去 10 秒的高能榜统计」，直接照抄这个数字，不是随便挑的。
+const oppositeEnergyRankWindow = 10 * time.Second
 
 // pkRound 是一场 PK 期间全部对手连接共享的状态。每次 connect 都会创建
 // 一个全新的 pkRound，disconnect/异常退出后旧的 round 不会被复用——这样
@@ -178,11 +244,13 @@ var closedEventsPlaceholder = func() chan event.Event {
 // WebSocket 连接——对手连接是完全独立的 Client 实例。
 func newPkLink(host *Client) *PkLink {
 	return &PkLink{
-		host:         host,
-		mine:         make(map[string]struct{}),
-		opposite:     make(map[string]map[string]struct{}),
-		mineSeed:     make(map[string]struct{}),
-		oppositeSeed: make(map[string]map[string]struct{}),
+		host:               host,
+		mine:               make(map[string]struct{}),
+		opposite:           make(map[string]map[string]struct{}),
+		mineSeed:           make(map[string]struct{}),
+		oppositeSeed:       make(map[string]map[string]struct{}),
+		oppositeEnergyRank: make(map[string]map[string]time.Time),
+		now:                time.Now,
 	}
 }
 
@@ -359,6 +427,7 @@ func (p *PkLink) runOpponent(ctx context.Context, m event.PkMember, out chan<- e
 
 	for ev := range child.Events() {
 		p.trackOpposite(m.RoomID, ev)
+		p.trackOppositeEnergyRank(m.RoomID, ev)
 		select {
 		case out <- ev:
 		case <-ctx.Done():
@@ -527,6 +596,48 @@ func (p *PkLink) trackOpposite(roomID string, ev event.Event) {
 	if uid := uidOf(ev); uid != "" {
 		p.addOppositeRoom(roomID, uid)
 	}
+}
+
+// trackOppositeEnergyRank 是第四套集合（oppositeEnergyRank）的唯一写入
+// 入口，在 runOpponent 转发事件时与 trackOpposite 同步调用。只认
+// event.OnlineRankUpdate 这一种 payload——高能榜广播天然按对手连接分开
+// 到达，roomID 由 runOpponent 传入，不需要从事件内容里反推。
+//
+// 非 OnlineRankUpdate 的事件直接跳过：这套集合的意义就是"高能榜说了
+// 什么"，不该被弹幕/进场这类事件污染成又一份 opposite 的复制品——那样
+// 就退化不出"过去 10 秒"这个动态窗口该有的语义了。
+func (p *PkLink) trackOppositeEnergyRank(roomID string, ev event.Event) {
+	rank, ok := ev.Payload.(event.OnlineRankUpdate)
+	if !ok {
+		return
+	}
+	now := p.now()
+
+	p.audMu.Lock()
+	defer p.audMu.Unlock()
+	set := p.oppositeEnergyRank[roomID]
+	if set == nil {
+		set = make(map[string]time.Time)
+		p.oppositeEnergyRank[roomID] = set
+	}
+	for _, ru := range rank.Top {
+		if ru.User.UID == "" {
+			continue
+		}
+		set[ru.User.UID] = now
+	}
+}
+
+// inOppositeEnergyRankLocked 判断 uid 是否在对手房间 roomID 的高能榜
+// 过去 oppositeEnergyRankWindow 内出现过。调用方必须已经持有 p.audMu
+// ——这是 classifyVisitFromOpponent 在同一个临界区里跟 mineSeed/opposite
+// 一起查的内部辅助函数，命名里的 Locked 后缀提醒这一点，不对外暴露。
+func (p *PkLink) inOppositeEnergyRankLocked(roomID, uid string) bool {
+	seenAt, ok := p.oppositeEnergyRank[roomID][uid]
+	if !ok {
+		return false
+	}
+	return p.now().Sub(seenAt) <= oppositeEnergyRankWindow
 }
 
 // addMine/addOppositeRoom 只写实时集合，专供 observeMine/trackOpposite
