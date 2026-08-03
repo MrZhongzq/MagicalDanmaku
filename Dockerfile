@@ -24,5 +24,10 @@ USER magicd:magicd
 # 定时规则写的是几点几分，时区错了会整体偏移，部署时记得设。
 ENV TZ=UTC
 
+# 纯文档用途（EXPOSE 不会真的开端口）：容器内 WebUI 固定监听 8080。
+# 注意 magicd 默认绑 127.0.0.1，在容器里那是容器自己的 loopback，
+# 必须由编排层把 MAGICD_HTTP_ADDR 设成 0.0.0.0:8080，见 docker-compose.yml。
+EXPOSE 8080
+
 ENTRYPOINT ["/usr/local/bin/magicd"]
 CMD ["run"]

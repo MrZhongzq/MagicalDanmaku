@@ -60,8 +60,16 @@ services:
     environment:
       MAGICD_DATABASE_URL: postgres://${POSTGRES_USER:-magicd}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-magicd}?sslmode=disable
       MAGICD_LOG_LEVEL: ${MAGICD_LOG_LEVEL:-info}
+      # 容器里必须监听 0.0.0.0，不能用默认的 127.0.0.1 —— 那是**容器自己的**
+      # loopback，端口映射过去也是空的，表现为「服务在跑但网页打不开」。
+      MAGICD_HTTP_ADDR: 0.0.0.0:8080
       # 定时规则按本地时区算，时区错了规则会整体偏移
       TZ: ${TZ:-Asia/Shanghai}
+    ports:
+      # 默认只绑宿主的 127.0.0.1：WebUI 是唯一的管理入口，不该因为「装上就能用」
+      # 而默认对整个局域网开放。要从别的机器访问就在 .env 里设
+      # MAGICD_HTTP_BIND=0.0.0.0。
+      - "${MAGICD_HTTP_BIND:-127.0.0.1}:${MAGICD_HTTP_PORT:-8080}:8080"
     command: ["run"]
 
 volumes:
