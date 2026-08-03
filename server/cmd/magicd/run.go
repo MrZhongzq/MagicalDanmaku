@@ -108,6 +108,13 @@ func (b *roomBot) Block(uid string, hours int) error {
 type accountRuntime struct {
 	acc *account.Account
 	api *api.Client
+
+	// cookie 是装配这份运行时时使用的原始 Cookie（store.RunConfig.Cookie
+	// 的原样拷贝），供 runtimeManager.ensureAccountRuntime 探测数据库里
+	// 的 Cookie 是否已经被换新——命中 rm.accounts 缓存不代表 Cookie
+	// 仍然新鲜：账号重新扫码续命只会 UpdateAccountCookie 写库，不会让
+	// 已经装配好的 accountRuntime 知道。见 runtime_manager.go 的说明。
+	cookie string
 }
 
 // roomRuntime 是一个绑定的运行期能力，也是热重载的替换单元。
@@ -534,11 +541,14 @@ func runRun(args []string) error {
 		if err := noBindingsFatal(httpAddr()); err != nil {
 			return err
 		}
-		// 不要写成「添加后无需重启」：热重载（roomRuntime.Reload）是按
-		// bindingID 找**已存在**的运行时并重建它的规则引擎，新增的绑定
-		// 不在其中，必须重启进程才会被装配。
+		// P5-1 之后这条注释与日志已经过时：WebUI 新增/启用绑定会经
+		// handlePatchBinding/handleCreateBinding → runtimeManager.StartBinding
+		// 立即装配、立即生效，不必重启这个进程——热重载（roomRuntime.Reload）
+		// 按 bindingID 找**已存在**的运行时重建规则引擎是另一件事（改的是
+		// 规则，不是绑定本身有没有在跑），这条日志只是描述"目前一个启用
+		// 的绑定都没有"这一开机瞬间的状态。
 		log.Warn("数据库里没有任何启用的绑定，暂时不连接任何直播间；" +
-			"请打开 WebUI 添加账号与直播间绑定，添加完重启本进程即可生效")
+			"请打开 WebUI 添加账号与直播间绑定，添加完即可立即生效，无需重启")
 	}
 
 	// 业务日志：一个写入器，每个绑定分一个带归属 ID 的 Sink
@@ -746,8 +756,9 @@ func buildAccountRuntime(ctx context.Context, c store.RunConfig) (*accountRuntim
 	}
 
 	return &accountRuntime{
-		acc: account.New(c.AccountName, sess, interval),
-		api: apiClient,
+		acc:    account.New(c.AccountName, sess, interval),
+		api:    apiClient,
+		cookie: c.Cookie,
 	}, nil
 }
 

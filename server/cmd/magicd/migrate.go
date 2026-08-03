@@ -15,6 +15,28 @@ import (
 // store.EnsureAdmin 的说明。
 const adminPasswordEnvVar = "MAGICD_ADMIN_PASSWORD"
 
+// rejectedAdminPasswords 是已知会被人误当作"随手填一个"抄进生产环境的
+// 字面量。
+//
+// **Important-2**：`.env.example` 里 MAGICD_ADMIN_PASSWORD 的占位符是
+// 「在这里填 openssl rand -base64 18 的输出」这句中文说明本身——它按
+// 字节数远超 MinAdminPasswordLength（8），只靠长度校验挡不住
+// `cp .env.example .env && docker compose up -d` 这条最常见的路径：
+// 什么都没编辑，也会成功建出一个密码就是这句仓库里公开写着的字符串的
+// 管理员，且没有任何报错。POSTGRES_PASSWORD 那边有个天然的强制纠错点
+// （占位符含空格与中文，拼进连接串必然解析失败），管理员密码这条没有，
+// 需要在这里显式堵上。
+//
+// 这与"强制必填"的取舍无关（那条已经认可），只堵占位符字面量本身，
+// 以及几个业界公认的弱密码，防止它们被当作"够用了"的答案。
+var rejectedAdminPasswords = map[string]bool{
+	"在这里填 openssl rand -base64 18 的输出": true,
+	"changeme": true,
+	"password": true,
+	"admin":    true,
+	"12345678": true,
+}
+
 // resolveAdminPassword 决定这次 migrate 该用哪个密码去建管理员。
 //
 // existingUsers 非零时，EnsureAdmin 本来就是空操作（库里已经有管理员，
@@ -52,6 +74,13 @@ func resolveAdminPassword(existingUsers int, envPassword string) (string, error)
 			"  %s=$(openssl rand -base64 18)\n"+
 			"本地随手起一个实例、不在意密码的场景，也可以设成任意足够长的值。",
 			adminPasswordEnvVar, store.MinAdminPasswordLength, adminPasswordEnvVar)
+	}
+	if rejectedAdminPasswords[envPassword] {
+		return "", fmt.Errorf("环境变量 %s 的值是一个已知的占位符/弱密码（很可能是"+
+			"复制了 .env.example 里的说明文字，却忘了替换成真正的密码），拒绝拿它建管理员。\n"+
+			"在 .env 里设置一个真正随机的密码，例如：\n"+
+			"  %s=$(openssl rand -base64 18)",
+			adminPasswordEnvVar, adminPasswordEnvVar)
 	}
 	return envPassword, nil
 }

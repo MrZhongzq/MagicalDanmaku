@@ -83,6 +83,14 @@ type runtimeManager struct {
 
 	accounts map[string]*accountRuntime // 跨绑定共享限流器；由 runRun 用 buildAccounts 建好的那份接手，不重建
 	live     map[int64]*liveBinding
+
+	// buildAccount 装配单个账号运行时，默认是 buildAccountRuntime（含一次
+	// 真实的 RefreshNav 网络请求）。抽成字段而不是直接调用包级函数，
+	// 只是为了让 ensureAccountRuntime 的"命中缓存但 Cookie 已经在数据库
+	// 里被换新，需要重建"这条分支可以在单元测试里不打真实网络就验证——
+	// 与 apiRuntimeSink 抽接口是同一个理由。生产环境里 newRuntimeManager
+	// 把它设成 buildAccountRuntime，行为与抽出这个字段之前完全一致。
+	buildAccount func(ctx context.Context, c store.RunConfig) (*accountRuntime, error)
 }
 
 // newRuntimeManager 创建运行时管理器。accounts 应该是 runRun 里
@@ -104,15 +112,16 @@ func newRuntimeManager(
 		accounts = make(map[string]*accountRuntime)
 	}
 	return &runtimeManager{
-		ctx:      ctx,
-		st:       st,
-		sched:    sched,
-		activity: activity,
-		api:      api,
-		log:      log,
-		wg:       wg,
-		accounts: accounts,
-		live:     make(map[int64]*liveBinding),
+		ctx:          ctx,
+		st:           st,
+		sched:        sched,
+		activity:     activity,
+		api:          api,
+		log:          log,
+		wg:           wg,
+		accounts:     accounts,
+		live:         make(map[int64]*liveBinding),
+		buildAccount: buildAccountRuntime,
 	}
 }
 
@@ -123,11 +132,37 @@ var _ httpapi.BindingLifecycle = (*runtimeManager)(nil)
 // 调用者必须持有 rm.mu——与 StartBinding 整体持锁是同一个理由：
 // 「查表未命中 → 建账号 → 登记」是复合操作，不加锁的话两个并发请求
 // 可能各自建出一份，其中一份的限流器再也没人共享。
+//
+// **Important-1 的修复**：命中缓存时额外比一次 Cookie。运行时缓存装配
+// 于「上一次这个账号被装配」那一刻，而账号掉线后用户重新扫码只会走
+// account_handler.go 的 saveScannedAccount → store.UpdateAccountCookie
+// 写库，不会通知任何还在跑的 runtimeManager——此前 Cookie 换了缓存也
+// 不失效，用户按 P5-1 教的「停用再启用」这个操作重启这个绑定时，
+// StartBinding 仍然会在这里命中缓存，把绑定接到装配那一刻的死会话上，
+// 界面上却因为 P5-2 的立即探测显示登录态正常，看起来无法解释。
+//
+// c 来自 StartBinding 每次现查的 LoadRunConfig，Cookie 字段永远是数据库
+// 里的最新值，因此这里的比较不会有陈旧读的问题。
 func (rm *runtimeManager) ensureAccountRuntime(ctx context.Context, c store.RunConfig) (*accountRuntime, error) {
 	if acctRT, ok := rm.accounts[c.AccountName]; ok {
-		return acctRT, nil
+		if acctRT.cookie == c.Cookie {
+			return acctRT, nil
+		}
+		rm.log.Info("账号 Cookie 已更新，重建运行时", "name", c.AccountName)
+		rebuilt, err := rm.buildAccount(ctx, c)
+		if err != nil {
+			return nil, err
+		}
+		// 限流器必须是原来那一份，不能跟着重建换掉：风控按账号累计节奏
+		// 计算，同一账号可能有多个绑定共享它，重建时若换成一份全新的
+		// （从零开始计时的）限流器，等于让这个账号的发送节奏计时器无声
+		// 重置，也会让其余仍持有旧 accountRuntime 指针的绑定与这里新建的
+		// 这份各算各的，共享限流器的语义就破了。
+		rebuilt.acc.Limiter = acctRT.acc.Limiter
+		rm.accounts[c.AccountName] = rebuilt
+		return rebuilt, nil
 	}
-	acctRT, err := buildAccountRuntime(ctx, c)
+	acctRT, err := rm.buildAccount(ctx, c)
 	if err != nil {
 		return nil, err
 	}
@@ -205,6 +240,27 @@ func (rm *runtimeManager) adoptLocked(ctx context.Context, asm roomAssembly) {
 		room: asm.room, bot: asm.bot, client: asm.client,
 		cancel: cancel, stopped: make(chan struct{}),
 	}
+
+	// 把发送 ctx 收敛到 bindCtx——**这是 Critical-1 的修复**。
+	//
+	// asm.bot 装配时（assembleOne → buildRoomRuntime → newRoomBot）用的是
+	// 调用方传进来的 ctx：StartBinding 场景下那是 HTTP handler 的
+	// r.Context()，net/http 会在 ServeHTTP 返回时把它 cancel 掉；启动时
+	// 批量装配场景下那是 run 的根 ctx，凑巧和 bindCtx 的父 ctx 是同一个，
+	// 所以这条洞只在运行期动态启动（P5-1 新增的路径）才会命中。
+	//
+	// 不换的话：请求一结束，bot.ctx 就是一个已取消的 ctx，
+	// account.Binding.SendDanmaku/Block 的第一步 Limiter.Wait(ctx) 立刻
+	// 返回 context.Canceled——绑定连得上、收得到事件，但一条弹幕也发不
+	// 出去，日志里却没有任何报错（连接 goroutine 用的是从 rm.ctx 派生的
+	// bindCtx，不受影响，照常打「已配置绑定」「已连接直播间」）。
+	//
+	// bindCtx 派生自 rm.ctx，生命周期恰好等于这个绑定：随 rm.ctx（宿主
+	// 整体关停）级联取消，也会在 StopBinding→teardownLocked 里被显式
+	// cancel。必须在起 goroutine 之前做这一步——事件扇出 goroutine 一
+	// 收到事件就可能触发规则动作，若那时 bot.ctx 还是旧的，第一条弹幕
+	// 就会撞上这个问题。
+	asm.bot.setCtx(bindCtx)
 
 	var local sync.WaitGroup
 	local.Add(2)

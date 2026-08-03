@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -128,12 +129,22 @@ func newRuntimeManagerTestStore(t *testing.T) *store.Store {
 	return st
 }
 
-// newFakeBilibiliInfoServer 起一个假 HTTP 服务器，同时充当 nav 与
-// roomInfo 接口：nav 请求没有 room_id 查询参数，roomInfo 请求有——
-// 用这个区分，不用建两个端口。
+// newFakeBilibiliInfoServer 起一个假 HTTP 服务器，同时充当 nav、roomInfo
+// 与 sendMsg 三个接口：sendMsg 是 POST（表单体），nav/roomInfo 是 GET，
+// 二者再按有没有 room_id 查询参数区分——用这几条规则区分，不用建三个
+// 端口。
+//
+// 处理 POST（sendMsg）是 Critical-1 回归测试需要的：验证 roomBot 的
+// 发送 ctx 有没有被正确收敛到绑定级 bindCtx，最直接的办法就是真的走一遍
+// SendDanmaku，而不是只读它私有字段——但这必须发生在一个可控的假接口
+// 上，不能碰真实 B 站。
 func newFakeBilibiliInfoServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			w.Write([]byte(`{"code":0,"message":"0","data":{}}`))
+			return
+		}
 		if roomID := r.URL.Query().Get("room_id"); roomID != "" {
 			fmt.Fprintf(w, `{"code":0,"data":{"room_id":%s,"uid":1,"title":"标题","live_status":0}}`, roomID)
 			return
@@ -225,6 +236,9 @@ func seedFakeAccount(t *testing.T, rm *runtimeManager, cfg store.RunConfig, info
 	// 不需要搭假 WebSocket 服务器就能让连接 goroutine 真实地跑起来、
 	// 快速失败、进入可被 ctx 取消中断的退避等待。
 	apiClient.SetBaseURL("danmuInfo", "http://127.0.0.1:1")
+	// sendMsg 也指向假服务器：Critical-1 的回归测试要真的调用
+	// SendDanmaku 走一遍完整发送路径，不能碰真实 B 站。
+	apiClient.SetBaseURL("sendMsg", infoSrv.URL)
 	if err := apiClient.RefreshNav(context.Background()); err != nil {
 		t.Fatalf("RefreshNav 报错: %v", err)
 	}
@@ -234,8 +248,9 @@ func seedFakeAccount(t *testing.T, rm *runtimeManager, cfg store.RunConfig, info
 		interval = defaultRateLimit
 	}
 	rm.accounts[cfg.AccountName] = &accountRuntime{
-		acc: account.New(cfg.AccountName, sess, interval),
-		api: apiClient,
+		acc:    account.New(cfg.AccountName, sess, interval),
+		api:    apiClient,
+		cookie: cfg.Cookie,
 	}
 }
 
@@ -533,4 +548,166 @@ func TestHostShutdownCancelsLiveBindingsWithoutLeak(t *testing.T) {
 		engines[i] = rt.Engine()
 	}
 	closeAll(engines, bots, shutdownCtx, rm.activity) // 不该 panic
+}
+
+// ---- 审查回合修复的回归测试 ----
+//
+// 下面两条测试专门覆盖审查指出的"现有 6 条测试全部用 context.Background()
+// 调 StartBinding，永不取消，前提不成立"这个假绿形态：它们都会传一个
+// 会被主动取消的 ctx，复现"HTTP 请求结束后 r.Context() 被 net/http
+// cancel 掉"这个真实场景，而不是像上面的测试那样让 ctx 从头到尾存活。
+
+// TestStartBindingSendDanmakuOutlivesCallerContext 是 Critical-1
+// （运行期启动的绑定连得上、收得到事件、一条弹幕也发不出去）的回归测试。
+//
+// 复现链路：net/http 在 ServeHTTP 返回时会 cancel 掉 r.Context()——
+// StartBinding(r.Context(), bindingID) 用的正是这个 ctx。若 adoptLocked
+// 没有把 roomBot 的发送 ctx 收敛到绑定级的 bindCtx（派生自 rm.ctx，
+// 生命周期独立于任何一次 HTTP 请求），请求一结束，bot 的发送 ctx 就是
+// 一个已取消的 ctx：account.Binding.SendDanmaku 第一步
+// b.Account.Limiter.Wait(ctx) 立刻返回 context.Canceled——绑定连得上、
+// 收得到事件，但一条弹幕也发不出去，且连接 goroutine（用从 rm.ctx 派生
+// 的 bindCtx）完全不受影响，日志照常打「已配置绑定」「已连接直播间」，
+// 从日志看不出任何异常。
+//
+// 变异自检：把 adoptLocked 里 `asm.bot.setCtx(bindCtx)` 这一行删掉，
+// 这条测试必须由绿转红——且必须复现出与审查者手工测试完全一致的
+// context.Canceled。
+func TestStartBindingSendDanmakuOutlivesCallerContext(t *testing.T) {
+	st := newRuntimeManagerTestStore(t)
+	infoSrv := newFakeBilibiliInfoServer(t)
+	rootCtx := context.Background()
+
+	bindingID, _ := runtimeManagerTestBinding(t, st, "张三", "小号", "123", nil)
+
+	var wg sync.WaitGroup
+	sink := &fakeAPISink{}
+	rm := newTestRuntimeManager(t, rootCtx, st, &wg, sink)
+	cfgs, err := st.LoadRunConfig(rootCtx)
+	if err != nil {
+		t.Fatalf("读取配置报错: %v", err)
+	}
+	seedFakeAccount(t, rm, cfgs[0], infoSrv)
+
+	// 模拟一次 HTTP 请求：handler 用请求的 ctx 调 StartBinding，
+	// ServeHTTP 一返回，net/http 就会 cancel 掉这个 ctx——这里手动模拟
+	// 那一刻。
+	reqCtx, cancelReq := context.WithCancel(context.Background())
+	if err := rm.StartBinding(reqCtx, bindingID); err != nil {
+		t.Fatalf("StartBinding 报错: %v", err)
+	}
+	t.Cleanup(func() { rm.StopBinding(rootCtx, bindingID) })
+	cancelReq() // 模拟 ServeHTTP 返回、请求 ctx 被取消
+
+	lb, ok := rm.live[bindingID]
+	if !ok {
+		t.Fatal("StartBinding 之后 rm.live 里应该有这个绑定")
+	}
+
+	// 直接调用 roomBot.SendDanmaku——这正是规则引擎触发弹幕动作时的路径
+	// （rules.BotAPI.SendDanmaku(text)，内部用 *b.ctx.Load()）。第一步是
+	// 账号级限流器的 Wait(ctx)：这个账号的限流器是全新的（本测试第一次
+	// 用它），Wait 会立即返回 ctx.Err()，不需要真的等待，也不会触碰网络——
+	// 若这里已经是 context.Canceled，后面根本不会走到发 HTTP 请求这步。
+	if err := lb.bot.SendDanmaku("测试弹幕"); errors.Is(err, context.Canceled) {
+		t.Fatalf("SendDanmaku 在 HTTP 请求结束后返回 context.Canceled：%v\n"+
+			"说明 roomBot 的发送 ctx 仍然是调用方传入的 r.Context()，而不是"+
+			"绑定级的 bindCtx——绑定连得上、收得到事件，但一条弹幕也发不出去", err)
+	}
+}
+
+// TestStartBindingRebuildsAccountRuntimeWhenCookieChanges 是 Important-1
+// （账号重新扫码后，运行时缓存永不失效）的回归测试。
+//
+// 复现完整故障场景：账号已经在跑 → 用户重新扫码续命，Cookie 换了
+// （saveScannedAccount 只 UpdateAccountCookie 写库，不通知任何运行时）
+// → 用户按 P5-1 教的手势把绑定停用再启用 → StartBinding 若命中
+// rm.accounts 缓存且不比对 Cookie，就会把绑定接回装配那一刻的旧会话。
+//
+// 用一个注入的假 buildAccount（指向假服务器，不打真实网络）验证：
+// Cookie 变了之后，ensureAccountRuntime 必须重建 accountRuntime（新
+// Session 反映新 Cookie），同时不能把共享限流器换掉。
+//
+// 变异自检：把 ensureAccountRuntime 里的 Cookie 比对删掉（直接复用旧
+// 缓存），这条测试必须由绿转红。
+func TestStartBindingRebuildsAccountRuntimeWhenCookieChanges(t *testing.T) {
+	st := newRuntimeManagerTestStore(t)
+	infoSrv := newFakeBilibiliInfoServer(t)
+	ctx := context.Background()
+
+	bindingID, _ := runtimeManagerTestBinding(t, st, "张三", "小号", "123", nil)
+
+	var wg sync.WaitGroup
+	rm := newTestRuntimeManager(t, ctx, st, &wg, nil)
+	cfgs, err := st.LoadRunConfig(ctx)
+	if err != nil {
+		t.Fatalf("读取配置报错: %v", err)
+	}
+	seedFakeAccount(t, rm, cfgs[0], infoSrv)
+	oldAcctRT := rm.accounts[cfgs[0].AccountName]
+	oldLimiter := oldAcctRT.acc.Limiter
+
+	// 先真正启动一次绑定，再停用——完整复现"账号已经在跑"这个前提，
+	// 而不是只摆弄 rm.accounts 这个内部缓存。
+	if err := rm.StartBinding(ctx, bindingID); err != nil {
+		t.Fatalf("StartBinding（首次）报错: %v", err)
+	}
+	waitForNotState(t, 2*time.Second, rm.live[bindingID].client.State, connector.StateIdle)
+	rm.StopBinding(ctx, bindingID)
+
+	// 注入一个不打真实网络的假装配函数：生产环境里 ensureAccountRuntime
+	// 重建账号运行时会经过真实的 buildAccountRuntime（内含一次真实的
+	// RefreshNav 网络请求），单元测试没有理由为了验证"该不该重建"这个
+	// 决策逻辑本身而去打真实的 B 站接口——与 seedFakeAccount 不能直接
+	// 复用 buildAccountRuntime 是同一个理由。
+	rm.buildAccount = func(_ context.Context, c store.RunConfig) (*accountRuntime, error) {
+		sess, err := auth.ParseSession(c.Cookie)
+		if err != nil {
+			return nil, err
+		}
+		apiClient := api.New(sess, api.WithHTTPClient(infoSrv.Client()))
+		apiClient.SetBaseURL("nav", infoSrv.URL)
+		apiClient.SetBaseURL("roomInfo", infoSrv.URL)
+		apiClient.SetBaseURL("danmuInfo", "http://127.0.0.1:1")
+		apiClient.SetBaseURL("sendMsg", infoSrv.URL)
+		interval := c.RateLimit
+		if interval <= 0 {
+			interval = defaultRateLimit
+		}
+		return &accountRuntime{
+			acc:    account.New(c.AccountName, sess, interval),
+			api:    apiClient,
+			cookie: c.Cookie,
+		}, nil
+	}
+
+	// 模拟用户重新扫码续命：Cookie 换了，UID 也变了。
+	const newUID = "999888777"
+	newCookie := "SESSDATA=new-session-data; bili_jct=new-csrf; DedeUserID=" + newUID
+	if err := st.UpdateAccountCookie(ctx, cfgs[0].AccountName, newCookie, newUID); err != nil {
+		t.Fatalf("更新 Cookie 报错: %v", err)
+	}
+
+	// 用户手势：重新启用（P5-1 里唯一像样的"重启"手势）。
+	if err := rm.StartBinding(ctx, bindingID); err != nil {
+		t.Fatalf("StartBinding（重新启用）报错: %v", err)
+	}
+	t.Cleanup(func() { rm.StopBinding(ctx, bindingID) })
+
+	got, ok := rm.accounts[cfgs[0].AccountName]
+	if !ok {
+		t.Fatal("账号运行时缓存应该还在")
+	}
+	if got.acc.Session.UID != newUID {
+		t.Errorf("Cookie 更新后账号运行时的 Session.UID = %q, 期望 %q——"+
+			"说明运行时缓存没有跟着新 Cookie 重建，机器人还在用重新扫码之前的死会话",
+			got.acc.Session.UID, newUID)
+	}
+	if got.cookie != newCookie {
+		t.Errorf("accountRuntime.cookie = %q, 期望更新为新 Cookie %q", got.cookie, newCookie)
+	}
+	if got.acc.Limiter != oldLimiter {
+		t.Error("重建账号运行时后限流器不是原来那个实例——" +
+			"限流是按账号累计节奏算的，重建不该把跨绑定共享的这一份换掉")
+	}
 }

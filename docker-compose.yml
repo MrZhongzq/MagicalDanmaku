@@ -1,8 +1,7 @@
 # 生产部署：magicd + PostgreSQL。
 #
-#   1. cp .env.example .env   然后改掉 POSTGRES_PASSWORD
+#   1. cp .env.example .env   然后改掉 POSTGRES_PASSWORD 与 MAGICD_ADMIN_PASSWORD
 #   2. docker compose up -d
-#   3. docker compose logs migrate    # 取管理员的一次性密码
 #
 # ⚠️ POSTGRES_PASSWORD 只能用 URL 安全字符（字母、数字、- _ . ~）——
 # 它会被原样拼进下面的 MAGICD_DATABASE_URL，含 @ : / # ? % 或中文
@@ -37,8 +36,9 @@ services:
   # （多实例部署下让每个实例各自决定何时改表很危险），所以用一个专职的
   # 一次性 service —— 它恰好是「只有一个决定者」。
   #
-  # 空库上它还会创建管理员并打印一次性密码：
-  #   docker compose logs migrate
+  # 空库上它还会创建管理员——密码取自下面的 MAGICD_ADMIN_PASSWORD（在
+  # .env 里设置），不再是旧版本那种"随机生成、只在
+  # docker compose logs migrate 里打印一次"的一次性密码。
   migrate:
     image: ghcr.io/mrzhongzq/magicd:${MAGICD_TAG:-latest}
     restart: "no"
