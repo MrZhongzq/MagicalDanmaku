@@ -44,6 +44,8 @@ const usage = `magicd —— 神奇弹幕服务端
   magicd probe -room <房间号> [-cookie-file cookie.txt] [-type <事件类型>]
                                 [-dump <CMD名>] [-dump-file dump.jsonl]
         连接直播间并打印实时事件流；-dump 可把指定 CMD 的原始 JSON 落盘
+  magicd roominfo -room <房间号> [-cookie-file cookie.txt]
+        查一次房间人数 / 大航海总数 / 大航海在线数，用来验证这三个接口还能不能用
   magicd version                               显示版本信息
 
 环境变量:
@@ -77,6 +79,8 @@ func main() {
 		err = runLogin(os.Args[2:])
 	case "probe":
 		err = runProbe(os.Args[2:])
+	case "roominfo":
+		err = runRoomInfo(os.Args[2:])
 	case "run":
 		err = runRun(os.Args[2:])
 	case "migrate":
