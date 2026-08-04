@@ -14,9 +14,14 @@ import (
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/ratelimit"
 )
 
-// defaultMaxDanmakuLength 是普通账号的单条弹幕字数上限。
-// 高等级或舰长账号可达 30/40，由上层通过 SetMaxLength 调整。
-const defaultMaxDanmakuLength = 20
+// defaultMaxDanmakuLength 是单条弹幕的字数上限。
+//
+// P6 用户确认：B 站现在对全部用户统一放开到 40 字，不再区分等级/舰长身份
+// （这条信息来自用户本人的真机使用反馈，不是猜测或旧版本遗留的分级推测——
+// 早前这里写的"普通账号 20，高等级/舰长可达 30/40"是过时信息）。这里仍然
+// 只是"没配置时的默认值"，账号可以通过 SetMaxLength 改小，不代表账号
+// 一定要用满 40。
+const defaultMaxDanmakuLength = 40
 
 // fatalCodes 是不应重试的返回码。
 var fatalCodes = map[int]bool{

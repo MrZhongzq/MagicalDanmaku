@@ -58,18 +58,44 @@ type StatsBucket struct {
 	LiveSeconds    int64
 	BlindBoxProfit int64
 
-	// GiftCoins 是这个分桶内全部**非盲盒、金瓜子**礼物的 TotalCoin 之和，
-	// 单位 1/100 电池，供 WebUI 统计页「今日电池到账」卡片使用。
+	// GiftCoins 是这个分桶内**主播实际收到**的电池总量，单位 1/100
+	// 电池，供 WebUI 统计页「今日电池到账」卡片使用。用户原话："总计
+	// 今天主播收到的电池数量"——不分来源，含盲盒爆出的礼物。
 	//
-	// 两条过滤缺一不可：
-	//   - 不含盲盒——与 GiftCount/GiftKinds 一致，P4-4 的硬性要求（盲盒
-	//     单独算，见 BlindBoxProfit），不能让盲盒的花费重复计进常规
-	//     礼物的电池到账。
-	//   - 只算 coin_type=gold（金瓜子）——免费礼物（小花花、人气票等）
-	//     是 silver，不产生真实电池，即便它的 TotalCoin 字段本身是正数
-	//     （可能承载着人气值一类的展示用数字），也绝不能计进电池到账。
-	//     用 `TotalCoin > 0` 之类的近似判据在这类礼物上会判错，必须
-	//     老老实实读 CoinType 字段。
+	// **单行电池价值 = Price × Count，不是 TotalCoin**——这是本字段
+	// 最容易搞反的地方，之前在这里写错过一次，专门说清楚两者的区别：
+	//   - TotalCoin 是这次投喂**送礼人付出**的电池，盲盒场景下是盲盒本身
+	//     的售价，同一种盲盒（比如幸运盲盒）不管开出什么都恒定，与开出的
+	//     礼物无关——它是成本，不是收入。
+	//   - Price 是**这条礼物本身的单价**（盲盒场景下等于爆出礼物的价值
+	//     `BlindBox.TipPrice`），才是主播这次投喂实际到账的钱。普通礼物
+	//     （非盲盒）里 TotalCoin 恒等于 Price*Count（协议本身的不变量：
+	//     总价=单价×数量），两者算出来的数字一样，只有盲盒场景会分叉——
+	//     用户真实样本核对过：幸运盲盒 TotalCoin 恒为 5000（送礼人的
+	//     花费），但爆出星光铃铛（Price=5200）与幸运泡泡（Price=1500）
+	//     时主播到账完全不同，用 TotalCoin 算电池到账会把"送礼人花了
+	//     多少"误当成"主播收到了多少"，这两件事本来就不是一回事。
+	//   - BlindBoxProfit 的公式 `Price*Count - TotalCoin`（收入-成本）
+	//     早就用对了这两个字段各自的含义，这次只是把 GiftCoins 也对齐
+	//     到同一个"Price 才是收入"的理解上，不是发明新概念。
+	//
+	// **含盲盒**——与 GiftCount/GiftKinds 不同：那两个统计的是"件数/
+	// 种类"，P4-4 的硬性要求是盲盒不该污染这两个计数（盲盒爆出的礼物名
+	// 不是稳定的价值锚点）；但电池到账统计的是"收入总额"，盲盒爆出的
+	// 礼物同样是主播的真实收入，没有理由从"到账"里排除掉，两条约束管的
+	// 不是同一件事，不冲突。
+	//
+	// 免费礼物的判据不变：电池价值是不是 0——只有 coin_type=silver（银
+	// 瓜子，面值单位不是电池）记 0，其余（含盲盒）一律按 Price*Count
+	// 计入，不是"只有 gold 才算"的白名单，理由见下方 isSilverCoinGiftSQL
+	// 的注释。
+	//
+	// **已知局限**：B 站自 2021 改版后目前不再发放免费礼物，"免费礼物是否
+	// 进电池总榜"这条分支现实中触发不到，本仓库现有样本
+	// （`server/blindbox.jsonl`）也全是付费礼物，验证不到。这不是一个待办，
+	// 是当前没有现实意义、也没有样本可验证的已知局限——将来 B 站如果又发
+	// 免费礼物了，用一份含免费礼物的真实抓包（尤其是"红包抢来的"与
+	// "活动直接发的"两种）就能坐实这条判据对不对。
 	GiftCoins int64
 }
 
@@ -106,10 +132,20 @@ func statsWhere(accountID, bindingID int64) ([]string, []any) {
 // 手写测试 JSON 里干脆不写这个键）都能正确处理。
 const isBlindBoxGiftSQL = `detail->>'BlindBox' IS NOT NULL`
 
-// isGoldCoinGiftSQL 判断一条 gift 行是不是用金瓜子付的——`->>`（取文本）
-// 与 isBlindBoxGiftSQL 是同一个理由：银瓜子免费礼物、老数据没有这个键
-// 两种情况都要能正确落到「不是金瓜子」这一侧，不能只处理其中一种。
-const isGoldCoinGiftSQL = `detail->>'CoinType' = 'gold'`
+// isSilverCoinGiftSQL 判断一条 gift 行是不是银瓜子结算——**唯一需要排除
+// 的情况**，见 StatsBucket.GiftCoins 的注释：判据是"电池价值是不是 0"，
+// 银瓜子的面值单位不是电池，是这里唯一确定"电池价值恒为 0"的情形；除它
+// 之外一律按 Price*Count 计入，不用"只有 gold 才算"这种白名单——那会漏掉
+// "免费但确实进电池总榜"的礼物（比如红包抢来的）。
+//
+// `->>` 取文本会在键缺失时返回 SQL NULL，`NULL = 'silver'` 的结果也是
+// NULL——SQL 三值逻辑下，`CASE WHEN NULL THEN ... END` 走的是 ELSE 分支
+// （不是 THEN），所以老数据没有这个键时会安全落到"电池价值记 0"这一侧
+// （见 countExprs 里 `NOT (isSilverCoinGiftSQL)` 同样是 NULL、同样落
+// ELSE），不会被当成"确定不是银瓜子"从而误把缺字段的电池价值也算
+// 进去——这条靠 TestQueryStatsByDayGiftCoinsMissingCoinTypeDefaultsToZero
+// 钉住，不是凭空断言 SQL 会这样表现。
+const isSilverCoinGiftSQL = `detail->>'CoinType' = 'silver'`
 
 // countExprs 是六个业务计数的 SQL 表达式，QueryStatsByDay（GROUP BY）与
 // aggregateEventCounts（单行）共用，避免两处口径漂移。
@@ -117,7 +153,9 @@ const isGoldCoinGiftSQL = `detail->>'CoinType' = 'gold'`
 // **gift_count/gift_kinds 不含盲盒**——计划文件明文的硬性要求（用户
 // 原话「盲盒类单独计算」）：盲盒送礼行不计入礼物件数，爆出的礼物名
 // （星光铃铛/棒棒糖/…）也不进 `COUNT(DISTINCT GiftName)`，否则「礼物
-// 种类」会被盲盒池的开奖结果污染。
+// 种类」会被盲盒池的开奖结果污染。**gift_coins 不受这条约束**——它统计
+// 的是收入总额而不是件数/种类，盲盒爆出的礼物同样是主播的真实收入，
+// 见 StatsBucket.GiftCoins 的注释，两条约束管的不是同一件事。
 //
 // blind_box_profit 只对是盲盒的 gift 行求和，三个数字字段都用 ->> 取成
 // 文本再转 bigint：detail 是 event.Gift 整个结构体的原样 JSON，
@@ -126,6 +164,13 @@ const isGoldCoinGiftSQL = `detail->>'CoinType' = 'gold'`
 // 看到「拿不到」——这里统计的是「这个时间段有没有盲盒」，没有就是真的
 // 0，不是外部接口失败那种需要区分「未知」的场景（那类区分只用在 PK
 // 对面快照上，见 connector/bilibili/opponent_snapshot.go）。
+//
+// **gift_coins 用 Price*Count，不是 TotalCoin**——Price 是这条礼物本身
+// 的价值（主播到账），TotalCoin 是送礼人的花费，盲盒场景下两者不相等
+// （盲盒场景下 TotalCoin 是盲盒售价，与爆出的礼物无关）。普通礼物两者
+// 恒等，只有盲盒会分叉，详见 StatsBucket.GiftCoins 的注释——这也是
+// blind_box_profit 的 `Price*Count - TotalCoin`（收入-成本）一直在用的
+// 同一套字段含义，这里保持一致，不是另一套理解。
 const countExprs = `COUNT(*) FILTER (WHERE event_type = 'danmaku') AS danmaku_count,
 	COUNT(*) FILTER (WHERE event_type = 'user_enter') AS enter_count,
 	COUNT(*) FILTER (WHERE event_type = 'gift' AND NOT (` + isBlindBoxGiftSQL + `)) AS gift_count,
@@ -137,8 +182,8 @@ const countExprs = `COUNT(*) FILTER (WHERE event_type = 'danmaku') AS danmaku_co
 			ELSE 0 END
 	), 0) AS blind_box_profit,
 	COALESCE(SUM(
-		CASE WHEN event_type = 'gift' AND NOT (` + isBlindBoxGiftSQL + `) AND ` + isGoldCoinGiftSQL + `
-			THEN (detail->>'TotalCoin')::bigint
+		CASE WHEN event_type = 'gift' AND NOT (` + isSilverCoinGiftSQL + `)
+			THEN (detail->>'Price')::bigint * (detail->>'Count')::bigint
 			ELSE 0 END
 	), 0) AS gift_coins`
 
@@ -422,18 +467,27 @@ type GiftBreakdownRow struct {
 	// Count 是这个礼物名下全部送礼事件的 Count 字段之和（送礼数量本身，
 	// 不是行数——一行可能一次性送出多个，比如 num=10）。
 	Count int64
-	// Coins 只累加 coin_type=gold（金瓜子）那部分 TotalCoin，单位
-	// 1/100 电池——免费礼物（coin_type=silver）的数量照常统计进
-	// Count，但不产生电池，Coins 里那部分贡献恒为 0。
+	// Coins 是这个礼物名下全部行的"电池价值"之和（Price*Count，不是
+	// TotalCoin，理由见 StatsBucket.GiftCoins 的注释），单位 1/100 电池。
+	// 判据与 StatsBucket.GiftCoins 一致（电池价值是不是 0，只有银瓜子
+	// 结算的记 0，不是"只有金瓜子才算"）。银瓜子礼物的数量照常统计进
+	// Count，但 Coins 里那部分贡献恒为 0。
 	Coins int64
 }
 
 // QueryGiftBreakdown 按礼物名分组统计 bindingID 名下的礼物明细，
 // since/until 为零值表示不限制该侧。
 //
-// 与 GiftCount/GiftKinds/GiftCoins 一致地排除盲盒（P4-4 硬性要求：
-// 盲盒继续单独算，不混进常规礼物统计）——盲盒爆出的礼物名不该出现在
-// 这张明细表里。
+// 与 GiftCount/GiftKinds 一致地排除盲盒（P4-4 硬性要求：盲盒继续单独算，
+// 不混进常规礼物明细）——盲盒爆出的礼物名不该出现在这张明细表里，
+// 那些名字（星光铃铛/棒棒糖/…）不是稳定的价值锚点，混进"礼物"列表会
+// 让同一个名字在盲盒场景与非盲盒场景下代表完全不同的东西。
+//
+// **这张明细表的 Coins 之和不等于 StatsBucket.GiftCoins**——是刻意的：
+// GiftCoins 统计的是收入总额，含盲盒爆出的礼物；这张表统计的是"哪些
+// 礼物贡献了多少"，盲盒被排除在外。两个数字对不上不是 bug，是两条不同
+// 约束（件数/种类 vs 收入总额）分别生效的结果，见
+// StatsBucket.GiftCoins 注释里"盲盒不受这条约束"那一段。
 func (s *Store) QueryGiftBreakdown(ctx context.Context, bindingID int64, since, until time.Time) ([]GiftBreakdownRow, error) {
 	where := []string{"kind = 'event'", "event_type = 'gift'", "binding_id = $1", "NOT (" + isBlindBoxGiftSQL + ")"}
 	args := []any{bindingID}
@@ -448,7 +502,9 @@ func (s *Store) QueryGiftBreakdown(ctx context.Context, bindingID int64, since, 
 
 	sql := `SELECT detail->>'GiftName' AS gift_name,
 		COALESCE(SUM((detail->>'Count')::bigint), 0) AS count,
-		COALESCE(SUM(CASE WHEN ` + isGoldCoinGiftSQL + ` THEN (detail->>'TotalCoin')::bigint ELSE 0 END), 0) AS coins
+		COALESCE(SUM(CASE WHEN NOT (` + isSilverCoinGiftSQL + `)
+			THEN (detail->>'Price')::bigint * (detail->>'Count')::bigint
+			ELSE 0 END), 0) AS coins
 		FROM activity_logs WHERE ` + strings.Join(where, " AND ") + `
 		GROUP BY gift_name ORDER BY coins DESC, gift_name`
 

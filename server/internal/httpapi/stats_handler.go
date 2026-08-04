@@ -21,10 +21,10 @@ type statsView struct {
 	// BlindBoxProfit 单位 1/100 电池，可为负——「元」的换算只在前端做，
 	// 后端一律吐原始整数（见 store.StatsBucket.BlindBoxProfit 的注释）。
 	BlindBoxProfit int64 `json:"blindBoxProfit"`
-	// GiftCoins 是这个分桶内全部非盲盒、金瓜子礼物的电池到账总量，单位
-	// 1/100 电池——免费礼物（coin_type=silver）不计入，见
-	// store.StatsBucket.GiftCoins 的注释。同样只吐原始整数，换算只在
-	// 前端做。
+	// GiftCoins 是这个分桶内全部非盲盒礼物的"电池价值"之和，单位
+	// 1/100 电池——判据是"电池价值是不是 0"（排除法，只排除银瓜子），
+	// 不是"是不是金瓜子"，见 store.StatsBucket.GiftCoins 的注释。同样
+	// 只吐原始整数，换算只在前端做。
 	GiftCoins int64 `json:"giftCoins"`
 }
 
@@ -47,8 +47,9 @@ func toStatsView(b store.StatsBucket) statsView {
 type giftBreakdownView struct {
 	GiftName string `json:"giftName"`
 	Count    int64  `json:"count"`
-	// Coins 单位 1/100 电池，只累加金瓜子礼物；免费礼物的这一项恒为 0，
-	// 见 store.GiftBreakdownRow.Coins 的注释。换算只在前端做。
+	// Coins 单位 1/100 电池，判据是"电池价值是不是 0"（排除法，只排除
+	// 银瓜子）；不产生电池价值的礼物这一项恒为 0，见
+	// store.GiftBreakdownRow.Coins 的注释。换算只在前端做。
 	Coins int64 `json:"coins"`
 }
 

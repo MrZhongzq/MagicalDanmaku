@@ -487,18 +487,27 @@ func TestQueryStatsBySessionMultipleSessions(t *testing.T) {
 	}
 }
 
-// ---- P6 任务 5：今日电池到账（GiftCoins）——只有金瓜子才算 ----
+// ---- P6 任务 5：今日电池到账（GiftCoins）——判据是"电池价值是不是 0" ----
 //
-// B 站礼物有 coin_type（gold/silver）之分，免费礼物（小花花、人气票等）
-// 是 silver，不产生真实电池，绝不能计进"电池到账"。**不能用
-// TotalCoin > 0 这种近似判据**——某些免费礼物的 total_coin 本身就不是
-// 0（比如承载着人气值），用金额是否为正来猜测coin_type 会在这类礼物上
-// 判错，必须老老实实读 coin_type 字段。
+// 判据经历过两次订正：
+//  1. 白名单（只有 coin_type=gold 才算）→ 黑名单（只排除 coin_type=silver）
+//     ——用户原话：同一个礼物名既可能免费也可能收费，免费的里面还要再分
+//     是不是会进电池总榜，礼物身份本身不足以判定。
+//  2. 电池价值取 TotalCoin → 取 Price*Count——用户原话（用
+//     `server/blindbox.jsonl` 真实样本核对过）：TotalCoin 是送礼人的
+//     花费（盲盒场景下是盲盒售价，跟爆出什么无关），Price 才是这条
+//     礼物本身的价值、也就是主播实际到账。两者在非盲盒场景下恒等，只有
+//     盲盒会分叉，用 TotalCoin 会把"送礼人花了多少"误当成"主播到账
+//     多少"。且盲盒爆出的礼物同样是收入，不该像 gift_count/gift_kinds
+//     那样把盲盒排除掉。
 
-// TestQueryStatsByDaySumsGiftCoinsOnlyForGoldCoinGifts 是这条修复最核心
-// 的一条测试：金瓜子礼物计入 GiftCoins，银瓜子（免费）礼物不计入，
-// 即便它的 TotalCoin 字段本身是正数。
-func TestQueryStatsByDaySumsGiftCoinsOnlyForGoldCoinGifts(t *testing.T) {
+// TestQueryStatsByDaySumsGiftCoinsExcludesOnlySilver 验证：银瓜子礼物不
+// 计入（即便 TotalCoin/Price 本身是正数），但除银瓜子之外的任何
+// coin_type 都要计入——不是"只有恰好等于 gold 的才算"。这里 Price 与
+// TotalCoin/Count 保持一致（非盲盒场景下协议不变量：总价=单价×数量），
+// 盲盒场景下 Price 与 TotalCoin 分叉的情形见
+// TestQueryStatsByDayGiftCoinsIncludesBlindBoxUsingPriceNotTotalCoin。
+func TestQueryStatsByDaySumsGiftCoinsExcludesOnlySilver(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
 	accID := mustAccount(t, s, "小号")
@@ -506,13 +515,19 @@ func TestQueryStatsByDaySumsGiftCoinsOnlyForGoldCoinGifts(t *testing.T) {
 	if err := s.InsertActivity(ctx, []ActivityRow{
 		// 金瓜子礼物：辣条，500 电池到账
 		{AccountID: accID, Kind: ActivityEvent, EventType: "gift",
-			Detail:     []byte(`{"GiftName":"辣条","Count":1,"CoinType":"gold","TotalCoin":50000,"BlindBox":null}`),
+			Detail:     []byte(`{"GiftName":"辣条","Count":1,"CoinType":"gold","Price":50000,"TotalCoin":50000,"BlindBox":null}`),
 			OccurredAt: statsFixedTime},
-		// 免费礼物：小心心，coin_type 是 silver，即便 TotalCoin 是正数
-		// （承载人气值，不是真实电池），也绝不能计进电池到账。
+		// 免费礼物：小心心，coin_type 是 silver，即便金额字段是正数
+		// （面值单位不是电池），也绝不能计进电池到账——这是唯一的排除项。
 		{AccountID: accID, Kind: ActivityEvent, EventType: "gift",
-			Detail:     []byte(`{"GiftName":"小心心","Count":1,"CoinType":"silver","TotalCoin":100,"BlindBox":null}`),
+			Detail:     []byte(`{"GiftName":"小心心","Count":1,"CoinType":"silver","Price":100,"TotalCoin":100,"BlindBox":null}`),
 			OccurredAt: statsFixedTime.Add(time.Minute)},
+		// 既不是 gold 也不是 silver 的 coin_type：如果实现是"只有 gold
+		// 才算"的白名单，这一条会被错误地排除掉；"排除法"（只排除 silver）
+		// 则会正确把它计入 300 电池。
+		{AccountID: accID, Kind: ActivityEvent, EventType: "gift",
+			Detail:     []byte(`{"GiftName":"某种非金非银结算的礼物","Count":1,"CoinType":"other","Price":30000,"TotalCoin":30000,"BlindBox":null}`),
+			OccurredAt: statsFixedTime.Add(2 * time.Minute)},
 	}); err != nil {
 		t.Fatalf("写入报错: %v", err)
 	}
@@ -522,24 +537,26 @@ func TestQueryStatsByDaySumsGiftCoinsOnlyForGoldCoinGifts(t *testing.T) {
 		t.Fatalf("按天聚合报错: %v", err)
 	}
 	b := statsBucketFor(t, got, "2026-07-31")
-	if b.GiftCoins != 50000 {
-		t.Errorf("GiftCoins = %d, 期望 50000（只算金瓜子礼物，免费礼物不算，"+
-			"即便它的 TotalCoin 本身是正数）", b.GiftCoins)
+	if b.GiftCoins != 80000 {
+		t.Errorf("GiftCoins = %d, 期望 80000（50000+30000，只排除银瓜子那一条，"+
+			"不是只有 coin_type=gold 才算）", b.GiftCoins)
 	}
 }
 
-// TestQueryStatsByDayGiftCoinsExcludesBlindBox 验证盲盒礼物不计入
-// GiftCoins——盲盒继续单独算（BlindBoxProfit），不混进常规礼物统计，
-// 这是 P4-4 的硬性要求，电池到账这个新字段也不能例外。
-func TestQueryStatsByDayGiftCoinsExcludesBlindBox(t *testing.T) {
+// TestQueryStatsByDayGiftCoinsMissingCoinTypeDefaultsToZero 覆盖 CoinType
+// 字段整个缺失的边界（比如手写测试数据、或理论上的老数据缺口）：SQL 里
+// `detail->>'CoinType' = 'silver'` 在键缺失时是 SQL NULL，NULL 参与
+// `CASE WHEN` 判断时既不算真也不算假，会落到 ELSE 分支——这条测试确认
+// 这个三值逻辑的推断是对的，缺失 CoinType 的礼物安全地记 0（不会被
+// "排除法"误判成"确定不是银瓜子"从而把缺字段的电池价值也算进去）。
+func TestQueryStatsByDayGiftCoinsMissingCoinTypeDefaultsToZero(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
 	accID := mustAccount(t, s, "小号")
 
 	if err := s.InsertActivity(ctx, []ActivityRow{
 		{AccountID: accID, Kind: ActivityEvent, EventType: "gift",
-			Detail: []byte(`{"GiftName":"星光铃铛","Count":1,"CoinType":"gold","Price":5200,"TotalCoin":5000,` +
-				`"BlindBox":{"Name":"幸运盲盒","Price":5000,"TipPrice":5200}}`),
+			Detail:     []byte(`{"GiftName":"老数据礼物","Count":1,"Price":9999,"TotalCoin":9999,"BlindBox":null}`),
 			OccurredAt: statsFixedTime},
 	}); err != nil {
 		t.Fatalf("写入报错: %v", err)
@@ -551,7 +568,55 @@ func TestQueryStatsByDayGiftCoinsExcludesBlindBox(t *testing.T) {
 	}
 	b := statsBucketFor(t, got, "2026-07-31")
 	if b.GiftCoins != 0 {
-		t.Errorf("GiftCoins = %d, 期望 0（盲盒礼物不计入常规电池到账，单独看盲盒盈亏）", b.GiftCoins)
+		t.Errorf("GiftCoins = %d, 期望 0（CoinType 字段缺失时应该安全地记 0，"+
+			"不该把缺字段的电池价值算进去）", b.GiftCoins)
+	}
+}
+
+// TestQueryStatsByDayGiftCoinsIncludesBlindBoxUsingPriceNotTotalCoin 是
+// 本任务最核心的一条测试：用户用 `server/blindbox.jsonl` 的真实样本核对
+// 过，`price`（爆出礼物的价值，主播到账）与 `total_coin`（盲盒售价，
+// 送礼人的花费）在盲盒场景下是两回事——幸运盲盒不管开出什么，
+// TotalCoin 恒为 5000，但爆出星光铃铛时 Price 是 5200；心动盲盒
+// TotalCoin 恒为 15000，但爆出棉花糖时 Price 只有 9000。
+//
+// 如果 GiftCoins 算错成 TotalCoin 之和，这里会得到 5000+15000=20000
+// （送礼人花了多少）；用对 Price 之和则是 5200+9000=14200
+// （主播实际到账多少）——两个数字都不是 0，也不接近，用近似值蒙混不
+// 过去这条测试。
+//
+// 同时验证盲盒**要**计入 GiftCoins（与 gift_count/gift_kinds 排除盲盒
+// 是两条不同的约束，不冲突，见 StatsBucket.GiftCoins 的注释）。
+func TestQueryStatsByDayGiftCoinsIncludesBlindBoxUsingPriceNotTotalCoin(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	accID := mustAccount(t, s, "小号")
+
+	if err := s.InsertActivity(ctx, []ActivityRow{
+		// 幸运盲盒开出星光铃铛：售价（TotalCoin）5000，爆出礼物价值
+		// （Price）5200——真实样本数值。
+		{AccountID: accID, Kind: ActivityEvent, EventType: "gift",
+			Detail: []byte(`{"GiftName":"星光铃铛","Count":1,"CoinType":"gold","Price":5200,"TotalCoin":5000,` +
+				`"BlindBox":{"Name":"幸运盲盒","Price":5000,"TipPrice":5200}}`),
+			OccurredAt: statsFixedTime},
+		// 心动盲盒开出棉花糖：售价（TotalCoin）15000，爆出礼物价值
+		// （Price）9000——真实样本数值。
+		{AccountID: accID, Kind: ActivityEvent, EventType: "gift",
+			Detail: []byte(`{"GiftName":"棉花糖","Count":1,"CoinType":"gold","Price":9000,"TotalCoin":15000,` +
+				`"BlindBox":{"Name":"心动盲盒","Price":15000,"TipPrice":9000}}`),
+			OccurredAt: statsFixedTime.Add(time.Minute)},
+	}); err != nil {
+		t.Fatalf("写入报错: %v", err)
+	}
+
+	got, err := s.QueryStatsByDay(ctx, StatsQuery{AccountID: accID})
+	if err != nil {
+		t.Fatalf("按天聚合报错: %v", err)
+	}
+	b := statsBucketFor(t, got, "2026-07-31")
+	if b.GiftCoins != 14200 {
+		t.Errorf("GiftCoins = %d, 期望 14200（5200+9000，用 Price 之和，"+
+			"不是 TotalCoin 之和 20000；且盲盒要计入电池到账）", b.GiftCoins)
 	}
 }
 
@@ -571,10 +636,10 @@ func TestQueryStatsBySessionSumsGiftCoins(t *testing.T) {
 	if err := s.InsertActivity(ctx, []ActivityRow{
 		{AccountID: accID, BindingID: &b.ID, Kind: ActivityEvent, EventType: "live_start", OccurredAt: start},
 		{AccountID: accID, BindingID: &b.ID, Kind: ActivityEvent, EventType: "gift",
-			Detail:     []byte(`{"GiftName":"辣条","Count":1,"CoinType":"gold","TotalCoin":50000,"BlindBox":null}`),
+			Detail:     []byte(`{"GiftName":"辣条","Count":1,"CoinType":"gold","Price":50000,"TotalCoin":50000,"BlindBox":null}`),
 			OccurredAt: start.Add(time.Minute)},
 		{AccountID: accID, BindingID: &b.ID, Kind: ActivityEvent, EventType: "gift",
-			Detail:     []byte(`{"GiftName":"小心心","Count":1,"CoinType":"silver","TotalCoin":100,"BlindBox":null}`),
+			Detail:     []byte(`{"GiftName":"小心心","Count":1,"CoinType":"silver","Price":100,"TotalCoin":100,"BlindBox":null}`),
 			OccurredAt: start.Add(2 * time.Minute)},
 		{AccountID: accID, BindingID: &b.ID, Kind: ActivityEvent, EventType: "live_stop", OccurredAt: stop},
 	}); err != nil {
@@ -596,7 +661,11 @@ func TestQueryStatsBySessionSumsGiftCoins(t *testing.T) {
 // ---- P6 任务 5：礼物明细列表（按礼物名分组：数量 + 电池数加和） ----
 
 // TestQueryGiftBreakdownGroupsByName 验证按礼物名分组求和：数量是各行
-// Count 之和，电池数只累加金瓜子礼物的 TotalCoin。
+// Count 之和，电池数按"排除法"（只排除银瓜子）累加 Price*Count——不是
+// "只有金瓜子才算"的白名单，也不是 TotalCoin，见文件头部关于 GiftCoins
+// 判据的说明。这里全是非盲盒礼物，Price*Count 与 TotalCoin 恒等，
+// 盲盒场景下两者分叉的情形见
+// TestQueryStatsByDayGiftCoinsIncludesBlindBoxUsingPriceNotTotalCoin。
 func TestQueryGiftBreakdownGroupsByName(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -608,14 +677,19 @@ func TestQueryGiftBreakdownGroupsByName(t *testing.T) {
 
 	if err := s.InsertActivity(ctx, []ActivityRow{
 		{AccountID: accID, BindingID: &bind.ID, Kind: ActivityEvent, EventType: "gift",
-			Detail:     []byte(`{"GiftName":"辣条","Count":1,"CoinType":"gold","TotalCoin":50000,"BlindBox":null}`),
+			Detail:     []byte(`{"GiftName":"辣条","Count":1,"CoinType":"gold","Price":50000,"TotalCoin":50000,"BlindBox":null}`),
 			OccurredAt: statsFixedTime},
 		{AccountID: accID, BindingID: &bind.ID, Kind: ActivityEvent, EventType: "gift",
-			Detail:     []byte(`{"GiftName":"辣条","Count":2,"CoinType":"gold","TotalCoin":100000,"BlindBox":null}`),
+			Detail:     []byte(`{"GiftName":"辣条","Count":2,"CoinType":"gold","Price":50000,"TotalCoin":100000,"BlindBox":null}`),
 			OccurredAt: statsFixedTime.Add(time.Minute)},
 		{AccountID: accID, BindingID: &bind.ID, Kind: ActivityEvent, EventType: "gift",
-			Detail:     []byte(`{"GiftName":"小心心","Count":3,"CoinType":"silver","TotalCoin":300,"BlindBox":null}`),
+			Detail:     []byte(`{"GiftName":"小心心","Count":3,"CoinType":"silver","Price":100,"TotalCoin":300,"BlindBox":null}`),
 			OccurredAt: statsFixedTime.Add(2 * time.Minute)},
+		// 既不是 gold 也不是 silver：应该照常计入电池数——证明这里是
+		// "排除法"（只排除银瓜子），不是"只有恰好等于 gold 的才算"的白名单。
+		{AccountID: accID, BindingID: &bind.ID, Kind: ActivityEvent, EventType: "gift",
+			Detail:     []byte(`{"GiftName":"神秘礼物","Count":1,"CoinType":"other","Price":700,"TotalCoin":700,"BlindBox":null}`),
+			OccurredAt: statsFixedTime.Add(3 * time.Minute)},
 	}); err != nil {
 		t.Fatalf("写入报错: %v", err)
 	}
@@ -624,8 +698,8 @@ func TestQueryGiftBreakdownGroupsByName(t *testing.T) {
 	if err != nil {
 		t.Fatalf("查询礼物明细报错: %v", err)
 	}
-	if len(got) != 2 {
-		t.Fatalf("礼物种类数 = %d, 期望 2: %+v", len(got), got)
+	if len(got) != 3 {
+		t.Fatalf("礼物种类数 = %d, 期望 3: %+v", len(got), got)
 	}
 
 	byName := map[string]GiftBreakdownRow{}
@@ -652,6 +726,15 @@ func TestQueryGiftBreakdownGroupsByName(t *testing.T) {
 	}
 	if heart.Coins != 0 {
 		t.Errorf("小心心 Coins = %d, 期望 0（银瓜子免费礼物不产生电池，即便 TotalCoin 是正数）", heart.Coins)
+	}
+
+	mystery, ok := byName["神秘礼物"]
+	if !ok {
+		t.Fatalf("没有找到「神秘礼物」: %+v", got)
+	}
+	if mystery.Coins != 700 {
+		t.Errorf("神秘礼物 Coins = %d, 期望 700（coin_type 既非 gold 也非 silver，"+
+			"「排除法」应该照常计入，不能被白名单误排除）", mystery.Coins)
 	}
 }
 

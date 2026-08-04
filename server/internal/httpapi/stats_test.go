@@ -332,8 +332,11 @@ func TestQueryStatsByDayCountsBeyondActivityLimit(t *testing.T) {
 // ---- P6 任务 5：今日电池到账（giftCoins）+ 礼物明细列表 ----
 
 // TestQueryStatsByDayGiftCoins 验证 giftCoins 字段经完整 HTTP 层下发，
-// 且只统计金瓜子礼物——免费礼物（coin_type=silver）即便 TotalCoin 是
-// 正数也不该计入。
+// 且银瓜子礼物（coin_type=silver）即便金额字段是正数也不该计入——判据
+// 是"电池价值（Price*Count）是不是 0"，银瓜子是唯一确定恒为 0 的情形，
+// 其余 SQL 层已经用"排除法"（不是"只有 gold 才算"）钉住，见
+// store/stats_test.go；Price 与 TotalCoin 在盲盒场景下会分叉的细节也在
+// store 层测试覆盖，这里只验证 HTTP 层字段下发。
 func TestQueryStatsByDayGiftCoins(t *testing.T) {
 	srv, st := newTestServer(t)
 	c := loginAs(t, srv, st, "张三", false)
@@ -342,10 +345,10 @@ func TestQueryStatsByDayGiftCoins(t *testing.T) {
 
 	seedActivity(t, st, bid,
 		store.ActivityRow{Kind: store.ActivityEvent, EventType: "gift",
-			Detail:     []byte(`{"GiftName":"辣条","Count":1,"CoinType":"gold","TotalCoin":50000,"BlindBox":null}`),
+			Detail:     []byte(`{"GiftName":"辣条","Count":1,"CoinType":"gold","Price":50000,"TotalCoin":50000,"BlindBox":null}`),
 			OccurredAt: seedTime},
 		store.ActivityRow{Kind: store.ActivityEvent, EventType: "gift",
-			Detail:     []byte(`{"GiftName":"小心心","Count":1,"CoinType":"silver","TotalCoin":100,"BlindBox":null}`),
+			Detail:     []byte(`{"GiftName":"小心心","Count":1,"CoinType":"silver","Price":100,"TotalCoin":100,"BlindBox":null}`),
 			OccurredAt: seedTime.Add(time.Minute)},
 	)
 
@@ -363,12 +366,12 @@ func TestQueryStatsByDayGiftCoins(t *testing.T) {
 		t.Fatalf("bucket 数 = %d, 期望 1: %+v", len(got), got)
 	}
 	if got[0]["giftCoins"].(float64) != 50000 {
-		t.Errorf("giftCoins = %v, 期望 50000（免费礼物不计入，即便 TotalCoin 是正数）", got[0]["giftCoins"])
+		t.Errorf("giftCoins = %v, 期望 50000（免费礼物不计入，即便金额字段是正数）", got[0]["giftCoins"])
 	}
 }
 
 // TestHandleGiftBreakdownGroupsByName 验证礼物明细列表接口：按礼物名
-// 分组，数量与电池数（只算金瓜子）各自求和。
+// 分组，数量与电池数（银瓜子记 0，其余按 Price*Count 计）各自求和。
 func TestHandleGiftBreakdownGroupsByName(t *testing.T) {
 	srv, st := newTestServer(t)
 	c := loginAs(t, srv, st, "张三", false)
@@ -377,15 +380,17 @@ func TestHandleGiftBreakdownGroupsByName(t *testing.T) {
 
 	seedActivity(t, st, bid,
 		store.ActivityRow{Kind: store.ActivityEvent, EventType: "gift",
-			Detail:     []byte(`{"GiftName":"辣条","Count":1,"CoinType":"gold","TotalCoin":50000,"BlindBox":null}`),
+			Detail:     []byte(`{"GiftName":"辣条","Count":1,"CoinType":"gold","Price":50000,"TotalCoin":50000,"BlindBox":null}`),
 			OccurredAt: seedTime},
 		store.ActivityRow{Kind: store.ActivityEvent, EventType: "gift",
-			Detail:     []byte(`{"GiftName":"辣条","Count":2,"CoinType":"gold","TotalCoin":100000,"BlindBox":null}`),
+			Detail:     []byte(`{"GiftName":"辣条","Count":2,"CoinType":"gold","Price":50000,"TotalCoin":100000,"BlindBox":null}`),
 			OccurredAt: seedTime.Add(time.Minute)},
 		store.ActivityRow{Kind: store.ActivityEvent, EventType: "gift",
-			Detail:     []byte(`{"GiftName":"小心心","Count":3,"CoinType":"silver","TotalCoin":300,"BlindBox":null}`),
+			Detail:     []byte(`{"GiftName":"小心心","Count":3,"CoinType":"silver","Price":100,"TotalCoin":300,"BlindBox":null}`),
 			OccurredAt: seedTime.Add(2 * time.Minute)},
-		// 盲盒不该出现在明细列表里——P4-4 硬性要求，盲盒单独算。
+		// 盲盒不该出现在明细列表里——P4-4 硬性要求，盲盒单独算（这条约束
+		// 只管这张按名字分组的列表，不管「今日电池到账」聚合数字，后者
+		// 盲盒要计入，见 store 层测试）。
 		store.ActivityRow{Kind: store.ActivityEvent, EventType: "gift",
 			Detail: []byte(`{"GiftName":"星光铃铛","Count":1,"CoinType":"gold","Price":5200,"TotalCoin":5000,` +
 				`"BlindBox":{"Name":"幸运盲盒","Price":5000,"TipPrice":5200}}`),
