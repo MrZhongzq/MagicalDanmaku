@@ -251,13 +251,19 @@ describe('Accounts 直播间开播状态展示', () => {
   }
 
   it('living：显示"直播中"', async () => {
-    const wrapper = mountWithBinding({ liveStatus: 'living', liveCheckedAt: '2026-08-01T12:00:00Z' })
+    const wrapper = mountWithBinding({
+      liveStatus: 'living',
+      liveCheckedAt: '2026-08-01T12:00:00Z',
+    })
     await flushPromises()
     expect(bindingLiveTagText(wrapper)).toContain('直播中')
   })
 
   it('offline：显示"未开播"', async () => {
-    const wrapper = mountWithBinding({ liveStatus: 'offline', liveCheckedAt: '2026-08-01T12:00:00Z' })
+    const wrapper = mountWithBinding({
+      liveStatus: 'offline',
+      liveCheckedAt: '2026-08-01T12:00:00Z',
+    })
     await flushPromises()
     expect(bindingLiveTagText(wrapper)).toContain('未开播')
   })
@@ -273,7 +279,10 @@ describe('Accounts 直播间开播状态展示', () => {
   })
 
   it('unknown 且曾经探测失败（liveCheckedAt 非 null）：显示"状态未知"，且说明不代表未开播', async () => {
-    const wrapper = mountWithBinding({ liveStatus: 'unknown', liveCheckedAt: '2026-08-01T12:00:00Z' })
+    const wrapper = mountWithBinding({
+      liveStatus: 'unknown',
+      liveCheckedAt: '2026-08-01T12:00:00Z',
+    })
     await flushPromises()
     expect(bindingLiveTagText(wrapper)).toContain('状态未知')
     expect(bindingLiveTagText(wrapper)).not.toContain('未开播')

@@ -70,7 +70,12 @@
  */
 import type { Condition, Rule } from '@/api/rule-types'
 import { PICK_MODE_OPTIONS, parsePickMode, type PickMode } from '@/api/rule-types'
-import { GUARD_TIER_OPTIONS, GUARD_TIER_VALUES, guardTierFromValues, type GuardTier } from '@/utils/guardTier'
+import {
+  GUARD_TIER_OPTIONS,
+  GUARD_TIER_VALUES,
+  guardTierFromValues,
+  type GuardTier,
+} from '@/utils/guardTier'
 
 /** PK 播报（匹配信息）规则的固定名字，与「进房欢迎」「礼物答谢」用同一套按 name 认领的机制。 */
 export const PK_RULE_NAME = '内置/PK播报'
@@ -136,7 +141,8 @@ const MATCHED_BY_FAN_MEDAL = 'fan_medal'
  * 一条才拼 `all` 树。
  */
 export function buildPkVisitCondition(f: PkVisitFilter): Condition | undefined {
-  const needsFanMedalGate = f.opponentMedalOnly || f.minOpponentMedalLevelEnabled || f.opponentGuardOnly
+  const needsFanMedalGate =
+    f.opponentMedalOnly || f.minOpponentMedalLevelEnabled || f.opponentGuardOnly
   const leaves: Condition[] = []
 
   if (needsFanMedalGate) {
@@ -179,7 +185,11 @@ export function parsePkVisitFilter(condition: Condition | undefined): PkVisitFil
   const leaves = condition.all ?? (condition.field ? [condition] : [])
   let hasFanMedalGate = false
   for (const leaf of leaves) {
-    if (leaf.field === 'visit.matchedBy' && leaf.op === 'eq' && leaf.value === MATCHED_BY_FAN_MEDAL) {
+    if (
+      leaf.field === 'visit.matchedBy' &&
+      leaf.op === 'eq' &&
+      leaf.value === MATCHED_BY_FAN_MEDAL
+    ) {
       hasFanMedalGate = true
     }
     if (leaf.field === 'user.medal.level' && leaf.op === 'gte' && typeof leaf.value === 'number') {

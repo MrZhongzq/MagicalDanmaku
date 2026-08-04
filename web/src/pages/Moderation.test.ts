@@ -92,9 +92,7 @@ function err(status: number, message: string) {
 function setupStores(permissions: string[], isOwner = true) {
   setActivePinia(createPinia())
   const bindings = useBindingsStore()
-  bindings.list = [
-    { ...绑定, permissions: permissions as typeof 绑定.permissions, isOwner },
-  ]
+  bindings.list = [{ ...绑定, permissions: permissions as typeof 绑定.permissions, isOwner }]
   bindings.select(1)
 
   const auth = useAuthStore()
@@ -438,7 +436,11 @@ describe('Moderation 拉黑区：账号级拉黑/解除拉黑，走独立接口�
     expect(opts.content).toContain('10086')
     // 确认之前，POST .../blacklist 不该被发出去
     expect(
-      f.mock.calls.some((c) => (c[0] as string).endsWith('/blacklist') && (c[1] as RequestInit | undefined)?.method === 'POST'),
+      f.mock.calls.some(
+        (c) =>
+          (c[0] as string).endsWith('/blacklist') &&
+          (c[1] as RequestInit | undefined)?.method === 'POST',
+      ),
     ).toBe(false)
   })
 
@@ -476,7 +478,11 @@ describe('Moderation 拉黑区：账号级拉黑/解除拉黑，走独立接口�
     expect(messageMock.success).toHaveBeenCalledWith('已拉黑 UID 10086')
     // 绝不能打到禁言接口——这是这次任务要修的核心 bug
     expect(
-      f.mock.calls.some((c) => (c[0] as string).endsWith('/block') && (c[1] as RequestInit | undefined)?.method === 'POST'),
+      f.mock.calls.some(
+        (c) =>
+          (c[0] as string).endsWith('/block') &&
+          (c[1] as RequestInit | undefined)?.method === 'POST',
+      ),
     ).toBe(false)
     expect(statusCalls).toBeGreaterThanOrEqual(1)
     expect(wrapper.text()).toContain('已拉黑')
@@ -515,7 +521,8 @@ describe('Moderation 拉黑区：账号级拉黑/解除拉黑，走独立接口�
     const backendMessage = '拉黑失败: 你不是这个账号的所有者'
     const f = vi.fn().mockImplementation((url: string, init?: RequestInit) => {
       if (url.endsWith('/blocklist')) return Promise.resolve(ok([]))
-      if (url.endsWith('/blacklist') && init?.method === 'POST') return Promise.resolve(err(502, backendMessage))
+      if (url.endsWith('/blacklist') && init?.method === 'POST')
+        return Promise.resolve(err(502, backendMessage))
       return Promise.resolve(ok({ status: 'ok' }))
     })
     vi.stubGlobal('fetch', f)
@@ -538,7 +545,10 @@ describe('Moderation 拉黑区：账号级拉黑/解除拉黑，走独立接口�
   it('点「查询状态」发 GET .../blacklist-status?uid=，展示 attribute==128 换算出的已拉黑状态与自动回填的昵称', async () => {
     const f = vi.fn().mockImplementation((url: string, init?: RequestInit) => {
       if (url.endsWith('/blocklist')) return Promise.resolve(ok([]))
-      if (url.includes('/blacklist-status') && (!init || init.method === undefined || init.method === 'GET')) {
+      if (
+        url.includes('/blacklist-status') &&
+        (!init || init.method === undefined || init.method === 'GET')
+      ) {
         expect(url).toContain('uid=10086')
         return Promise.resolve(ok({ uid: '10086', blacklisted: true, nickname: '坏人甲' }))
       }

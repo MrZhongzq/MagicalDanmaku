@@ -307,7 +307,11 @@ describe('PkPanel 纯函数：7b 串门欢迎筛选（buildPkVisitCondition/pars
   })
 
   it('大航海档位用 in 一组数值而不是 gte——因为编号越小档位越高（与 EnterFilter 同一条规则）', () => {
-    const filter = { ...defaultPkVisitFilter(), opponentGuardOnly: true, opponentGuardTier: 'captain' as const }
+    const filter = {
+      ...defaultPkVisitFilter(),
+      opponentGuardOnly: true,
+      opponentGuardTier: 'captain' as const,
+    }
     // opponentGuardOnly 会连带拼出 matchedBy 前提，结果是 all 树，不是单条叶子
     // （跟 EnterFilter 的 guardOnly 不需要额外前提、直接是单条叶子不同）。
     const cond = buildPkVisitCondition(filter) as { all: { field: string; value: number[] }[] }
@@ -319,7 +323,11 @@ describe('PkPanel 纯函数：7b 串门欢迎筛选（buildPkVisitCondition/pars
 describe('PkPanel 组件：7b 三个筛选控件独立勾选、条件叠加', () => {
   it('三个筛选复选框都渲染且默认不勾选', () => {
     const wrapper = mount(PkPanel, { props: { modelValue: defaultPkDraft() } })
-    const labels = ['只欢迎佩戴对面主播粉丝牌的用户', '只欢迎对面粉丝牌等级达到', '只欢迎对面大航海（舰长/提督/总督）用户']
+    const labels = [
+      '只欢迎佩戴对面主播粉丝牌的用户',
+      '只欢迎对面粉丝牌等级达到',
+      '只欢迎对面大航海（舰长/提督/总督）用户',
+    ]
     for (const label of labels) {
       const checkbox = wrapper.findAll('.n-checkbox').find((c) => c.text().includes(label))
       expect(checkbox, `复选框「${label}」应该存在`).toBeTruthy()

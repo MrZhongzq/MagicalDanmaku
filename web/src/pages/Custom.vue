@@ -790,7 +790,9 @@ function dismissPartialFailure() {
                 :status="isReservedRuleName(draft.name) ? 'error' : undefined"
               />
               <span v-if="isReservedRuleName(draft.name)" class="reserved-name-hint">
-                不能以「{{ RESERVED_RULE_NAME_PREFIX }}」开头——这是内置规则的命名空间，撞名会导致这条规则被静默替换掉
+                不能以「{{
+                  RESERVED_RULE_NAME_PREFIX
+                }}」开头——这是内置规则的命名空间，撞名会导致这条规则被静默替换掉
               </span>
             </div>
           </template>

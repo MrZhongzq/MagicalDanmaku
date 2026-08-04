@@ -619,7 +619,9 @@ describe('Custom 页：规则名不能落进内置命名空间（RESERVED_RULE_N
     await flushPromises()
 
     expect(messageMock.error).toHaveBeenCalled()
-    const errMsg = messageMock.error.mock.calls[messageMock.error.mock.calls.length - 1][0] as string
+    const errMsg = messageMock.error.mock.calls[
+      messageMock.error.mock.calls.length - 1
+    ][0] as string
     expect(errMsg).toContain(RESERVED_RULE_NAME_PREFIX)
     expect(putCalled, 'PUT 请求不应该被发出去').toBe(false)
   })
