@@ -23,6 +23,23 @@ const (
 	ActionBlacklist ActionType = "blacklist"
 	ActionScript    ActionType = "script" // 执行脚本
 	ActionLog       ActionType = "log"    // 只记日志，用于调试规则
+
+	// ActionUnblacklist **不是**一个可配置的规则动作类型——规则只能「触发
+	// 拉黑」，没有「触发取消拉黑」这回事（取消拉黑只能是人手动做的决定，
+	// 交给自动规则去撤销一次已经生效的社交关系操作没有意义）。它存在的
+	// 唯一目的是给 cmd/magicd 的手动操作日志用：账号级拉黑/取消拉黑在
+	// activity_logs 里如果都记 ActionBlacklist，两个方向的记录会长得
+	// 一模一样，事后完全没法从日志分辨「这条是拉黑了还是解开了」——这条
+	// 拉黑是不可逆的对外操作，唯一的事后追溯依据就是这份日志，分不清
+	// 方向等于这条审计线索作废。
+	//
+	// 因此**故意不登记进 allActionTypes**：它不出现在
+	// GET /api/meta/action-types、Custom.vue 的动作类型下拉框、
+	// Action.Validate() 的合法值列表里——一旦哪个人手滑把它塞进一条
+	// 保存的规则，Validate() 会按「未知的动作类型」拒绝，这是有意的
+	// 保护，不是遗漏。它只应该出现在 cmd/magicd/run.go 里
+	// roomRuntime.Unblacklist 传给 recordManual 的那个临时 Action 值上。
+	ActionUnblacklist ActionType = "unblacklist"
 )
 
 // allActionTypes 按声明顺序排列，AllActionTypes 依赖这个顺序。

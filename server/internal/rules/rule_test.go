@@ -288,6 +288,25 @@ func TestAllActionTypesIncludesBlacklist(t *testing.T) {
 	}
 }
 
+// TestActionUnblacklistNotARuleActionType 钉住 ActionUnblacklist 的设计
+// 边界：它只是给 cmd/magicd 手动操作日志用来区分「拉黑」与「取消拉黑」
+// 方向的一个内部标记，**不是**规则可以配置的动作类型——规则只能触发
+// 拉黑，没有"触发取消拉黑"这回事。如果它被误登记进 AllActionTypes()，
+// 会在 Custom.vue 的动作类型下拉框里冒出一个点了会在 Validate() 那层
+// 直接报错的选项；如果 Validate() 又被改成接受它，规则就能配出一个
+// 「触发取消拉黑」的假动作，保存后永远执行不到（executor.go 的 switch
+// 没有对应分支）。两条防线都要在，缺一个都是回归。
+func TestActionUnblacklistNotARuleActionType(t *testing.T) {
+	for _, t2 := range AllActionTypes() {
+		if t2 == ActionUnblacklist {
+			t.Fatal("ActionUnblacklist 不该出现在 AllActionTypes() 里")
+		}
+	}
+	if err := (Action{Type: ActionUnblacklist}).Validate(); err == nil {
+		t.Error("ActionUnblacklist 不是合法的规则动作类型，Validate() 应当报错")
+	}
+}
+
 func TestActionValidateAcceptsKnownPickValues(t *testing.T) {
 	for _, pick := range []string{"", PickRandom, PickSequential} {
 		a := Action{Type: ActionDanmaku, Template: []string{"x"}, Pick: pick}

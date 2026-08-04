@@ -278,6 +278,56 @@ func TestRoomRuntimeUnblacklistForwards(t *testing.T) {
 	}
 }
 
+// TestRoomRuntimeBlacklistAndUnblacklistLogDifferentActionTypes 钉住协调者
+// 2026-08-04 的裁决：拉黑与取消拉黑在 activity_logs 里必须能区分方向——
+// 两者都是「无论成败都要落日志」的不可逆/半不可逆对外操作，如果两条相反
+// 的记录长得一模一样（此前都记 rules.ActionBlacklist），这份日志作为事后
+// 审计依据就作废了。
+//
+// 只断言 ActionType 字段本身，不去动 detail 的 JSON 结构——协调者要求
+// 「不要改变其它动作类型的现有日志形态」，这条测试如果被改成去检查
+// detail 里多了什么字段，反而会引诱实现往 sink.go 的公共路径里加东西。
+func TestRoomRuntimeBlacklistAndUnblacklistLogDifferentActionTypes(t *testing.T) {
+	var mu sync.Mutex
+	var rows []store.ActivityRow
+	collect := func(_ context.Context, batch []store.ActivityRow) error {
+		mu.Lock()
+		rows = append(rows, batch...)
+		mu.Unlock()
+		return nil
+	}
+
+	actions := &fakeAccountActions{}
+	rt, activity := newTestRoomRuntimeForBlacklist(t, actions, collect)
+
+	if err := rt.Blacklist(context.Background(), "10086"); err != nil {
+		t.Fatalf("Blacklist 失败: %v", err)
+	}
+	if err := rt.Unblacklist(context.Background(), "10086"); err != nil {
+		t.Fatalf("Unblacklist 失败: %v", err)
+	}
+
+	// 业务日志异步落库：必须先 Close() 排空缓冲，见上面同类测试的注释。
+	activity.Close()
+
+	mu.Lock()
+	got := append([]store.ActivityRow{}, rows...)
+	mu.Unlock()
+
+	if len(got) != 2 {
+		t.Fatalf("业务日志条数 = %d, 期望 2（拉黑一条、取消拉黑一条）", len(got))
+	}
+	if got[0].ActionType != string(rules.ActionBlacklist) {
+		t.Errorf("第 1 条（拉黑）ActionType = %q, 期望 %q", got[0].ActionType, rules.ActionBlacklist)
+	}
+	if got[1].ActionType != string(rules.ActionUnblacklist) {
+		t.Errorf("第 2 条（取消拉黑）ActionType = %q, 期望 %q", got[1].ActionType, rules.ActionUnblacklist)
+	}
+	if got[0].ActionType == got[1].ActionType {
+		t.Errorf("拉黑与取消拉黑的 ActionType 不该相同，实际都是 %q——日志分不清方向", got[0].ActionType)
+	}
+}
+
 // TestRoomRuntimeBlacklistStatusReportsBlacklisted 钉住 attribute==128
 // 的判据经过完整链路（api.IsBlacklisted）后仍然正确——这是「自检变异
 // (c)」在 cmd/magicd 这一层的对应防线。

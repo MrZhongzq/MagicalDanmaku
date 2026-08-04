@@ -191,9 +191,16 @@ func (rt *roomRuntime) Blacklist(ctx context.Context, uid string) error {
 }
 
 // Unblacklist 是账号级取消拉黑。
+//
+// 记日志时用 rules.ActionUnblacklist，不是 rules.ActionBlacklist——
+// 两者如果共用同一个 ActionType，activity_logs 里「拉黑」与「取消拉黑」
+// 这两条相反的记录会长得一模一样，事后没法从日志分辨方向（协调者
+// 2026-08-04 裁决：这是要修的问题，不是可接受的局限）。ActionUnblacklist
+// 只在这一处使用，不是一个可配置的规则动作类型，见 rules.ActionUnblacklist
+// 的注释。
 func (rt *roomRuntime) Unblacklist(ctx context.Context, uid string) error {
 	err := rt.binding.Unblacklist(ctx, uid)
-	rt.recordManual(rules.Action{Type: rules.ActionBlacklist},
+	rt.recordManual(rules.Action{Type: rules.ActionUnblacklist},
 		map[string]any{"user": map[string]any{"uid": uid}}, err)
 	return err
 }
