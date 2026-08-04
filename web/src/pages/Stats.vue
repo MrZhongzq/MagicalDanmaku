@@ -8,8 +8,10 @@
  * 由 SQL 侧 `GROUP BY` 聚合，不再是从 `/activity` 的 500 条截断样本里
  * 算出来的假数字（那正是这一页此前一直显示占位符的原因）。接口一次返回
  * 一组分桶（`by=day` 每天一桶，`by=session` 每场直播一桶），本页把它们
- * 汇总成 7 张总览卡片，并在下面附一张分桶明细表——明细表是「维度切换有
- * 真实效果」最直接的证据：按日/按场次切出来的行数、边界都不一样。
+ * 汇总成 7 张总览卡片。**P7 起这些卡片改为跟随页面上的日期选择器**，
+ * 不再是不设时间范围的全历史求和——原来靠一张「分桶明细」表才能看出的
+ * 「切维度/切日期确实有效果」，现在切一下日期或维度、看卡片数字跟着变
+ * 就是同一件事，明细表已经去掉，见下方 P7 段落。
  *
  * **两个仍然要在界面上说清楚的限制，不能被真实数字的出现盖过去**：
  *
@@ -47,20 +49,56 @@
  * 「礼物数量」卡片后面要能看到今天到账了多少电池，下方要有按礼物分组
  * 的明细（礼物名/数量/电池数）。
  *
- * 这两块数据**独立于上面的维度切换（按日/按场次）**，固定按"今天"
- * （UTC 自然天，与 `store.QueryStatsByDay` 的分桶口径一致）请求，不随
- * `dimension` 变化——用户要看的是"今天"这个固定概念，不是"当前维度选中
- * 的那一桶"，切到按场次时也不该让这两块数据消失或变成别的意思。
- *
  * 电池数按"电池价值是不是 0"计算（price×count，不是 total_coin），
  * 不是"是不是金瓜子礼物"——`giftCoins`/`coins` 字段后端已经按这条判据
  * 算好（排除法：只排除银瓜子，见 `web/src/api/types.ts` 里
- * `StatsBucket.giftCoins` 的注释），前端不需要也不能再猜。「今日电池
+ * `StatsBucket.giftCoins` 的注释），前端不需要也不能再猜。「当日电池
  * 到账」含盲盒爆出的礼物（主播的真实收入不该被排除），但下方「礼物」
  * 明细列表不含盲盒（P4-4 硬性要求，盲盒不是稳定的价值锚点），两个数字
  * 因此不必相等，不是 bug。展示单位是「电池」而不是「元」，换算系数是
  * **除以 100**（原始值是 1/100 电池），不要跟盲盒盈亏卡片的 /1000
  * （换算成「元」）搞混，那是两个不同的展示单位。
+ *
+ * **P7：真机反馈第二轮——改用日期选择器，去掉分桶明细表**。用户看过
+ * P6 之后说：既然礼物明细已经能看了，日期就该能自己选（`n-date-picker`
+ * 日历控件，不是 `n-select` 下拉——下拉会随日期变多越拖越长），选中哪天
+ * 就看哪天的卡片与礼物明细，默认选中今天。
+ *
+ * **全部 8 张卡片现在都跟随选中日期**，不只是原来 P6 单独拎出来的
+ * 「今日电池到账」+「礼物」明细——这正是「分桶明细」表能被去掉的原因：
+ * 以前明细表是唯一能直观看到「换一天/换一场次数字会不同」的地方（另外
+ * 7 张总览卡片此前是不限时间范围的全历史求和）；现在挑单个日期直接看
+ * 总览卡片就是同一件事，不必再多维护一张表格。
+ *
+ * **`dimension`（按日/按场次）现在的含义**：在选中的这一天范围内，是把
+ * 它整体当一天聚合（`by=day`，通常聚出 0 或 1 个分桶），还是按这一天里
+ * 实际发生的开播场次分别聚合（`by=session`，一天可能有 0 场、1 场或多
+ * 场直播，各场结果再求和）。**「按场次」的含义是「看选中这天的各场
+ * 直播」，不是「看全部历史场次」**——这是两种维度里唯一说得通的组合：
+ * 「按日」选哪天看哪天很直白；「按场次」如果脱离选中日期去看全部历史
+ * 场次，日期选择器对这个维度就形同虚设，用户选了日期却看不出任何影响，
+ * 是一个用户看不懂的搭配。
+ *
+ * **时区：选中日期按浏览器本地自然天解释，不是 UTC 自然天**——这是重新
+ * 权衡过 P6 遗留决定后的结果，务必别改回去。P6 的 `todayRangeUTC()`
+ * 故意选 UTC，理由是要跟 `store.QueryStatsByDay` 的
+ * `date_trunc('day', occurred_at)`（数据库会话时区，这套环境下是 UTC）
+ * 对齐，避免前后端两个「今天」不是同一个时间窗口——但那条理由只在
+ * 「界面上从不出现具体日期，只说抽象的『今天』」这个前提下成立。现在
+ * 用户会在日历控件上点一个具体日期（比如「8 月 4 日」），控件画的就是
+ * 浏览器本地时区的日历格子，用户脑子里的「8 月 4 日」也是本地时钟——
+ * 这台服务器实际部署在东八区（`TZ=Asia/Shanghai`），直播时间表、弹幕
+ * 答谢规则都按本地时间安排，如果这里悄悄按 UTC 解释，选中的「8 月 4 日」
+ * 会变成本地时间 8 月 4 日早上 8 点到 8 月 5 日早上 8 点：用户选的那天
+ * 前 8 小时的数据凭空消失，下一天前 8 小时的数据却混了进来。这种错不会
+ * 报错、只会让数字对不上，且界面上没有任何线索能让用户往时区上想。
+ *
+ * 改成本地自然天不会破坏跟后端的对齐：`since`/`until` 只是传给后端的两
+ * 个时间点（闭区间过滤），后端拿到之后仍然按它自己的 UTC 自然天分桶、
+ * GROUP BY 求和——分桶的内部边界画在哪儿不影响"把返回的所有桶加总"这
+ * 个用法，本页现在也不再展示单个分桶的标签（分桶明细表已去掉），只用
+ * 总和，所以查询窗口没有必要跟后端内部的分桶边界对齐，只需要覆盖用户
+ * 真正想看的那 24 小时本地时间。
  */
 import { computed, ref, watch } from 'vue'
 import {
@@ -68,6 +106,7 @@ import {
   NButton,
   NCard,
   NDataTable,
+  NDatePicker,
   NEmpty,
   NRadioButton,
   NRadioGroup,
@@ -124,6 +163,56 @@ const DIMENSION_OPTIONS = [
 const dimension = ref<StatsDimension>('day')
 const dimensionLabel = computed(() => (dimension.value === 'day' ? '每日' : '每场'))
 
+// ---- 日期选择器：统计维度那一行新增，替代原来的固定"今天" ----
+
+/**
+ * startOfLocalDay 把任意时刻对齐到"当地自然天"的零点。
+ *
+ * 用 `getFullYear`/`getMonth`/`getDate`（本地时区取值）而不是
+ * `getUTCFullYear` 等 UTC 版本——这是本次改动最容易出错的地方，见文件
+ * 头部"时区"那段说明：日期选择器画的是浏览器本地时区的日历格子，这里
+ * 必须用同一套时区口径，否则选中的日期文本与实际请求的时间窗口会对不上
+ * （典型症状：数字看起来"差了大半天"，但界面上完全看不出哪里错了）。
+ */
+function startOfLocalDay(d: Date): number {
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime()
+}
+
+/**
+ * dayRangeFor 把"选中日期的本地零点"换算成传给后端的 `[since, until]`
+ * 闭区间（后端 since/until 的比较都用 `>=`/`<=`，见
+ * `parseActivityTimeRange`，两端都含）。
+ *
+ * **终点用"次日零点减 1 毫秒"，不是"当前时刻 `now`"**——P6 的
+ * `todayRangeUTC` 只处理"今天"，用 `now` 当终点也够用（反正数据库里
+ * 不会有超过 `now` 的行）。但日期选择器允许挑任意历史日期，如果选了
+ * 昨天还用 `now` 当终点，查询窗口会一路开到现在，把今天的数据也算进
+ * "昨天"里——必须显式算出所选那一天的最后一刻，不能偷懒复用 `now`。
+ *
+ * 用本地日历"加一天再减 1 毫秒"而不是直接加 `24*60*60*1000` 毫秒，是
+ * 为了在有夏令时的时区也不出错（一天可能是 23 或 25 小时）——中国不
+ * 实行夏令时，这里差别不大，但这样写不依赖这个前提，换了部署时区也
+ * 不用重新审视这段逻辑。
+ */
+function dayRangeFor(dayStartMs: number): { since: string; until: string } {
+  const start = new Date(dayStartMs)
+  const nextDayStart = new Date(start.getFullYear(), start.getMonth(), start.getDate() + 1)
+  const end = new Date(nextDayStart.getTime() - 1)
+  return { since: start.toISOString(), until: end.toISOString() }
+}
+
+/** 统计维度那一行的日期选择器，默认选中今天（本地自然天）。 */
+const selectedDate = ref<number>(startOfLocalDay(new Date()))
+
+/** 选中日期的 `YYYY-MM-DD` 文本，供卡片提示里说明"现在具体在看哪一天"。 */
+const selectedDateLabel = computed(() => {
+  const d = new Date(selectedDate.value)
+  const y = d.getFullYear()
+  const m = String(d.getMonth() + 1).padStart(2, '0')
+  const day = String(d.getDate()).padStart(2, '0')
+  return `${y}-${m}-${day}`
+})
+
 // ---- 聚合统计：GET /api/bindings/{id}/stats?by=day|session ----
 
 const statsBuckets = ref<StatsBucket[]>([])
@@ -139,9 +228,11 @@ async function loadStats() {
   loadingStats.value = true
   statsError.value = null
   try {
+    const { since, until } = dayRangeFor(selectedDate.value)
+    const qs = `since=${encodeURIComponent(since)}&until=${encodeURIComponent(until)}`
     statsBuckets.value = await request<StatsBucket[]>(
       'GET',
-      `/api/bindings/${b.id}/stats?by=${dimension.value}`,
+      `/api/bindings/${b.id}/stats?by=${dimension.value}&${qs}`,
     )
   } catch (e) {
     statsError.value = e instanceof ApiError ? e.message : '加载统计数据失败'
@@ -151,44 +242,38 @@ async function loadStats() {
   }
 }
 
-// 绑定或维度任一变化都要重新拉取——这正是「维度切换现在有真实效果」的
-// 落地位置：切换按日/按场次会发出带不同 by 参数的新请求。
+// 绑定、维度、选中日期任一变化都要重新拉取——这正是「切维度/切日期都有
+// 真实效果」的落地位置：三者任一变化都会发出带新 by/since/until 的请求。
 watch(
-  () => [bindings.currentId, dimension.value] as const,
+  () => [bindings.currentId, dimension.value, selectedDate.value] as const,
   () => void loadStats(),
   { immediate: true },
 )
 
-// ---- 今日电池到账 + 礼物明细列表：固定按"今天"，不随维度切换变化 ----
+// ---- 当日卡片 + 礼物明细列表：固定用 by=day，不随维度切换变化 ----
+//
+// 这两块跟主统计卡片一样跟随"选中日期"变化，但请求方式仍然保留 P6 定下
+// 的另一条边界：固定用 by=day，不随 dimension 切到 by=session——"这一天
+// 总共到账多少电池""这一天送了哪些礼物"是两个自然按天理解的概念，不该
+// 因为用户切到「按场次」维度就变成"这一天里每一场分别算一次"，那样反而
+// 会让人分不清这张卡片是不是也在跟着维度切换变化（它不该变）。
 
-/**
- * todayRangeUTC 算出"今天"的 [since, until)：UTC 自然天的零点到当前
- * 时刻。与 `store.QueryStatsByDay` 的 `date_trunc('day', occurred_at)`
- * 用的是同一个口径（UTC 自然天），不按浏览器本地时区切——否则「今天」
- * 这个词在后端与前端会指两个不同的时间窗口，跨时区部署时尤其容易错。
- */
-function todayRangeUTC(): { since: string; until: string } {
-  const now = new Date()
-  const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()))
-  return { since: start.toISOString(), until: now.toISOString() }
-}
-
-const todayGiftCoins = ref<number | null>(null) // null 表示"算不出来"（未选绑定/加载失败），不能显示成 0
+const dayGiftCoins = ref<number | null>(null) // null 表示"算不出来"（未选绑定/加载失败），不能显示成 0
 const giftBreakdown = ref<GiftBreakdownRow[]>([])
-const loadingToday = ref(false)
-const todayError = ref<string | null>(null)
+const loadingDayExtras = ref(false)
+const dayExtrasError = ref<string | null>(null)
 
-async function loadToday() {
+async function loadDayExtras() {
   const b = bindings.current
   if (!b) {
-    todayGiftCoins.value = null
+    dayGiftCoins.value = null
     giftBreakdown.value = []
     return
   }
-  loadingToday.value = true
-  todayError.value = null
+  loadingDayExtras.value = true
+  dayExtrasError.value = null
   try {
-    const { since, until } = todayRangeUTC()
+    const { since, until } = dayRangeFor(selectedDate.value)
     const qs = `since=${encodeURIComponent(since)}&until=${encodeURIComponent(until)}`
     // 两个接口各自独立失败也不该互相拖累——用 allSettled 而不是 all，
     // 电池到账查不到不该连带把已经查到的礼物明细也清空，反之亦然。
@@ -198,39 +283,43 @@ async function loadToday() {
     ])
 
     if (statsResult.status === 'fulfilled') {
-      // 空数组不能求和成 0——那会把"今天压根没有可用的分桶数据"显示成
-      // "今天电池到账确实是 0"，与本页其余卡片的 hasBuckets/PLACEHOLDER
-      // 处理原则一致（见 noBucketsHint 的注释）。
+      // 空数组不能求和成 0——那会把"选中日期压根没有可用的分桶数据"显示
+      // 成"这一天电池到账确实是 0"，与本页其余卡片的 hasBuckets/
+      // PLACEHOLDER 处理原则一致（见 noBucketsHint 的注释）。
       //
-      // by=day&since=今天零点&until=现在 至多只会返回今天这一个分桶，
-      // 但仍然用 reduce 求和而不是直接取第一个——万一后端跨天分桶的
-      // 简化规则（见 QueryStatsByDay 的说明）在某个边界返回了不止一桶，
-      // 求和永远是安全的，取第一个则可能悄悄漏掉一部分。
-      todayGiftCoins.value =
+      // by=day&since=选中日期零点&until=次日零点前一毫秒 至多只会返回
+      // 一个分桶，但仍然用 reduce 求和而不是直接取第一个——万一后端跨天
+      // 分桶的简化规则（见 QueryStatsByDay 的说明）在某个边界返回了不止
+      // 一桶，求和永远是安全的，取第一个则可能悄悄漏掉一部分。
+      dayGiftCoins.value =
         statsResult.value.length > 0
           ? statsResult.value.reduce((sum, bkt) => sum + bkt.giftCoins, 0)
           : null
     } else {
-      todayGiftCoins.value = null
-      todayError.value =
-        statsResult.reason instanceof ApiError ? statsResult.reason.message : '加载今日电池到账失败'
+      dayGiftCoins.value = null
+      dayExtrasError.value =
+        statsResult.reason instanceof ApiError ? statsResult.reason.message : '加载当日电池到账失败'
     }
 
     if (giftsResult.status === 'fulfilled') {
       giftBreakdown.value = giftsResult.value
     } else {
       giftBreakdown.value = []
-      todayError.value =
+      dayExtrasError.value =
         giftsResult.reason instanceof ApiError ? giftsResult.reason.message : '加载礼物明细失败'
     }
   } finally {
-    loadingToday.value = false
+    loadingDayExtras.value = false
   }
 }
 
-// 只随绑定变化重新拉取，不随 dimension——"今天"是一个固定概念，不该
-// 因为用户切到「按场次」维度就跟着变成别的意思或者消失。
-watch(() => bindings.currentId, () => void loadToday(), { immediate: true })
+// 随绑定或选中日期变化重新拉取，不随 dimension——理由见上面这一节的
+// 说明（固定按天理解的概念，不该因为切维度就变成别的意思或者消失）。
+watch(
+  () => [bindings.currentId, selectedDate.value] as const,
+  () => void loadDayExtras(),
+  { immediate: true },
+)
 
 /**
  * totals 把分桶数组汇总成总览卡片用的数字。
@@ -337,16 +426,16 @@ const STAT_CARDS = computed<StatCardDef[]>(() => [
       : noBucketsHint.value,
   },
   {
-    key: 'todayGiftCoins',
-    label: '今日电池到账',
-    // 独立于上面的维度切换，固定按"今天"（UTC 自然天）请求——见文件头
-    // P6 任务 5 的说明。null 表示还没选绑定或加载失败，不能显示成 0：
-    // 那会被误读成"今天真的一分电池都没到账"。
-    value: todayGiftCoins.value !== null ? formatBattery(todayGiftCoins.value) : PLACEHOLDER,
+    key: 'dayGiftCoins',
+    label: '当日电池到账',
+    // 跟随选中日期（本地自然天），固定用 by=day 请求，不随上面的维度
+    // 切换变化——见文件头 P7 段落的说明。null 表示还没选绑定或加载
+    // 失败，不能显示成 0：那会被误读成"这一天真的一分电池都没到账"。
+    value: dayGiftCoins.value !== null ? formatBattery(dayGiftCoins.value) : PLACEHOLDER,
     hint:
-      todayGiftCoins.value !== null
-        ? '今天（UTC 自然天）收到的电池总量，含盲盒爆出的礼物——只统计真正产生了电池的礼物，不产生电池的免费礼物（如小花花、人气票）不计入这里'
-        : (todayError.value ?? '今天暂无可用数据'),
+      dayGiftCoins.value !== null
+        ? `${selectedDateLabel.value}（本地时间）收到的电池总量，含盲盒爆出的礼物——只统计真正产生了电池的礼物，不产生电池的免费礼物（如小花花、人气票）不计入这里`
+        : (dayExtrasError.value ?? `${selectedDateLabel.value} 暂无可用数据`),
   },
   {
     key: 'guardCount',
@@ -372,7 +461,7 @@ const STAT_CARDS = computed<StatCardDef[]>(() => [
   },
 ])
 
-// ---- 礼物明细列表：按礼物名分组，独立于维度切换，固定看"今天" ----
+// ---- 礼物明细列表：按礼物名分组，跟随选中日期，固定用 by=day ----
 const giftBreakdownColumns: DataTableColumns<GiftBreakdownRow> = [
   { title: '礼物名', key: 'giftName' },
   { title: '数量', key: 'count' },
@@ -382,29 +471,6 @@ const giftBreakdownColumns: DataTableColumns<GiftBreakdownRow> = [
     render: (row) => formatBattery(row.coins),
   },
 ]
-
-// ---- 分桶明细表：维度切换真实效果的直接证据 ----
-//
-// 用 computed 而不是常量：第一列表头要随维度在「日期」/「场次」之间切换，
-// 写成常量的话只会在组件初始化那一刻求值一次，切维度后表头不会跟着变。
-const bucketColumns = computed<DataTableColumns<StatsBucket>>(() => [
-  { title: dimension.value === 'day' ? '日期' : '场次', key: 'bucket' },
-  { title: '弹幕数', key: 'danmakuCount' },
-  { title: '进房人数', key: 'enterCount' },
-  { title: '礼物种类', key: 'giftKinds' },
-  { title: '礼物数量', key: 'giftCount' },
-  { title: '上舰数', key: 'guardCount' },
-  {
-    title: '直播时长',
-    key: 'liveSeconds',
-    render: (row) => formatDuration(row.liveSeconds),
-  },
-  {
-    title: '盲盒盈亏',
-    key: 'blindBoxProfit',
-    render: (row) => formatBlindBoxProfit(row.blindBoxProfit),
-  },
-])
 
 // ---- 可选的「最近活动预览」：明确标注为采样，不是统计 ----
 //
@@ -493,8 +559,9 @@ const previewColumns: DataTableColumns<PreviewRow> = [
         下面的数字来自后端聚合接口（<code>GET /api/bindings/{id}/stats</code>），是真实统计值，
         不再是占位符——包括「盲盒盈亏」也是真实数字了。另外两点务必留意：①「直播时长」在这批
         改动之前的历史数据里没有开播/下播事件，更早的日子会显示 0，<strong>不代表当时没开播</strong
-        >；②「礼物种类」是各分桶种类数之和，同一件礼物跨多个日子/场次出现会被重复计入，不是全局
-        去重后的精确值。下面每张卡片自己也带着一行小字说明，不必悬停就能看到。
+        >；②「礼物种类」是各分桶种类数之和，同一件礼物如果在选中日期内的多场直播都出现过（「按
+        场次」维度），会被重复计入，不是全局去重后的精确值。下面每张卡片自己也带着一行小字说明，
+        不必悬停就能看到。
       </NAlert>
 
       <div class="dimension-row">
@@ -507,9 +574,14 @@ const previewColumns: DataTableColumns<PreviewRow> = [
             :label="opt.label"
           />
         </NRadioGroup>
+        <!-- 日期选择器：真机反馈明确要求用日历控件而不是下拉菜单——日期
+             一多下拉会拖得很长。不可清空：选中日期是本页全部卡片/明细
+             共同依赖的查询条件，允许清空会让"清空之后看什么"变成一个
+             没有答案的状态，不如干脆不允许出现。 -->
+        <NDatePicker v-model:value="selectedDate" type="date" :clearable="false" />
         <span class="dimension-hint">
-          切换维度会重新向后端请求聚合数据（<code>by={{ dimension }}</code
-          >）， 上面的卡片与下面的明细表都会跟着变
+          切换维度或换一个日期都会重新向后端请求聚合数据（<code>by={{ dimension }}</code
+          >），上面的卡片会跟着变
         </span>
       </div>
 
@@ -537,23 +609,12 @@ const previewColumns: DataTableColumns<PreviewRow> = [
             <div class="stat-hint">{{ card.hint }}</div>
           </NCard>
         </div>
-
-        <NCard title="分桶明细" class="bucket-card" size="small">
-          <NDataTable
-            :columns="bucketColumns"
-            :data="statsBuckets"
-            :row-key="(row: StatsBucket) => row.bucket"
-            :bordered="false"
-            size="small"
-          />
-          <NEmpty v-if="statsBuckets.length === 0" description="没有数据" size="small" />
-        </NCard>
       </NSpin>
 
-      <!-- 礼物明细列表：独立于上面的维度切换，固定按"今天"请求，
-           见脚本头部 P6 任务 5 的说明。 -->
-      <NSpin :show="loadingToday">
-        <p v-if="todayError" class="stats-error">{{ todayError }}</p>
+      <!-- 礼物明细列表：跟随选中日期，固定用 by=day 请求（不随维度
+           切换），见脚本头部 P7 段落的说明。 -->
+      <NSpin :show="loadingDayExtras">
+        <p v-if="dayExtrasError" class="stats-error">{{ dayExtrasError }}</p>
         <NCard title="礼物" class="gift-breakdown-card" size="small">
           <NDataTable
             :columns="giftBreakdownColumns"
@@ -643,9 +704,6 @@ const previewColumns: DataTableColumns<PreviewRow> = [
 .stats-error {
   color: var(--n-error-color, #d03050);
   margin-bottom: 12px;
-}
-.bucket-card {
-  margin-bottom: 16px;
 }
 .gift-breakdown-card {
   margin-bottom: 16px;

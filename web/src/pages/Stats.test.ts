@@ -1,7 +1,15 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
-import { NRadioGroup, NStatistic } from 'naive-ui'
+import { NDatePicker, NRadioGroup, NStatistic } from 'naive-ui'
+
+// 统计页现在按"浏览器本地自然天"解释日期选择器（见 Stats.vue 文件头
+// "时区"那段说明），把测试进程的时区钉死成生产部署时区（东八区）——不这样
+// 做的话，测试在不同开发机/CI 上跑，`new Date()` 的本地日历日会因为宿主
+// 时区不同而算出不同的 since/until，同一份测试代码在两台机器上一个绿一个
+// 红，而且不是本页逻辑的问题。必须在下面动态 import 之前、任何 Date
+// 计算发生之前设置。
+process.env.TZ = 'Asia/Shanghai'
 
 const { default: Stats } = await import('./Stats.vue')
 const { useBindingsStore } = await import('@/stores/bindings')
@@ -104,36 +112,32 @@ function giftRow(overrides: Partial<Record<string, unknown>> = {}) {
  * `Response.body` 只能读一次——每次调用都要返回一个新的 Response 实例，
  * 不能复用同一个对象（否则第二次 fetch 读到的是已经耗尽的流）。
  *
- * `statsFor` 按 URL 里的 `by=` 参数区分按日/按场次返回不同数据，
- * 默认两个维度都返回空数组。
+ * 按 URL 里的 `by=` 参数区分按日/按场次返回不同数据，默认两个维度都
+ * 返回空数组。**P7 起不再单独区分"今日"请求**：主维度卡片与"当日电池
+ * 到账"卡片现在都跟随选中日期，当维度是 `day` 时两者发出的是完全相同的
+ * `by=day&since=...&until=...` 请求（这是设计使然，见 Stats.vue 里
+ * loadStats/loadDayExtras 的注释），所以只按 `by` 区分就足够、也更贴近
+ * 真实后端的行为——后端从不关心调用方是不是"当日卡片"发的请求。
  */
 function stubFetch(
   opts: {
     activity?: unknown[]
     statsByDay?: unknown[]
     statsBySession?: unknown[]
-    /** 「今日电池到账」卡片用的 GET .../stats?by=day&since=...&until=... */
-    statsToday?: unknown[]
     /** 「礼物」明细列表用的 GET .../gifts?since=...&until=... */
-    giftsToday?: unknown[]
+    giftsForDay?: unknown[]
   } = {},
 ) {
   const activity = opts.activity ?? []
   const statsByDay = opts.statsByDay ?? []
   const statsBySession = opts.statsBySession ?? []
-  const statsToday = opts.statsToday ?? []
-  const giftsToday = opts.giftsToday ?? []
+  const giftsForDay = opts.giftsForDay ?? []
   const f = vi.fn().mockImplementation((url: string) => {
     if (url.startsWith('/api/bindings/1/gifts')) {
-      return Promise.resolve(ok(giftsToday))
+      return Promise.resolve(ok(giftsForDay))
     }
     if (url.startsWith('/api/bindings/1/stats')) {
       const parsed = new URL(url, 'http://localhost')
-      // 「今日」这两个请求带 since，维度切换那份不带——用这个区分，
-      // 而不是另起一个 URL 前缀，因为后端接口本来就是同一个。
-      if (parsed.searchParams.has('since')) {
-        return Promise.resolve(ok(statsToday))
-      }
       const by = parsed.searchParams.get('by')
       return Promise.resolve(ok(by === 'session' ? statsBySession : statsByDay))
     }
@@ -149,6 +153,13 @@ function stubFetch(
 describe('Stats 页', () => {
   beforeEach(() => {
     vi.unstubAllGlobals()
+  })
+
+  // 部分测试用 vi.useFakeTimers()/vi.setSystemTime() 固定"现在"来验证
+  // 日期选择器的默认值与时区换算——不在每个用例里手动复位会让伪造的系统
+  // 时间泄漏到后面的测试，useRealTimers 在没用过假时钟时也是安全的空操作。
+  afterEach(() => {
+    vi.useRealTimers()
   })
 
   it('未选择直播间时提示先选择，不请求任何数据', async () => {
@@ -397,8 +408,8 @@ describe('Stats 页', () => {
 
     const values = wrapper.findAllComponents(NStatistic).map((c) => c.props('value'))
     // 8 张卡片：6 张原有真实数字 + 1 张一直悬空的盲盒盈亏 + P6 任务 5
-    // 新增的「今日电池到账」，全部应为占位符——今日范围的 stats 请求
-    // 默认也返回空数组（stubFetch 的 statsToday 未传时默认 []）。
+    // 新增的「当日电池到账」，全部应为占位符——「当日电池到账」固定用
+    // by=day 请求，跟主维度请求命中的是同一份（空）statsByDay 数据。
     expect(values).toEqual(['—', '—', '—', '—', '—', '—', '—', '—'])
   })
 
@@ -422,8 +433,21 @@ describe('Stats 页', () => {
         .find((call) => String(call[0]).startsWith('/api/bindings/1/stats'))
       expect(String(lastStatsCall![0])).toContain('by=session')
 
-      const values = wrapper.findAllComponents(NStatistic).map((c) => c.props('value'))
-      expect(values.every((v) => v === '—')).toBe(true)
+      const cards = wrapper
+        .findAllComponents(NStatistic)
+        .map((c) => ({ label: c.props('label'), value: c.props('value') }))
+
+      // 7 张跟随「按场次」维度的卡片必须全部占位符——这是 by=session
+      // 空分桶时一直守住的行为，日期选择器加进来之后不该变。
+      const dimensionCards = cards.filter((c) => c.label !== '当日电池到账')
+      expect(dimensionCards.every((c) => c.value === '—')).toBe(true)
+
+      // 「当日电池到账」卡片固定用 by=day 请求（statsByDay 非空，
+      // danmakuCount:10 那份数据），不受「按场次」维度切到空分桶影响——
+      // 这正是"当日卡片与维度切换解耦"设计要验证的地方：如果哪天不小心
+      // 把这张卡片也接到了 dimension 上，这条断言会先变红。
+      const dayCard = cards.find((c) => c.label === '当日电池到账')
+      expect(dayCard?.value).not.toBe('—')
 
       // 页面级说明必须点名 live_start/live_stop，而不是一句笼统的"没有数据"
       expect(wrapper.text()).toContain('live_start')
@@ -444,7 +468,7 @@ describe('Stats 页', () => {
     expect(values[0]).toBe('5') // 弹幕数卡片：真实数字，不是占位符
   })
 
-  it('维度切换（按场次/按日）会重新请求聚合接口，带上对应的 by 参数，且明细表跟着变', async () => {
+  it('维度切换（按场次/按日）会重新请求聚合接口，带上对应的 by 参数，卡片数字跟着变', async () => {
     setupStore()
     const f = stubFetch({
       statsByDay: [statsBucket({ bucket: '2026-08-01', danmakuCount: 10 })],
@@ -468,59 +492,71 @@ describe('Stats 页', () => {
       .find((call) => String(call[0]).startsWith('/api/bindings/1/stats'))
     expect(String(lastStatsCall![0])).toContain('by=session')
 
-    // 卡片数字与明细表都要变成「按场次」的数据
+    // 卡片数字要变成「按场次」的数据——P7 去掉了分桶明细表，维度切换是
+    // 否生效现在只能靠卡片数字本身验证。
     expect(wrapper.find('.stats-grid').text()).toContain('20')
-    expect(wrapper.find('.bucket-card').text()).toContain('session-1')
+  })
+
+  it('P7：页面不再渲染「分桶明细」表', async () => {
+    setupStore()
+    stubFetch({ statsByDay: [statsBucket({ bucket: '2026-08-01', danmakuCount: 10 })] })
+    const wrapper = mount(Stats)
+    await flushPromises()
+
+    expect(wrapper.find('.bucket-card').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('分桶明细')
   })
 })
 
-// ---- P6 任务 5：今日电池到账 + 礼物明细列表 ----
-describe('Stats 页：今日电池到账 + 礼物明细列表', () => {
-  it('选中直播间后，除了维度统计接口，还会额外请求今日范围的 stats 与 gifts 接口', async () => {
+// ---- P6 任务 5：当日电池到账 + 礼物明细列表（P7 起跟随日期选择器） ----
+describe('Stats 页：当日电池到账 + 礼物明细列表', () => {
+  it('选中直播间后，会发出两个 /stats 请求（主维度 + 当日卡片）与一个 /gifts 请求，均带 since/until', async () => {
     setupStore()
     const f = stubFetch({ statsByDay: [statsBucket({ danmakuCount: 1 })] })
     mount(Stats)
     await flushPromises()
 
-    const todayStatsCall = f.mock.calls.find((call) => {
-      const url = String(call[0])
-      return url.startsWith('/api/bindings/1/stats') && url.includes('since=')
-    })
-    expect(todayStatsCall, '应该发出带 since 的今日 stats 请求').toBeTruthy()
+    const statsCalls = f.mock.calls.filter((call) =>
+      String(call[0]).startsWith('/api/bindings/1/stats'),
+    )
+    // 主维度请求（dimension=day 时是 by=day）与「当日卡片」请求（固定
+    // by=day）是两个独立发出的调用，即便 dimension 恰好也是 day、参数
+    // 因此完全相同——两者用途本来就是解耦的，不能因为参数撞了就合并成
+    // 一次请求去验证，那样测不出"当日卡片确实有自己独立的请求路径"。
+    expect(statsCalls.length).toBeGreaterThanOrEqual(2)
+    expect(statsCalls.every((call) => String(call[0]).includes('since='))).toBe(true)
 
     const giftsCall = f.mock.calls.find((call) => String(call[0]).startsWith('/api/bindings/1/gifts'))
     expect(giftsCall, '应该发出 /gifts 请求').toBeTruthy()
     expect(String(giftsCall![0])).toContain('since=')
   })
 
-  it('「今日电池到账」卡片显示 giftCoins 换算后的电池数（除以 100，不换算成元）', async () => {
+  it('「当日电池到账」卡片显示 giftCoins 换算后的电池数（除以 100，不换算成元）', async () => {
     setupStore()
     // 50000（1/100 电池）= 500 电池——注意这是"电池"不是"元"，不要
     // 跟盲盒盈亏卡片的 /1000（元）换算搞混。
-    stubFetch({ statsToday: [statsBucket({ giftCoins: 50000 })] })
+    stubFetch({ statsByDay: [statsBucket({ giftCoins: 50000 })] })
     const wrapper = mount(Stats)
     await flushPromises()
 
     expect(wrapper.find('.stats-grid').text()).toContain('500.00 电池')
   })
 
-  it('今日没有任何数据时「今日电池到账」显示占位符，不是 0', async () => {
+  it('选中日期没有任何数据时「当日电池到账」显示占位符，不是 0', async () => {
     setupStore()
-    stubFetch({ statsToday: [] })
+    stubFetch({ statsByDay: [] })
     const wrapper = mount(Stats)
     await flushPromises()
 
-    const card = wrapper
-      .findAll('.stat-card')
-      .find((c) => c.text().includes('今日电池到账'))
-    expect(card, '应该有「今日电池到账」这张卡片').toBeTruthy()
+    const card = wrapper.findAll('.stat-card').find((c) => c.text().includes('当日电池到账'))
+    expect(card, '应该有「当日电池到账」这张卡片').toBeTruthy()
     expect(card!.text()).toContain('—')
   })
 
   it('「礼物」明细列表按礼物名分组显示数量与电池数（免费礼物电池数为 0）', async () => {
     setupStore()
     stubFetch({
-      giftsToday: [
+      giftsForDay: [
         giftRow({ giftName: '辣条', count: 3, coins: 150000 }),
         giftRow({ giftName: '小心心', count: 5, coins: 0 }),
       ],
@@ -541,7 +577,7 @@ describe('Stats 页：今日电池到账 + 礼物明细列表', () => {
 
   it('「礼物」明细列表为空时显示空状态提示，不是一张空表格', async () => {
     setupStore()
-    stubFetch({ giftsToday: [] })
+    stubFetch({ giftsForDay: [] })
     const wrapper = mount(Stats)
     await flushPromises()
 
@@ -550,7 +586,7 @@ describe('Stats 页：今日电池到账 + 礼物明细列表', () => {
     expect(list.text()).toContain('没有数据')
   })
 
-  it('切换绑定后重新请求今日电池到账与礼物明细', async () => {
+  it('切换绑定后重新请求当日电池到账与礼物明细', async () => {
     setActivePinia(createPinia())
     const bindings = useBindingsStore()
     const 绑定乙 = { ...绑定, id: 2, roomId: '456' }
@@ -576,6 +612,84 @@ describe('Stats 页：今日电池到账 + 礼物明细列表', () => {
     await flushPromises()
     expect(wrapper.find('.gift-breakdown-card').text()).not.toContain('甲房间礼物')
     expect(wrapper.find('.gift-breakdown-card').text()).toContain('乙房间礼物')
+  })
+})
+
+// ---- P7：统计页改用日期选择器（真机反馈二次返工） ----
+describe('Stats 页：日期选择器', () => {
+  it('用日历控件（n-date-picker）而不是下拉菜单，且不可清空', async () => {
+    setupStore()
+    stubFetch({ statsByDay: [statsBucket()] })
+    const wrapper = mount(Stats)
+    await flushPromises()
+
+    const picker = wrapper.findComponent(NDatePicker)
+    expect(picker.exists(), '统计维度那一行应该有 NDatePicker').toBe(true)
+    expect(picker.props('type')).toBe('date')
+    // 不可清空——见 Stats.vue 里 NDatePicker 旁边注释：选中日期是全部
+    // 卡片/明细共同依赖的查询条件，不该允许被清成"没有选中任何一天"。
+    expect(picker.props('clearable')).toBe(false)
+  })
+
+  // ---- 核心：默认选中"今天"，且换算成 since/until 时用的是本地自然天，
+  // 不是 UTC 自然天 ----
+  //
+  // 用 vi.setSystemTime 把"现在"钉死在北京时间 2026-08-04 10:00——这个
+  // 时刻换算成 UTC 是 2026-08-04 02:00，如果代码不小心按 UTC 自然天来
+  // 解释"今天"（比如把 getFullYear/getMonth/getDate 误写成对应的 UTC
+  // 版本），since 会变成 2026-08-04T00:00:00.000Z 而不是期望的
+  // 2026-08-03T16:00:00.000Z——两者相差整整 8 小时，是本页最容易也最不
+  // 该出现的一类错误，这条测试就是钉死正确方向的回归测试。
+  it('默认选中今天，请求的 since/until 是本地自然天换算成的 UTC 边界（不是 UTC 自然天）', async () => {
+    setupStore()
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-08-04T10:00:00+08:00'))
+    const f = stubFetch({ statsByDay: [statsBucket({ danmakuCount: 1 })] })
+    mount(Stats)
+    await flushPromises()
+
+    const statsCall = f.mock.calls.find((call) =>
+      String(call[0]).startsWith('/api/bindings/1/stats'),
+    )
+    expect(statsCall, '应该发出 stats 请求').toBeTruthy()
+    const url = new URL(String(statsCall![0]), 'http://localhost')
+    // 北京时间 8 月 4 日 00:00 = UTC 8 月 3 日 16:00；
+    // 北京时间 8 月 4 日 23:59:59.999 = UTC 8 月 4 日 15:59:59.999。
+    expect(url.searchParams.get('since')).toBe('2026-08-03T16:00:00.000Z')
+    expect(url.searchParams.get('until')).toBe('2026-08-04T15:59:59.999Z')
+  })
+
+  it('换一个日期后，主统计与「礼物」明细都用新日期重新请求（不是继续显示"今天"）', async () => {
+    setupStore()
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-08-04T10:00:00+08:00'))
+    const f = stubFetch({ statsByDay: [statsBucket({ danmakuCount: 1 })] })
+    const wrapper = mount(Stats)
+    await flushPromises()
+    const callsBefore = f.mock.calls.length
+
+    // 选一个本地时区的过去日期：2026-07-20（月份从 0 开始，6 = 7 月）。
+    const picked = new Date(2026, 6, 20).getTime()
+    wrapper.findComponent(NDatePicker).vm.$emit('update:value', picked)
+    await flushPromises()
+
+    expect(f.mock.calls.length).toBeGreaterThan(callsBefore)
+
+    const newCalls = f.mock.calls.slice(callsBefore)
+    const statsCall = newCalls.find((call) => String(call[0]).startsWith('/api/bindings/1/stats'))
+    const giftsCall = newCalls.find((call) => String(call[0]).startsWith('/api/bindings/1/gifts'))
+    expect(statsCall, '换日期后应该重新请求 stats').toBeTruthy()
+    expect(giftsCall, '换日期后应该重新请求 gifts').toBeTruthy()
+
+    const statsUrl = new URL(String(statsCall![0]), 'http://localhost')
+    const giftsUrl = new URL(String(giftsCall![0]), 'http://localhost')
+    // 北京时间 7 月 20 日 00:00 = UTC 7 月 19 日 16:00——不是默认今天
+    // （8 月 4 日）的区间，证明请求真的跟着选中日期换了，不是仍然停在
+    // "今天"上（也就是自检变异 (a)：卡片不跟随选中日期，会在这里变红）。
+    expect(statsUrl.searchParams.get('since')).toBe('2026-07-19T16:00:00.000Z')
+    expect(statsUrl.searchParams.get('until')).toBe('2026-07-20T15:59:59.999Z')
+    expect(giftsUrl.searchParams.get('since')).toBe('2026-07-19T16:00:00.000Z')
+    expect(giftsUrl.searchParams.get('until')).toBe('2026-07-20T15:59:59.999Z')
   })
 })
 
