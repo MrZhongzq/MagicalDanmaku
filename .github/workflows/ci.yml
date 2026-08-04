@@ -4,7 +4,10 @@ name: CI
 on:
   push:
     branches:
-      - master
+      # 默认分支是 main（不是 master——那是从上游 fork 来的名字，已经删掉了）。
+      # 这里写错的代价是静默的：CI 不报错，只是压根不触发，主线看起来「没有
+      # 失败的检查」其实是「没有检查」。
+      - main
       - "refactor/**"
     paths:
       - "server/**"
