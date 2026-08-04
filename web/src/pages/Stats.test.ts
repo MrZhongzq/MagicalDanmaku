@@ -1,18 +1,63 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
-import { NDatePicker, NRadioGroup, NStatistic } from 'naive-ui'
+import { NDatePicker, NRadioGroup, NSelect, NStatistic } from 'naive-ui'
 
-// 统计页现在按"浏览器本地自然天"解释日期选择器（见 Stats.vue 文件头
-// "时区"那段说明），把测试进程的时区钉死成生产部署时区（东八区）——不这样
-// 做的话，测试在不同开发机/CI 上跑，`new Date()` 的本地日历日会因为宿主
-// 时区不同而算出不同的 since/until，同一份测试代码在两台机器上一个绿一个
-// 红，而且不是本页逻辑的问题。必须在下面动态 import 之前、任何 Date
-// 计算发生之前设置。
-process.env.TZ = 'Asia/Shanghai'
+// P7b：不再把测试进程的时区钉死成某个固定值（P7 曾经写死"东八区"，那
+// 正是这次要纠正的错误前提本身——本页现在的日界计算只依赖"日历选中的
+// Y-M-D" + "选择器里显式选中的 IANA 时区"两个量，两者都由测试显式控制，
+// 与运行测试的宿主机实际处于哪个时区无关。刻意不 pin TZ，是为了让这份
+// 测试在任何宿主时区下跑结果都一样——如果哪天代码不小心又开始偷看
+// `process.env.TZ`/宿主本地时区参与计算，这份测试应该会因为在不同宿主
+// 上结果不一致而暴露，而不是靠 pin 住一个值把问题捂住。
+//
+// 需要固定"现在"的用例一律用 `new Date(y, m, d, h, mi)`（本地分量构造）
+// 而不是带 `+08:00` 之类固定偏移的 ISO 字符串——本地分量构造在任何宿主
+// 时区下都会被 `getFullYear`/`getMonth`/`getDate` 原样读回同一组 Y-M-D，
+// 偏移字符串则不会（在非 +08:00 的宿主上读回的日历日会漂移）。
 
 const { default: Stats } = await import('./Stats.vue')
 const { useBindingsStore } = await import('@/stores/bindings')
+
+/**
+ * resolveTz 把一个 IANA 时区名（可能是别名）解析成**当前运行环境**的
+ * 规范拼写。
+ *
+ * **不能在测试里直接写字面量 `'Asia/Kolkata'`**——同一个真实时区在不同
+ * ICU 版本里的规范名可能不同（这套测试环境的 ICU 认的是老拼写
+ * `Asia/Calcutta`，`Asia/Kolkata` 只是它认识的一个别名，不在
+ * `Intl.supportedValuesOf('timeZone')` 返回的规范列表里）。Stats.vue 的
+ * `loadStoredTimezone` 会用规范列表校验存的名字，写字面量别名会被判定
+ * 成"认不出的过期名字"而被拒绝、静默回退到浏览器探测值——不是逻辑错，
+ * 是这条测试自己用了一个在当前平台不算规范的拼写。用同一个 `Intl` API
+ * 现场解析一遍，保证测试在任何 ICU 版本的运行环境下都用平台真正认识的
+ * 那个拼写，不会因为换了 Node/浏览器版本就变红。
+ */
+function resolveTz(name: string): string {
+  return new Intl.DateTimeFormat('en-US', { timeZone: name }).resolvedOptions().timeZone
+}
+
+/**
+ * NON_DEFAULT_TZ 是一个"确定跟浏览器探测到的默认时区不同"的时区名，供
+ * 需要验证"切换时区"这个动作本身的用例使用。
+ *
+ * **不能直接写死 `'Pacific/Auckland'` 当作"切换后的新值"**——这份测试
+ * 就是在真实的新西兰机器上开发的，`Intl.DateTimeFormat().resolvedOptions()
+ * .timeZone` 探测到的默认值本身就是 `Pacific/Auckland`；如果测试选中的
+ * "新值"恰好和默认值撞了，Vue 的 `watch` 不会因为赋值成同一个值而触发
+ * （值没变化），持久化的 `watch(timezone, ...)` 回调根本不会跑，这条
+ * 测试会在这台开发机上"假红"或者靠巧合"假绿"——取决于具体断言写法，
+ * 两种都不可靠。这里现场探测默认值，从候选列表里挑一个确定不同的，
+ * 保证这条测试不管跑在哪台机器上，"切换"这个动作都是一次真正的值变化。
+ */
+const NON_DEFAULT_TZ = (() => {
+  const detected = Intl.DateTimeFormat().resolvedOptions().timeZone
+  const candidate = ['Pacific/Auckland', 'Asia/Kolkata', 'Etc/UTC']
+    .map(resolveTz)
+    .find((tz) => tz !== detected)
+  if (!candidate) throw new Error('挑不出一个跟默认探测值不同的候选时区，测试环境异常')
+  return candidate
+})()
 
 const 绑定: {
   id: number
@@ -149,6 +194,18 @@ function stubFetch(
   vi.stubGlobal('fetch', f)
   return f
 }
+
+// 文件级 hook（不挂在任何一个 describe 下）：每条用例开始前清空
+// localStorage。P7b 新增的 `magicd.statsTimezone` 是持久化状态，一旦某
+// 条用例写入就会一直留在同一个 jsdom 环境里（同一测试文件内的用例共享
+// 一个 localStorage，不会像 pinia store 那样每条用例自动重建）——不清的
+// 话，跑在某条用例之后的其他用例会读到不属于自己的时区偏好，"默认取浏览
+// 器探测值"之类的用例会因为运行顺序不同而忽绿忽红。挂在文件级而不是某个
+// describe 的 beforeEach 里，是因为本文件有好几个平级的 describe 块，
+// 只挂在其中一个保护不到另外几个。
+beforeEach(() => {
+  localStorage.clear()
+})
 
 describe('Stats 页', () => {
   beforeEach(() => {
@@ -526,7 +583,9 @@ describe('Stats 页：当日电池到账 + 礼物明细列表', () => {
     expect(statsCalls.length).toBeGreaterThanOrEqual(2)
     expect(statsCalls.every((call) => String(call[0]).includes('since='))).toBe(true)
 
-    const giftsCall = f.mock.calls.find((call) => String(call[0]).startsWith('/api/bindings/1/gifts'))
+    const giftsCall = f.mock.calls.find((call) =>
+      String(call[0]).startsWith('/api/bindings/1/gifts'),
+    )
     expect(giftsCall, '应该发出 /gifts 请求').toBeTruthy()
     expect(String(giftsCall![0])).toContain('since=')
   })
@@ -631,19 +690,28 @@ describe('Stats 页：日期选择器', () => {
     expect(picker.props('clearable')).toBe(false)
   })
 
-  // ---- 核心：默认选中"今天"，且换算成 since/until 时用的是本地自然天，
-  // 不是 UTC 自然天 ----
+  // ---- 核心：默认选中"今天"，换算成 since/until 时用的是**显式选中的
+  // 统计时区**，不是宿主机/浏览器本地时区 ----
   //
-  // 用 vi.setSystemTime 把"现在"钉死在北京时间 2026-08-04 10:00——这个
-  // 时刻换算成 UTC 是 2026-08-04 02:00，如果代码不小心按 UTC 自然天来
-  // 解释"今天"（比如把 getFullYear/getMonth/getDate 误写成对应的 UTC
-  // 版本），since 会变成 2026-08-04T00:00:00.000Z 而不是期望的
-  // 2026-08-03T16:00:00.000Z——两者相差整整 8 小时，是本页最容易也最不
-  // 该出现的一类错误，这条测试就是钉死正确方向的回归测试。
-  it('默认选中今天，请求的 since/until 是本地自然天换算成的 UTC 边界（不是 UTC 自然天）', async () => {
+  // P7 的等价测试把"现在"钉死在北京时间、断言换算用的是本地时区——那条
+  // 断言建立在"用户在东八区"这个已经被证伪的前提上。P7b 改成参数化：
+  // 时区通过 localStorage 显式指定成 Pacific/Auckland（不是宿主机时区，
+  // 也不是任何写死在生产环境里的值），"现在"用本地分量构造
+  // （`new Date(y, m, d, h, mi)`），这样不管测试实际跑在哪个宿主时区上，
+  // 读回的日历 Y-M-D 都是同一组值——因此这条测试在任何宿主机/CI 上跑
+  // 结果都一样，不依赖"测试机恰好是哪个时区"。
+  //
+  // 8 月处于南半球冬季，Pacific/Auckland 当时是 NZST（+12，不实行夏令
+  // 时的季节），since/until 之间是标准 24 小时——夏令时切换日的场景
+  // 单独在下面的"P7b：统计时区选择器"里用专门的用例覆盖。
+  it('默认选中今天，请求的 since/until 按选中的统计时区换算（不是宿主机本地时区）', async () => {
+    localStorage.setItem('magicd.statsTimezone', 'Pacific/Auckland')
     setupStore()
     vi.useFakeTimers()
-    vi.setSystemTime(new Date('2026-08-04T10:00:00+08:00'))
+    // 本地分量构造："现在"是本地日历的 2026-08-04 10:00，与宿主机实际
+    // 处于哪个时区无关——Stats.vue 内部同样用本地 getter 读回这组分量，
+    // 两边用的是同一套（与时区无关的）Y-M-D，不会因为宿主时区不同而漂移。
+    vi.setSystemTime(new Date(2026, 7, 4, 10, 0, 0))
     const f = stubFetch({ statsByDay: [statsBucket({ danmakuCount: 1 })] })
     mount(Stats)
     await flushPromises()
@@ -653,22 +721,24 @@ describe('Stats 页：日期选择器', () => {
     )
     expect(statsCall, '应该发出 stats 请求').toBeTruthy()
     const url = new URL(String(statsCall![0]), 'http://localhost')
-    // 北京时间 8 月 4 日 00:00 = UTC 8 月 3 日 16:00；
-    // 北京时间 8 月 4 日 23:59:59.999 = UTC 8 月 4 日 15:59:59.999。
-    expect(url.searchParams.get('since')).toBe('2026-08-03T16:00:00.000Z')
-    expect(url.searchParams.get('until')).toBe('2026-08-04T15:59:59.999Z')
+    // Pacific/Auckland 8 月 4 日 00:00（NZST，+12）= UTC 8 月 3 日 12:00；
+    // 8 月 4 日 23:59:59.999 = UTC 8 月 4 日 11:59:59.999。
+    expect(url.searchParams.get('since')).toBe('2026-08-03T12:00:00.000Z')
+    expect(url.searchParams.get('until')).toBe('2026-08-04T11:59:59.999Z')
   })
 
   it('换一个日期后，主统计与「礼物」明细都用新日期重新请求（不是继续显示"今天"）', async () => {
+    localStorage.setItem('magicd.statsTimezone', resolveTz('Asia/Kolkata'))
     setupStore()
     vi.useFakeTimers()
-    vi.setSystemTime(new Date('2026-08-04T10:00:00+08:00'))
+    vi.setSystemTime(new Date(2026, 7, 4, 10, 0, 0))
     const f = stubFetch({ statsByDay: [statsBucket({ danmakuCount: 1 })] })
     const wrapper = mount(Stats)
     await flushPromises()
     const callsBefore = f.mock.calls.length
 
-    // 选一个本地时区的过去日期：2026-07-20（月份从 0 开始，6 = 7 月）。
+    // 选一个过去日期：2026-07-20（月份从 0 开始，6 = 7 月），同样用本地
+    // 分量构造，与宿主机时区无关。
     const picked = new Date(2026, 6, 20).getTime()
     wrapper.findComponent(NDatePicker).vm.$emit('update:value', picked)
     await flushPromises()
@@ -683,13 +753,226 @@ describe('Stats 页：日期选择器', () => {
 
     const statsUrl = new URL(String(statsCall![0]), 'http://localhost')
     const giftsUrl = new URL(String(giftsCall![0]), 'http://localhost')
-    // 北京时间 7 月 20 日 00:00 = UTC 7 月 19 日 16:00——不是默认今天
-    // （8 月 4 日）的区间，证明请求真的跟着选中日期换了，不是仍然停在
-    // "今天"上（也就是自检变异 (a)：卡片不跟随选中日期，会在这里变红）。
-    expect(statsUrl.searchParams.get('since')).toBe('2026-07-19T16:00:00.000Z')
-    expect(statsUrl.searchParams.get('until')).toBe('2026-07-20T15:59:59.999Z')
-    expect(giftsUrl.searchParams.get('since')).toBe('2026-07-19T16:00:00.000Z')
-    expect(giftsUrl.searchParams.get('until')).toBe('2026-07-20T15:59:59.999Z')
+    // Asia/Kolkata（+5:30，非整点偏移）7 月 20 日 00:00 = UTC 7 月 19 日
+    // 18:30——不是默认今天（8 月 4 日）的区间，证明请求真的跟着选中日期
+    // 换了，不是仍然停在"今天"上（自检变异 (a)：卡片不跟随选中日期，
+    // 会在这里变红）。分钟位是 30 而不是 00，顺带验证了非整点偏移
+    // （用户提到的 +5:45 尼泊尔场景的姊妹案例）没有被四舍五入成整点。
+    expect(statsUrl.searchParams.get('since')).toBe('2026-07-19T18:30:00.000Z')
+    expect(statsUrl.searchParams.get('until')).toBe('2026-07-20T18:29:59.999Z')
+    expect(giftsUrl.searchParams.get('since')).toBe('2026-07-19T18:30:00.000Z')
+    expect(giftsUrl.searchParams.get('until')).toBe('2026-07-20T18:29:59.999Z')
+  })
+})
+
+/**
+ * timezoneSelect 从挂载的 Stats 组件里精确定位"统计时区"那一个 NSelect。
+ *
+ * **不能直接 `wrapper.findComponent(NSelect)`**——页头的 `BindingSelector`
+ * 子组件自己也用 NSelect 选账号/直播间，且在 DOM 树里排在时区选择器
+ * 前面，`findComponent` 找的是第一个匹配，会精确地拿到*错误*的那一个
+ * （症状很隐蔽：拿到的 `options`/`value` 是绑定列表的，不是时区的，
+ * 断言会以一种看似合理但完全对不上号的方式失败）。用"选项数量上百"这个
+ * 只有时区选择器才有的特征来筛，比新增一个只服务于测试的 DOM class 更
+ * 直接复用已经验证过的语义（IANA 规范时区名有 400+ 个，测试里出现的
+ * 绑定列表最多几条，量级差两个数量级，不会混淆）。
+ */
+function timezoneSelect(wrapper: ReturnType<typeof mount>) {
+  const found = wrapper
+    .findAllComponents(NSelect)
+    .find(
+      (s) => Array.isArray(s.props('options')) && (s.props('options') as unknown[]).length > 100,
+    )
+  if (!found) throw new Error('没有找到时区选择器（选项数超过 100 的 NSelect）')
+  return found
+}
+
+// ---- P7b：统计时区必须显式可选（纠正 P7"按浏览器本地自然天"的错误前提） ----
+//
+// 用户 2026-08-04 指出：P7 把"猜服务器时区"换成了"猜浏览器时区"，仍然是
+// 猜——部署机、看统计的人、主播本人可能落在三个不同时区（他本人在 +12
+// 区），任何隐式推断都会在某些组合下把一整天的数据算错。这里的用例覆盖
+// 四件事：①选择器存在且默认值可见、可改；②选中值持久化到 localStorage；
+// ③换时区真的改变请求的 since/until（不是摆设，也不是偷偷退回宿主本地
+// 时区）；④夏令时切换日用 IANA 时区能算对、固定偏移必错——专门验证这一
+// 点是为了在"改用固定偏移代替 IANA"这类回退变异下让测试变红。
+describe('Stats 页：统计时区选择器', () => {
+  it('存在一个可见、可编辑的时区选择器，默认值等于浏览器探测到的时区', async () => {
+    setupStore()
+    stubFetch({ statsByDay: [statsBucket()] })
+    const wrapper = mount(Stats)
+    await flushPromises()
+
+    const select = timezoneSelect(wrapper)
+    expect(select.exists(), '统计维度那一行应该有时区选择器（NSelect）').toBe(true)
+    expect(select.props('clearable')).toBe(false)
+    // 默认值必须等于浏览器探测结果——这里不写死具体是哪个时区名（写死
+    // 就是重犯 P7 的错，把测试也绑死在一个特定时区上），而是现场用同一
+    // 个标准 API 算一遍期望值，两边算法一致即代表"确实用了探测结果"。
+    expect(select.props('value')).toBe(Intl.DateTimeFormat().resolvedOptions().timeZone)
+    // 界面上真的显示出这个时区名文本，不是只存在 props 里用户看不见——
+    // 这是"默认值要可见"这条硬性要求的直接落地。
+    expect(wrapper.text()).toContain(Intl.DateTimeFormat().resolvedOptions().timeZone)
+  })
+
+  it('选项来自 Intl.supportedValuesOf("timeZone")，不是手写的固定偏移/整点范围表', async () => {
+    setupStore()
+    stubFetch({ statsByDay: [statsBucket()] })
+    const wrapper = mount(Stats)
+    await flushPromises()
+
+    const options = timezoneSelect(wrapper).props('options') as Array<{
+      label: string
+      value: string
+    }>
+    const expected = Intl.supportedValuesOf('timeZone')
+    // 数量、内容都跟平台给出的规范时区名列表完全一致——如果实现改成了
+    // 手写一份"-13 到 +12"或者只含整点偏移的列表，这里的数量/内容会对
+    // 不上，测试会红。
+    expect(options.map((o) => o.value)).toEqual(expected)
+    // 顺带确认覆盖了非整点偏移与南半球夏令时区——不是巧合，是
+    // Intl.supportedValuesOf 天然给出的完整列表的一部分。
+    expect(options.some((o) => o.value === 'Pacific/Auckland')).toBe(true)
+  })
+
+  it('切换时区会持久化到 localStorage，刷新（重新挂载）后记住选择', async () => {
+    setupStore()
+    stubFetch({ statsByDay: [statsBucket()] })
+    const wrapper = mount(Stats)
+    await flushPromises()
+
+    timezoneSelect(wrapper).vm.$emit('update:value', NON_DEFAULT_TZ)
+    await flushPromises()
+    expect(localStorage.getItem('magicd.statsTimezone')).toBe(NON_DEFAULT_TZ)
+
+    // 重新挂载模拟"刷新页面"——不能每次进页面都要重选一次。
+    const wrapper2 = mount(Stats)
+    await flushPromises()
+    expect(timezoneSelect(wrapper2).props('value')).toBe(NON_DEFAULT_TZ)
+  })
+
+  it('localStorage 里存的是当前 Intl 不认识的过期时区名时，回退到浏览器探测值而不是直接用坏值', async () => {
+    localStorage.setItem('magicd.statsTimezone', 'Not/A_Real_Timezone')
+    setupStore()
+    stubFetch({ statsByDay: [statsBucket()] })
+    const wrapper = mount(Stats)
+    await flushPromises()
+
+    expect(timezoneSelect(wrapper).props('value')).toBe(
+      Intl.DateTimeFormat().resolvedOptions().timeZone,
+    )
+  })
+
+  // ---- 自检变异 (a)：忽略选中时区、退回浏览器/宿主本地时区 ----
+  //
+  // 同一个日历日、同一台"宿主机"，只换选择器里的时区值，请求的 since
+  // 必须跟着变。如果实现偷偷改回读宿主本地时区（不管选择器选了什么都
+  // 用同一个值），这两次请求会得到相同的 since，下面的 not.toBe 断言
+  // 会变红。
+  it('同一天，切换时区后请求的 since/until 跟着变——不会忽略选择器退回宿主本地时区', async () => {
+    setupStore()
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date(2026, 7, 4, 10, 0, 0))
+    const f = stubFetch({ statsByDay: [statsBucket({ danmakuCount: 1 })] })
+    const wrapper = mount(Stats)
+    await flushPromises()
+
+    timezoneSelect(wrapper).vm.$emit('update:value', 'Pacific/Auckland')
+    await flushPromises()
+    const afterAuckland = [...f.mock.calls]
+      .reverse()
+      .find((call) => String(call[0]).startsWith('/api/bindings/1/stats'))
+    const sinceAuckland = new URL(String(afterAuckland![0]), 'http://localhost').searchParams.get(
+      'since',
+    )
+
+    timezoneSelect(wrapper).vm.$emit('update:value', 'Asia/Kolkata')
+    await flushPromises()
+    const afterKolkata = [...f.mock.calls]
+      .reverse()
+      .find((call) => String(call[0]).startsWith('/api/bindings/1/stats'))
+    const sinceKolkata = new URL(String(afterKolkata![0]), 'http://localhost').searchParams.get(
+      'since',
+    )
+
+    // 日历日全程没变（选择器只换了时区，没换日期），Pacific/Auckland
+    // （+12，8 月无夏令时）与 Asia/Kolkata（+5:30）对同一个日历日
+    // （2026-08-04）算出的 since 因为偏移不同而必然不同——如果实现忽略
+    // 了选中时区、退回宿主本地时区，两次切换后的 since 会变成同一个值
+    // （宿主机自己的时区换算结果），下面两条断言至少有一条会先变红。
+    expect(sinceAuckland).toBe('2026-08-03T12:00:00.000Z')
+    expect(sinceKolkata).toBe('2026-08-03T18:30:00.000Z')
+    expect(sinceAuckland).not.toBe(sinceKolkata)
+  })
+
+  // ---- 核心：夏令时切换日必须用 IANA 时区规则重新算"次日零点"，不能假设
+  // 固定偏移或固定 24 小时 ----
+  //
+  // Pacific/Auckland 2026 年的春季夏令时切换（NZST +12 → NZDT +13）发生
+  // 在 9 月 27 日凌晨——用 Intl 实测确认过这个日期（见开发记录），不是
+  // 猜的。选中这一天，本地 00:00 到次日 00:00 只有 23 小时，因为切换
+  // 当天凌晨 2 点直接跳到 3 点。如果实现改成"固定 +12 偏移"或者"加
+  // 24*60*60*1000 毫秒"，算出来的 until 会晚 1 小时——这条断言就是钉死
+  // 正确值，变异测试时把 zonedTimeToUtc 换成固定偏移版本，这里必须变红。
+  it('夏令时春季切换日（跳过一小时，全天只有 23 小时）：until 比"固定偏移"算法早 1 小时', async () => {
+    localStorage.setItem('magicd.statsTimezone', 'Pacific/Auckland')
+    setupStore()
+    const f = stubFetch({ statsByDay: [statsBucket({ danmakuCount: 1 })] })
+    const wrapper = mount(Stats)
+    await flushPromises()
+
+    // 2026-09-27（月份从 0 开始，8 = 9 月）。
+    const picked = new Date(2026, 8, 27).getTime()
+    wrapper.findComponent(NDatePicker).vm.$emit('update:value', picked)
+    await flushPromises()
+
+    const statsCall = [...f.mock.calls]
+      .reverse()
+      .find((call) => String(call[0]).startsWith('/api/bindings/1/stats'))
+    const url = new URL(String(statsCall![0]), 'http://localhost')
+    expect(url.searchParams.get('since')).toBe('2026-09-26T12:00:00.000Z')
+    // 固定 +12 偏移会算出 until = 2026-09-27T11:59:59.999Z（晚 1 小时）；
+    // 正确值提前了整整一小时，因为切换当天当地时钟少走了一小时。
+    expect(url.searchParams.get('until')).toBe('2026-09-27T10:59:59.999Z')
+  })
+
+  // ---- 秋季切换日（重复一小时，全天有 25 小时）：与春季对称的另一半 ----
+  //
+  // 只测春季不够——固定偏移方案在两天里一个偏早一个偏晚，只挑一天测有
+  // 可能恰好蒙对（比如实现用了切换后的新偏移，春季碰巧算对、秋季必错，
+  // 反之亦然），两天都测才能排除"蒙对一半"的可能。
+  it('夏令时秋季切换日（重复一小时，全天有 25 小时）：until 比"固定偏移"算法晚 1 小时', async () => {
+    localStorage.setItem('magicd.statsTimezone', 'Pacific/Auckland')
+    setupStore()
+    const f = stubFetch({ statsByDay: [statsBucket({ danmakuCount: 1 })] })
+    const wrapper = mount(Stats)
+    await flushPromises()
+
+    // 2026-04-05（月份从 0 开始，3 = 4 月）。
+    const picked = new Date(2026, 3, 5).getTime()
+    wrapper.findComponent(NDatePicker).vm.$emit('update:value', picked)
+    await flushPromises()
+
+    const statsCall = [...f.mock.calls]
+      .reverse()
+      .find((call) => String(call[0]).startsWith('/api/bindings/1/stats'))
+    const url = new URL(String(statsCall![0]), 'http://localhost')
+    expect(url.searchParams.get('since')).toBe('2026-04-04T11:00:00.000Z')
+    // 固定 +13（切换前用的偏移）会算出 until = 2026-04-05T10:59:59.999Z
+    // （早 1 小时）；正确值因为当地时钟多走了一小时而晚了整整一小时。
+    expect(url.searchParams.get('until')).toBe('2026-04-05T11:59:59.999Z')
+  })
+
+  it('「当日电池到账」卡片提示里会写出当前选中的时区名，不是只在选择器上显示', async () => {
+    localStorage.setItem('magicd.statsTimezone', 'Pacific/Auckland')
+    setupStore()
+    stubFetch({ statsByDay: [statsBucket({ giftCoins: 100 })] })
+    const wrapper = mount(Stats)
+    await flushPromises()
+
+    const card = wrapper.findAll('.stat-card').find((c) => c.text().includes('当日电池到账'))
+    expect(card, '应该有「当日电池到账」这张卡片').toBeTruthy()
+    expect(card!.text()).toContain('Pacific/Auckland')
   })
 })
 

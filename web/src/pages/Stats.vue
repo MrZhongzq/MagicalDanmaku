@@ -79,26 +79,28 @@
  * 场次，日期选择器对这个维度就形同虚设，用户选了日期却看不出任何影响，
  * 是一个用户看不懂的搭配。
  *
- * **时区：选中日期按浏览器本地自然天解释，不是 UTC 自然天**——这是重新
- * 权衡过 P6 遗留决定后的结果，务必别改回去。P6 的 `todayRangeUTC()`
- * 故意选 UTC，理由是要跟 `store.QueryStatsByDay` 的
- * `date_trunc('day', occurred_at)`（数据库会话时区，这套环境下是 UTC）
- * 对齐，避免前后端两个「今天」不是同一个时间窗口——但那条理由只在
- * 「界面上从不出现具体日期，只说抽象的『今天』」这个前提下成立。现在
- * 用户会在日历控件上点一个具体日期（比如「8 月 4 日」），控件画的就是
- * 浏览器本地时区的日历格子，用户脑子里的「8 月 4 日」也是本地时钟——
- * 这台服务器实际部署在东八区（`TZ=Asia/Shanghai`），直播时间表、弹幕
- * 答谢规则都按本地时间安排，如果这里悄悄按 UTC 解释，选中的「8 月 4 日」
- * 会变成本地时间 8 月 4 日早上 8 点到 8 月 5 日早上 8 点：用户选的那天
- * 前 8 小时的数据凭空消失，下一天前 8 小时的数据却混了进来。这种错不会
- * 报错、只会让数字对不上，且界面上没有任何线索能让用户往时区上想。
+ * **P7b：时区必须显式选择，不能再隐式猜（纠正 P7 的错误前提）**。P7 那
+ * 段"按浏览器本地自然天解释"的理由曾经写在这里，现已作废——那条理由的
+ * 论据是"这台服务器实际部署在东八区，用户脑子里的日期也是本地时钟"，
+ * 但这个前提本身就是错的：那是从部署机 `TZ=Asia/Shanghai` **推断**出来
+ * 的，从没核实过。真实情况是用户在 **+12 区**，而且他指出了更根本的
+ * 问题——**部署机、看统计的人、主播本人可能落在三个不同的时区**（他给
+ * 的范围是 -13 到 +12，真实世界的 UTC 偏移实际是 -12 到 +14，外加
+ * +5:45 这类非整点偏移，见下方 IANA 相关说明）。不管选服务器时区还是
+ * 浏览器时区，都只是换了个隐式猜测的对象，在某些组合下必然把一整天的
+ * 数据算错，而且界面上没有任何线索能让用户往时区上想。
  *
- * 改成本地自然天不会破坏跟后端的对齐：`since`/`until` 只是传给后端的两
- * 个时间点（闭区间过滤），后端拿到之后仍然按它自己的 UTC 自然天分桶、
- * GROUP BY 求和——分桶的内部边界画在哪儿不影响"把返回的所有桶加总"这
- * 个用法，本页现在也不再展示单个分桶的标签（分桶明细表已去掉），只用
- * 总和，所以查询窗口没有必要跟后端内部的分桶边界对齐，只需要覆盖用户
- * 真正想看的那 24 小时本地时间。
+ * 正确做法是**界面上加一个显式的时区选择器**（见下方"统计时区"一节），
+ * 选中值决定"一天"从哪到哪，也就是传给后端的 `since`/`until`。日志本身
+ * 保持 UTC 不变——这次只改统计这一层的日界计算，不动 `logging/sink.go`
+ * 或任何写库路径。
+ *
+ * 这不会破坏跟后端的对齐：`since`/`until` 仍然只是传给后端的两个时间点
+ * （闭区间过滤），后端拿到之后仍然按它自己的 UTC 自然天分桶、GROUP BY
+ * 求和——分桶内部边界画在哪儿不影响"把返回的所有桶加总"这个用法，本页
+ * 不展示单个分桶的标签，只用总和，所以查询窗口没有必要跟后端内部的分桶
+ * 边界对齐，只需要覆盖用户真正想看的那 24（或 23/25，见夏令时说明）
+ * 小时。
  */
 import { computed, ref, watch } from 'vue'
 import {
@@ -110,6 +112,7 @@ import {
   NEmpty,
   NRadioButton,
   NRadioGroup,
+  NSelect,
   NSpin,
   NStatistic,
 } from 'naive-ui'
@@ -163,54 +166,181 @@ const DIMENSION_OPTIONS = [
 const dimension = ref<StatsDimension>('day')
 const dimensionLabel = computed(() => (dimension.value === 'day' ? '每日' : '每场'))
 
+// ---- 统计时区：显式选择器，不再隐式猜（P7b） ----
+//
+// 见文件头部"时区"一节的完整背景。这里只放实现：`Intl.supportedValuesOf`
+// 与 `Intl.DateTimeFormat`/`formatToParts` 都是标准 ECMA-402 API，不需要
+// 新依赖。
+
+/**
+ * TIMEZONE_OPTIONS 枚举全部规范 IANA 时区名，供选择器使用。
+ *
+ * **不手写一份"-12 到 +14"的偏移表**：用户给的范围是"-13 到 +12"，但
+ * 真实世界的 UTC 偏移是 -12 到 +14（UTC+14 的 Kiribati、UTC-12 的 Baker
+ * Island 都是真实存在的时区），还有 +5:45（尼泊尔）这类非整点偏移——
+ * 任何手写范围要么漏掉边界，要么假设整点偏移漏掉非整点的。
+ * `Intl.supportedValuesOf('timeZone')` 直接给出运行环境认识的全部规范
+ * 时区名，这个范围自然覆盖，不需要也不应该自己维护。
+ */
+const TIMEZONE_OPTIONS = Intl.supportedValuesOf('timeZone').map((tz) => ({ label: tz, value: tz }))
+
+/**
+ * detectBrowserTimezone 只用来给选择器提供**初始值**，不参与任何日期
+ * 计算——这是与 P7 最本质的区别：P7 把浏览器时区当成事实来源直接用于
+ * 换算，用户在界面上看不见也改不了；这里探测结果会显式画在选择器里，
+ * 猜错了用户能立刻看见并改掉，选择器的取值（`timezone`）才是唯一真正
+ * 参与计算的量。
+ */
+function detectBrowserTimezone(): string {
+  return Intl.DateTimeFormat().resolvedOptions().timeZone
+}
+
+/**
+ * 选中的时区要能记住，不然每次进页面都要重选一次。存 localStorage 而
+ * 不是后端用户偏好——这是"这个人用这台设备/浏览器看统计时习惯站在哪个
+ * 时区"，跟登录账号本身的领域数据无关；页面里其余 UI 偏好（当前选中的
+ * 直播间，见 `stores/bindings.ts` 的 `STORAGE_KEY`）也是这个存法，没有
+ * 理由单为这一项引入新的后端表结构和接口。代价是换一台设备要重选一次，
+ * 可以接受。
+ */
+const TIMEZONE_STORAGE_KEY = 'magicd.statsTimezone'
+
+function loadStoredTimezone(): string | null {
+  const stored = localStorage.getItem(TIMEZONE_STORAGE_KEY)
+  // 存的名字可能是旧版本浏览器认识、但当前运行环境的 Intl 已经不认识的
+  // 别名——用一个后面 formatToParts 会直接抛错的时区名，比"退回去重新
+  // 探测一次"更糟，所以要在 TIMEZONE_OPTIONS 里核实一遍再用。
+  if (stored && TIMEZONE_OPTIONS.some((opt) => opt.value === stored)) return stored
+  return null
+}
+
+/** 统计维度那一行新增的时区选择器；默认值来自浏览器探测，但完全可改。 */
+const timezone = ref<string>(loadStoredTimezone() ?? detectBrowserTimezone())
+
+watch(timezone, (tz) => localStorage.setItem(TIMEZONE_STORAGE_KEY, tz))
+
+/**
+ * getOffsetMs 返回某个 UTC 时刻在指定 IANA 时区下的偏移量（毫秒，东正
+ * 西负）。
+ *
+ * 做法：把这个 UTC 时刻格式化成目标时区的挂钟读数，再把这组读数当成
+ * "UTC 时刻"重新解析一遍，两者之差就是偏移——不依赖任何时区数据库或
+ * 新依赖，纯用 `Intl.DateTimeFormat.formatToParts` 就能算出任意 IANA
+ * 时区在任意时刻的偏移，天然支持夏令时（同一时区不同季节偏移不同）与
+ * 非整点偏移（如 +5:45），这正是不选固定偏移方案的原因。
+ */
+function getOffsetMs(timeZone: string, instant: Date): number {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    hourCycle: 'h23',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  }).formatToParts(instant)
+  const map: Record<string, string> = {}
+  for (const p of parts) if (p.type !== 'literal') map[p.type] = p.value
+  // hourCycle: 'h23' 的午夜理论上是 '00'，这里防一手极端 Intl 实现把
+  // 它输出成 '24' 的情况，不让 Date.UTC 把它算进下一天。
+  const hour = map.hour === '24' ? 0 : Number(map.hour)
+  const asIfUtc = Date.UTC(
+    Number(map.year),
+    Number(map.month) - 1,
+    Number(map.day),
+    hour,
+    Number(map.minute),
+    Number(map.second),
+  )
+  return asIfUtc - instant.getTime()
+}
+
+/**
+ * zonedTimeToUtc 把"某个 IANA 时区里的一组挂钟读数"换算成对应的 UTC
+ * 时刻。
+ *
+ * 先假设这组读数本身就是 UTC，得到一个初始猜测；用猜测时刻去查目标
+ * 时区当时的偏移，减掉偏移得到更接近真实的 UTC 时刻；因为猜测点与真实
+ * 时刻之间可能恰好跨过一次夏令时切换（切换前后偏移不同），再用修正后
+ * 的时刻重新查一次偏移做第二次修正——两轮足以覆盖"要算的挂钟时刻恰好
+ * 落在切换边界附近"的情况，这里只用于算"某天 00:00:00"，真正有歧义的
+ * 只是切换当天的一两个小时，不影响日界计算。
+ */
+function zonedTimeToUtc(
+  year: number,
+  month: number,
+  day: number,
+  hour: number,
+  minute: number,
+  second: number,
+  ms: number,
+  timeZone: string,
+): Date {
+  const guess = Date.UTC(year, month - 1, day, hour, minute, second, ms)
+  const offset1 = getOffsetMs(timeZone, new Date(guess))
+  const offset2 = getOffsetMs(timeZone, new Date(guess - offset1))
+  return new Date(guess - offset2)
+}
+
 // ---- 日期选择器：统计维度那一行新增，替代原来的固定"今天" ----
 
 /**
- * startOfLocalDay 把任意时刻对齐到"当地自然天"的零点。
+ * calendarDayCellFor 读出一个时刻在**浏览器本地时区**下对应的日历
+ * Y-M-D——用 `getFullYear`/`getMonth`/`getDate`，不是 `getUTCFullYear`
+ * 等 UTC 版本。
  *
- * 用 `getFullYear`/`getMonth`/`getDate`（本地时区取值）而不是
- * `getUTCFullYear` 等 UTC 版本——这是本次改动最容易出错的地方，见文件
- * 头部"时区"那段说明：日期选择器画的是浏览器本地时区的日历格子，这里
- * 必须用同一套时区口径，否则选中的日期文本与实际请求的时间窗口会对不上
- * （典型症状：数字看起来"差了大半天"，但界面上完全看不出哪里错了）。
+ * **这不是"统计口径的时区"，只是日历控件本身的限制**：`n-date-picker`
+ * 是个通用日历控件，画格子、解析点击一律按运行它的浏览器本地时区，没有
+ * "按任意 IANA 时区画日历"这个能力——真要做到需要自己重写日历渲染或者
+ * 引入新依赖，两者都超出这次改动范围，也没有必要：日历控件在这里只是
+ * 个"选一个 Y-M-D 三元组"的输入方式，选中的这个三元组该在哪个时区被
+ * 解释成实际的时间范围，是下面 `dayRangeFor` 的事，它接收显式传入的
+ * `timezone` 参数，与这里的浏览器本地时区无关（这也是为什么这个函数
+ * 改了名字，不再叫 `startOfLocalDay`——它现在只服务于日历控件，不再
+ * 冒充"统计用的本地天"）。
  */
-function startOfLocalDay(d: Date): number {
+function calendarDayCellFor(d: Date): { year: number; month: number; day: number } {
+  return { year: d.getFullYear(), month: d.getMonth() + 1, day: d.getDate() }
+}
+
+/** 日历控件取的是本地零点时间戳（仅用于控件自身显示/默认值，不参与统计口径换算）。 */
+function startOfBrowserLocalDay(d: Date): number {
   return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime()
 }
 
 /**
- * dayRangeFor 把"选中日期的本地零点"换算成传给后端的 `[since, until]`
- * 闭区间（后端 since/until 的比较都用 `>=`/`<=`，见
- * `parseActivityTimeRange`，两端都含）。
+ * dayRangeFor 把"日历选中的 Y-M-D"按**显式选中的统计时区**换算成传给
+ * 后端的 `[since, until]` 闭区间（后端 since/until 的比较都用
+ * `>=`/`<=`，见 `parseActivityTimeRange`，两端都含）。
  *
- * **终点用"次日零点减 1 毫秒"，不是"当前时刻 `now`"**——P6 的
- * `todayRangeUTC` 只处理"今天"，用 `now` 当终点也够用（反正数据库里
- * 不会有超过 `now` 的行）。但日期选择器允许挑任意历史日期，如果选了
- * 昨天还用 `now` 当终点，查询窗口会一路开到现在，把今天的数据也算进
- * "昨天"里——必须显式算出所选那一天的最后一刻，不能偷懒复用 `now`。
+ * **终点用"次日零点减 1 毫秒"，不是"当前时刻 `now`"**——日期选择器允许
+ * 挑任意历史日期，如果选了昨天还用 `now` 当终点，查询窗口会一路开到
+ * 现在，把今天的数据也算进"昨天"里，必须显式算出所选那一天在选中时区
+ * 下的最后一刻。
  *
- * 用本地日历"加一天再减 1 毫秒"而不是直接加 `24*60*60*1000` 毫秒，是
- * 为了在有夏令时的时区也不出错（一天可能是 23 或 25 小时）——中国不
- * 实行夏令时，这里差别不大，但这样写不依赖这个前提，换了部署时区也
- * 不用重新审视这段逻辑。
+ * **用 `zonedTimeToUtc(..., day + 1, ...)` 重新按挂钟读数算"次日零点"，
+ * 不是直接加 `24 * 60 * 60 * 1000` 毫秒**——这是本次改动最容易出错、也
+ * 是专门写了夏令时测试守住的地方：同一个 IANA 时区，夏令时切换那天不是
+ * 24 小时（春季"跳过一小时"是 23 小时，秋季"重复一小时"是 25 小时），
+ * 假设固定 86400000 毫秒会在切换日算错一小时的数据。`Date.UTC` 对
+ * `day` 溢出（如月末 31+1）会自动进位到下个月，不需要额外处理跨月。
  */
-function dayRangeFor(dayStartMs: number): { since: string; until: string } {
-  const start = new Date(dayStartMs)
-  const nextDayStart = new Date(start.getFullYear(), start.getMonth(), start.getDate() + 1)
+function dayRangeFor(dayStartMs: number, tz: string): { since: string; until: string } {
+  const { year, month, day } = calendarDayCellFor(new Date(dayStartMs))
+  const start = zonedTimeToUtc(year, month, day, 0, 0, 0, 0, tz)
+  const nextDayStart = zonedTimeToUtc(year, month, day + 1, 0, 0, 0, 0, tz)
   const end = new Date(nextDayStart.getTime() - 1)
   return { since: start.toISOString(), until: end.toISOString() }
 }
 
-/** 统计维度那一行的日期选择器，默认选中今天（本地自然天）。 */
-const selectedDate = ref<number>(startOfLocalDay(new Date()))
+/** 统计维度那一行的日期选择器，默认选中今天（日历控件自身的本地自然天）。 */
+const selectedDate = ref<number>(startOfBrowserLocalDay(new Date()))
 
 /** 选中日期的 `YYYY-MM-DD` 文本，供卡片提示里说明"现在具体在看哪一天"。 */
 const selectedDateLabel = computed(() => {
-  const d = new Date(selectedDate.value)
-  const y = d.getFullYear()
-  const m = String(d.getMonth() + 1).padStart(2, '0')
-  const day = String(d.getDate()).padStart(2, '0')
-  return `${y}-${m}-${day}`
+  const { year, month, day } = calendarDayCellFor(new Date(selectedDate.value))
+  return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`
 })
 
 // ---- 聚合统计：GET /api/bindings/{id}/stats?by=day|session ----
@@ -228,7 +358,7 @@ async function loadStats() {
   loadingStats.value = true
   statsError.value = null
   try {
-    const { since, until } = dayRangeFor(selectedDate.value)
+    const { since, until } = dayRangeFor(selectedDate.value, timezone.value)
     const qs = `since=${encodeURIComponent(since)}&until=${encodeURIComponent(until)}`
     statsBuckets.value = await request<StatsBucket[]>(
       'GET',
@@ -242,10 +372,12 @@ async function loadStats() {
   }
 }
 
-// 绑定、维度、选中日期任一变化都要重新拉取——这正是「切维度/切日期都有
-// 真实效果」的落地位置：三者任一变化都会发出带新 by/since/until 的请求。
+// 绑定、维度、选中日期、选中时区任一变化都要重新拉取——这正是「切维度/
+// 切日期/切时区都有真实效果」的落地位置：四者任一变化都会发出带新
+// by/since/until 的请求。切时区必须在这里，否则选择器改了值但卡片数字
+// 纹丝不动，用户会以为选择器是摆设。
 watch(
-  () => [bindings.currentId, dimension.value, selectedDate.value] as const,
+  () => [bindings.currentId, dimension.value, selectedDate.value, timezone.value] as const,
   () => void loadStats(),
   { immediate: true },
 )
@@ -273,7 +405,7 @@ async function loadDayExtras() {
   loadingDayExtras.value = true
   dayExtrasError.value = null
   try {
-    const { since, until } = dayRangeFor(selectedDate.value)
+    const { since, until } = dayRangeFor(selectedDate.value, timezone.value)
     const qs = `since=${encodeURIComponent(since)}&until=${encodeURIComponent(until)}`
     // 两个接口各自独立失败也不该互相拖累——用 allSettled 而不是 all，
     // 电池到账查不到不该连带把已经查到的礼物明细也清空，反之亦然。
@@ -313,10 +445,12 @@ async function loadDayExtras() {
   }
 }
 
-// 随绑定或选中日期变化重新拉取，不随 dimension——理由见上面这一节的
-// 说明（固定按天理解的概念，不该因为切维度就变成别的意思或者消失）。
+// 随绑定、选中日期或选中时区变化重新拉取，不随 dimension——理由见上面
+// 这一节的说明（固定按天理解的概念，不该因为切维度就变成别的意思或者
+// 消失）。时区同样要跟——不跟的话切了时区，「当日电池到账」还停在旧
+// 时区算出来的窗口，跟主统计卡片对不上。
 watch(
-  () => [bindings.currentId, selectedDate.value] as const,
+  () => [bindings.currentId, selectedDate.value, timezone.value] as const,
   () => void loadDayExtras(),
   { immediate: true },
 )
@@ -428,13 +562,16 @@ const STAT_CARDS = computed<StatCardDef[]>(() => [
   {
     key: 'dayGiftCoins',
     label: '当日电池到账',
-    // 跟随选中日期（本地自然天），固定用 by=day 请求，不随上面的维度
-    // 切换变化——见文件头 P7 段落的说明。null 表示还没选绑定或加载
-    // 失败，不能显示成 0：那会被误读成"这一天真的一分电池都没到账"。
+    // 跟随选中日期与选中时区，固定用 by=day 请求，不随上面的维度切换
+    // 变化——见文件头 P7b 段落的说明。null 表示还没选绑定或加载失败，
+    // 不能显示成 0：那会被误读成"这一天真的一分电池都没到账"。
     value: dayGiftCoins.value !== null ? formatBattery(dayGiftCoins.value) : PLACEHOLDER,
     hint:
       dayGiftCoins.value !== null
-        ? `${selectedDateLabel.value}（本地时间）收到的电池总量，含盲盒爆出的礼物——只统计真正产生了电池的礼物，不产生电池的免费礼物（如小花花、人气票）不计入这里`
+        ? // 把选中的时区名写进提示里——这正是「默认值要可见」的要求：
+          // 不能只在选择器上显示，卡片本身也要能让用户确认"我现在看的
+          // 是哪个时区口径下的这一天"，不必去翻选择器才知道。
+          `${selectedDateLabel.value}（${timezone.value} 时区）收到的电池总量，含盲盒爆出的礼物——只统计真正产生了电池的礼物，不产生电池的免费礼物（如小花花、人气票）不计入这里`
         : (dayExtrasError.value ?? `${selectedDateLabel.value} 暂无可用数据`),
   },
   {
@@ -579,8 +716,26 @@ const previewColumns: DataTableColumns<PreviewRow> = [
              共同依赖的查询条件，允许清空会让"清空之后看什么"变成一个
              没有答案的状态，不如干脆不允许出现。 -->
         <NDatePicker v-model:value="selectedDate" type="date" :clearable="false" />
+
+        <span class="dimension-label">统计时区</span>
+        <!-- P7b：时区选择器，替代 P7 里"悄悄按浏览器本地时区解释"的隐式
+             猜测——见文件头"时区"一节。filterable：IANA 规范时区名有
+             四百多个，不给搜索会让下拉长到没法用；不可清空，理由与日期
+             选择器一致：选中时区是查询条件，不该允许被清空成"没有时区"。
+             options 来自 TIMEZONE_OPTIONS（Intl.supportedValuesOf 枚举），
+             默认值来自浏览器探测但完全可改，这正是"默认值要可见"的落地：
+             选择器本身就是可见、可改的界面元素，不是背后悄悄用一次就
+             扔掉的推断。 -->
+        <NSelect
+          v-model:value="timezone"
+          :options="TIMEZONE_OPTIONS"
+          filterable
+          :clearable="false"
+          class="timezone-select"
+        />
+
         <span class="dimension-hint">
-          切换维度或换一个日期都会重新向后端请求聚合数据（<code>by={{ dimension }}</code
+          切换维度、日期或时区都会重新向后端请求聚合数据（<code>by={{ dimension }}</code
           >），上面的卡片会跟着变
         </span>
       </div>
@@ -682,6 +837,9 @@ const previewColumns: DataTableColumns<PreviewRow> = [
   gap: 12px;
   margin-bottom: 16px;
   flex-wrap: wrap;
+}
+.timezone-select {
+  min-width: 220px;
 }
 .dimension-label {
   font-weight: 600;
