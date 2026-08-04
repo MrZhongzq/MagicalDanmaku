@@ -16,12 +16,19 @@ import (
 
 // fakeRuntime 记录被调用的动作，避免测试真连 B 站。
 type fakeRuntime struct {
-	mu        sync.Mutex
-	danmaku   []string
-	blocked   []string
-	unblocked []string
-	err       error
-	state     connector.State
+	mu            sync.Mutex
+	danmaku       []string
+	blocked       []string
+	unblocked     []string
+	blacklisted   []string
+	unblacklisted []string
+	err           error
+	state         connector.State
+
+	// blacklistedAttr/blacklistedName 是 BlacklistStatus 的固定回读结果。
+	blacklistedAttr bool
+	blacklistedName string
+	statusErr       error
 
 	reloadErr  error
 	reloadHits int
@@ -55,6 +62,44 @@ func (f *fakeRuntime) Unblock(_ context.Context, uid string) error {
 	}
 	f.unblocked = append(f.unblocked, uid)
 	return nil
+}
+
+func (f *fakeRuntime) Blacklist(_ context.Context, uid string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.err != nil {
+		return f.err
+	}
+	f.blacklisted = append(f.blacklisted, uid)
+	return nil
+}
+
+func (f *fakeRuntime) Unblacklist(_ context.Context, uid string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.err != nil {
+		return f.err
+	}
+	f.unblacklisted = append(f.unblacklisted, uid)
+	return nil
+}
+
+func (f *fakeRuntime) BlacklistStatus(_ context.Context, uid string) (bool, string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.statusErr != nil {
+		return false, "", f.statusErr
+	}
+	return f.blacklistedAttr, f.blacklistedName, nil
+}
+
+func (f *fakeRuntime) Nickname(_ context.Context, uid string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.statusErr != nil {
+		return "", f.statusErr
+	}
+	return f.blacklistedName, nil
 }
 
 func (f *fakeRuntime) State() connector.State {

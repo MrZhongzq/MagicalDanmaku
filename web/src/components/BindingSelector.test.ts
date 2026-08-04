@@ -18,6 +18,7 @@ const 绑定A: Binding = {
   enabled: true,
   ruleCount: 0,
   permissions: ['rule:read'],
+  isOwner: true,
   liveStatus: 'unknown',
   liveCheckedAt: null,
   anchorUid: '',

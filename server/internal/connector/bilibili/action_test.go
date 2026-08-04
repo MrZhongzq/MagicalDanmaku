@@ -37,9 +37,12 @@ func newTestActions(t *testing.T, body string, record *[]url.Values) *Actions {
 		t.Fatalf("ParseSession 失败: %v", err)
 	}
 	ac := api.New(sess, api.WithHTTPClient(srv.Client()))
-	for _, n := range []string{"sendMsg", "addBlock", "delBlock"} {
+	for _, n := range []string{"sendMsg", "addBlock", "delBlock", "relationModify", "accRelation", "accInfo"} {
 		ac.SetBaseURL(n, srv.URL)
 	}
+	// accRelation/accInfo 需要 wbi 签名，测试统一给一个假 mixinKey，
+	// 不影响 sendMsg/addBlock/delBlock 等未签名接口的既有用例。
+	ac.Signer().SetMixinKey("abcdefghijklmnopqrstuvwxyz012345")
 	return NewActions(ac, ratelimit.NewInterval(0))
 }
 
@@ -150,6 +153,84 @@ func TestUnblockUser(t *testing.T) {
 	}
 	if got := forms[0].Get("tuid"); got != "888" {
 		t.Errorf("tuid = %q", got)
+	}
+}
+
+// TestActionsBlacklistUser 确认 Actions.BlacklistUser 委托给 api.Client.Blacklist，
+// 且不需要（也不会用到）房间号——账号级操作与直播间无关。
+func TestActionsBlacklistUser(t *testing.T) {
+	var forms []url.Values
+	a := newTestActions(t, `{"code":0,"message":"OK","ttl":1}`, &forms)
+
+	if err := a.BlacklistUser(context.Background(), "10086"); err != nil {
+		t.Fatalf("BlacklistUser 失败: %v", err)
+	}
+	if len(forms) != 1 {
+		t.Fatalf("请求次数 = %d, 期望 1", len(forms))
+	}
+	if got := forms[0].Get("fid"); got != "10086" {
+		t.Errorf("fid = %q", got)
+	}
+	if got := forms[0].Get("act"); got != "5" {
+		t.Errorf("act = %q, 期望 5", got)
+	}
+}
+
+func TestActionsUnblacklistUser(t *testing.T) {
+	var forms []url.Values
+	a := newTestActions(t, `{"code":0,"message":"OK","ttl":1}`, &forms)
+
+	if err := a.UnblacklistUser(context.Background(), "10086"); err != nil {
+		t.Fatalf("UnblacklistUser 失败: %v", err)
+	}
+	if got := forms[0].Get("act"); got != "6" {
+		t.Errorf("act = %q, 期望 6", got)
+	}
+}
+
+func TestActionsRelationAttribute(t *testing.T) {
+	sess, err := auth.ParseSession("SESSDATA=x; bili_jct=tok; DedeUserID=42")
+	if err != nil {
+		t.Fatalf("ParseSession 失败: %v", err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"code":0,"data":{"relation":{"attribute":128}}}`))
+	}))
+	t.Cleanup(srv.Close)
+	ac := api.New(sess, api.WithHTTPClient(srv.Client()))
+	ac.SetBaseURL("accRelation", srv.URL)
+	ac.Signer().SetMixinKey("abcdefghijklmnopqrstuvwxyz012345")
+	a := NewActions(ac, ratelimit.NewInterval(0))
+
+	attr, err := a.RelationAttribute(context.Background(), "10086")
+	if err != nil {
+		t.Fatalf("RelationAttribute 失败: %v", err)
+	}
+	if attr != 128 {
+		t.Errorf("attribute = %d, 期望 128", attr)
+	}
+}
+
+func TestActionsNickname(t *testing.T) {
+	sess, err := auth.ParseSession("SESSDATA=x; bili_jct=tok; DedeUserID=42")
+	if err != nil {
+		t.Fatalf("ParseSession 失败: %v", err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"code":0,"data":{"name":"测试昵称"}}`))
+	}))
+	t.Cleanup(srv.Close)
+	ac := api.New(sess, api.WithHTTPClient(srv.Client()))
+	ac.SetBaseURL("accInfo", srv.URL)
+	ac.Signer().SetMixinKey("abcdefghijklmnopqrstuvwxyz012345")
+	a := NewActions(ac, ratelimit.NewInterval(0))
+
+	name, err := a.Nickname(context.Background(), "10086")
+	if err != nil {
+		t.Fatalf("Nickname 失败: %v", err)
+	}
+	if name != "测试昵称" {
+		t.Errorf("name = %q", name)
 	}
 }
 

@@ -22,6 +22,12 @@ type bindingView struct {
 	RuleCount   int      `json:"ruleCount"`
 	Permissions []string `json:"permissions"`
 
+	// IsOwner 是调用者是不是这个绑定所属账号的所有者（管理员也为
+	// true）。拉黑（P5-6）是账号级操作，走 isAccountOwner 而不是权限点，
+	// 前端靠这个字段决定显不显示「拉黑」区，不要用 AccountName 去跟
+	// 别处的账号列表比对——那是在前端重算一遍账号所有权判定，必然漂。
+	IsOwner bool `json:"isOwner"`
+
 	// LiveStatus 是最近一次直播间开播状态检测的结果（"living"/"offline"/
 	// "unknown"），由 cmd/magicd 的心跳循环（60 秒一次）或新增绑定时的
 	// 立即检测写入。LiveCheckedAt 为 nil 表示这个绑定从未被检测过。
@@ -39,11 +45,12 @@ type bindingView struct {
 
 // toBindingView 是 bindingView 唯一的构造入口，保证 handleListBindings
 // 与 handleCreateBinding 对同一批字段的映射逻辑不会走岔。
-func toBindingView(b *store.Binding, ruleCount int, permissions []string) bindingView {
+func toBindingView(b *store.Binding, ruleCount int, permissions []string, isOwner bool) bindingView {
 	v := bindingView{
 		ID: b.ID, AccountID: b.AccountID, AccountName: b.AccountName,
 		RoomID: b.RoomID, Enabled: b.Enabled, RuleCount: ruleCount,
 		Permissions: permissions,
+		IsOwner:     isOwner,
 		LiveStatus:  b.LiveStatus,
 		AnchorUID:   b.AnchorUID,
 		AnchorName:  b.AnchorName,
@@ -110,6 +117,16 @@ func (s *Server) callerPermissions(ctx context.Context, u *store.User) (*permiss
 	return ps, nil
 }
 
+// isOwner 判断调用者是不是 b 所属账号的所有者（管理员也算）。
+//
+// 与 of() 判断权限点是两条独立的轴：拉黑走账号所有权，不走权限点，
+// 前端要能分别渲染「有 user:block 但不是所有者」（能禁言不能拉黑）
+// 与「是所有者」（都能）两种状态，缺一个字段就只能靠权限点列表反推，
+// 而反推等于在前端重新实现一遍 isAccountOwner 的判定，必然漂。
+func (ps *permissionSet) isOwner(b *store.Binding) bool {
+	return ps.admin || ps.owned[b.AccountName]
+}
+
 // of 返回调用者在某绑定上的权限点。
 //
 // 永远返回非 nil 切片：JSON 里要出 [] 而不是 null，前端拿到 null
@@ -173,7 +190,7 @@ func (s *Server) handleListBindings(w http.ResponseWriter, r *http.Request) {
 			respondStoreError(w, err, "")
 			return
 		}
-		out = append(out, toBindingView(&b, len(rs), ps.of(&b)))
+		out = append(out, toBindingView(&b, len(rs), ps.of(&b), ps.isOwner(&b)))
 	}
 	respondJSON(w, http.StatusOK, out)
 }
@@ -250,7 +267,7 @@ func (s *Server) handleCreateBinding(w http.ResponseWriter, r *http.Request) {
 		respondStoreError(w, err, "")
 		return
 	}
-	respondJSON(w, http.StatusCreated, toBindingView(b, 0, ps.of(b)))
+	respondJSON(w, http.StatusCreated, toBindingView(b, 0, ps.of(b), ps.isOwner(b)))
 }
 
 // handlePatchBinding 启停绑定。守卫是 rule:write。

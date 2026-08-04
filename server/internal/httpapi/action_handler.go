@@ -20,6 +20,19 @@ type BindingRuntime interface {
 	SendDanmaku(ctx context.Context, text string) error
 	Block(ctx context.Context, uid string, hours int) error
 	Unblock(ctx context.Context, uid string) error
+
+	// Blacklist/Unblacklist 是账号级拉黑/取消拉黑，与 Block/Unblock
+	// （房间级禁言/解禁）是两条独立的能力——P5-6 的明确要求，见
+	// connector.Actions.BlacklistUser 的注释。
+	Blacklist(ctx context.Context, uid string) error
+	Unblacklist(ctx context.Context, uid string) error
+	// BlacklistStatus 回读当前是否已拉黑，用于让界面显示真实状态而不是
+	// "发了请求所以大概成功了"。nickname 是尽力而为的自动回填，查不到
+	// 时留空，不影响 blacklisted 的准确性。
+	BlacklistStatus(ctx context.Context, uid string) (blacklisted bool, nickname string, err error)
+	// Nickname 查询 uid 的昵称，用于「加入禁言名单」时自动回填。
+	Nickname(ctx context.Context, uid string) (string, error)
+
 	State() connector.State
 
 	// Reload 用数据库里当前的配置重建这个绑定的规则引擎。

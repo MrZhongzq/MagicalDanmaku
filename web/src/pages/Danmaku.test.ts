@@ -109,6 +109,7 @@ const 绑定 = {
   enabled: true,
   ruleCount: 2,
   permissions: ['rule:read', 'rule:write'] as const,
+  isOwner: true,
   liveStatus: 'unknown' as const,
   liveCheckedAt: null,
   anchorUid: '',

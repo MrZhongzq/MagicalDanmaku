@@ -30,6 +30,13 @@ func (b *recordBot) Block(uid string, hours int) error {
 	return nil
 }
 
+func (b *recordBot) Blacklist(uid string) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.blocks = append(b.blocks, uid)
+	return nil
+}
+
 func (b *recordBot) sent() []string {
 	b.mu.Lock()
 	defer b.mu.Unlock()

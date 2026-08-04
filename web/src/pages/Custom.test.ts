@@ -58,6 +58,7 @@ const 绑定 = {
   enabled: true,
   ruleCount: 2,
   permissions: ['rule:read', 'rule:write'] as const,
+  isOwner: true,
   liveStatus: 'unknown' as const,
   liveCheckedAt: null,
   anchorUid: '',
@@ -81,6 +82,7 @@ const FULL_EVENT_TYPES = [
 const FULL_ACTION_TYPES = [
   { value: 'danmaku', label: '发送弹幕' },
   { value: 'block', label: '禁言' },
+  { value: 'blacklist', label: '拉黑（账号级，与直播间无关）' },
   { value: 'script', label: '执行脚本' },
   { value: 'log', label: '只记日志（调试规则用）' },
 ]
@@ -1105,5 +1107,60 @@ describe('Custom 页：从房管页「去配置」跳转过来的自动禁言预
     bindings.select(1)
     await flushPromises()
     expect(countPresetCards(wrapper)).toBe(0)
+  })
+})
+
+// ============================================================
+// P5-6：房管页「自动拉黑规则」卡片跳过来的预填
+// ============================================================
+//
+// Moderation.vue 的「自动拉黑规则」卡片带 query preset=autoblacklist 跳
+// 过来——与 automute 是两条独立的预设，不共用同一条草稿骨架（拉黑规则
+// 与禁言规则要分开处理，是这次任务的明确要求）。这组测试与上面 automute
+// 那组同构，只是断言动作类型换成 blacklist、没有 hours 字段。
+describe('Custom 页：从房管页「去配置」跳转过来的自动拉黑预填', () => {
+  it('URL 带 preset=autoblacklist 时自动插入一条「弹幕->拉黑」草稿，并提示用户', async () => {
+    setupStores()
+    window.history.pushState({}, '', '/custom?preset=autoblacklist')
+    stubFetch({ rules: [] })
+
+    const wrapper = await mountCustom()
+
+    const nameInputs = wrapper.findAll('input[placeholder="规则名（如：舰长专属欢迎）"]')
+    expect(
+      nameInputs.some(
+        (i) => (i.element as HTMLInputElement).value === '自动拉黑（关键词，待填写）',
+      ),
+    ).toBe(true)
+    expect(messageMock.info).toHaveBeenCalledWith(
+      expect.stringContaining('已为你预填一条「关键词拉黑」草稿'),
+    )
+
+    const collapseHeaders = wrapper.findAll('.n-collapse-item__header-main')
+    await collapseHeaders[collapseHeaders.length - 1].trigger('click')
+    await flushPromises()
+    const preview = JSON.parse(wrapper.findAll('.json-preview').at(-1)!.text()) as {
+      on?: string[]
+      when?: { field?: string; op?: string }
+      do?: { type: string; hours?: number }[]
+    }
+    expect(preview.on).toEqual(['danmaku'])
+    expect(preview.when).toMatchObject({ field: 'text', op: 'contains' })
+    // blacklist 动作没有 hours 概念——buildCustomAction 的 switch 分支
+    // 里 blacklist 落在 default 分支，只出 type 字段，不该带 hours。
+    expect(preview.do).toEqual([{ type: 'blacklist' }])
+  })
+
+  it('preset=automute 与 preset=autoblacklist 互不干扰：只应用 URL 里那一个', async () => {
+    setupStores()
+    window.history.pushState({}, '', '/custom?preset=autoblacklist')
+    stubFetch({ rules: [] })
+
+    const wrapper = await mountCustom()
+
+    const nameInputs = wrapper.findAll('input[placeholder="规则名（如：舰长专属欢迎）"]')
+    const names = nameInputs.map((i) => (i.element as HTMLInputElement).value)
+    expect(names).toContain('自动拉黑（关键词，待填写）')
+    expect(names).not.toContain('自动禁言（关键词，待填写）')
   })
 })

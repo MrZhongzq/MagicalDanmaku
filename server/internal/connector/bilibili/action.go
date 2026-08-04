@@ -142,6 +142,35 @@ func (a *Actions) UnblockUser(ctx context.Context, roomID, uid string) error {
 	return a.api.PostForm(ctx, a.api.URLFor("delBlock"), form, nil)
 }
 
+// BlacklistUser 把 uid 加入当前账号的黑名单。账号级操作，不带房间号。
+func (a *Actions) BlacklistUser(ctx context.Context, uid string) error {
+	if err := a.limiter.Wait(ctx); err != nil {
+		return err
+	}
+	return a.api.Blacklist(ctx, uid)
+}
+
+// UnblacklistUser 把 uid 移出当前账号的黑名单。
+func (a *Actions) UnblacklistUser(ctx context.Context, uid string) error {
+	if err := a.limiter.Wait(ctx); err != nil {
+		return err
+	}
+	return a.api.Unblacklist(ctx, uid)
+}
+
+// RelationAttribute 查询当前账号与 uid 的关系属性值，供调用方用
+// api.IsBlacklisted 判断是否已拉黑。只读查询，不占用限流器的写配额——
+// 与「加载数据」性质相同，不是「向外发起一次可能触发风控的动作」。
+func (a *Actions) RelationAttribute(ctx context.Context, uid string) (int, error) {
+	return a.api.RelationAttribute(ctx, uid)
+}
+
+// Nickname 查询 uid 的昵称，用于自动回填。同 RelationAttribute，
+// 只读查询不占用限流器配额。
+func (a *Actions) Nickname(ctx context.Context, uid string) (string, error) {
+	return a.api.Nickname(ctx, uid)
+}
+
 // SplitLongText 按字符数（而非字节数）把文本切成若干段。
 // 空文本返回 nil。
 func SplitLongText(text string, maxLen int) []string {

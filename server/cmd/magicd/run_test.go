@@ -16,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/account"
+	"github.com/MrZhongzq/MagicalDanmaku/server/internal/connector"
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/connector/bilibili/api"
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/connector/bilibili/auth"
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/event"
@@ -29,10 +30,11 @@ import (
 // bindingStub 记录 roomBot 转发给绑定的调用。
 // 它实现 run.go 中的 danmakuSender 接口，因此无需引入 account 包。
 type bindingStub struct {
-	mu     sync.Mutex
-	sent   []string
-	blocks []blockRecord
-	err    error
+	mu         sync.Mutex
+	sent       []string
+	blocks     []blockRecord
+	blacklists []string
+	err        error
 }
 
 type blockRecord struct {
@@ -66,6 +68,16 @@ func (b *bindingStub) Block(ctx context.Context, uid string, hours int) error {
 	return nil
 }
 
+func (b *bindingStub) Blacklist(ctx context.Context, uid string) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.err != nil {
+		return b.err
+	}
+	b.blacklists = append(b.blacklists, uid)
+	return nil
+}
+
 func TestRoomBotForwardsToBinding(t *testing.T) {
 	bs := &bindingStub{}
 	b := newRoomBot(bs, context.Background())
@@ -85,6 +97,23 @@ func TestRoomBotForwardsToBinding(t *testing.T) {
 	}
 }
 
+// TestRoomBotForwardsBlacklistToBinding 钉住「拉黑走独立路径」——
+// roomBot.Blacklist 转发给 binding.Blacklist，不途经 Block。
+func TestRoomBotForwardsBlacklistToBinding(t *testing.T) {
+	bs := &bindingStub{}
+	b := newRoomBot(bs, context.Background())
+
+	if err := b.Blacklist("999"); err != nil {
+		t.Fatalf("Blacklist 失败: %v", err)
+	}
+	if len(bs.blacklists) != 1 || bs.blacklists[0] != "999" {
+		t.Errorf("blacklists = %v", bs.blacklists)
+	}
+	if len(bs.blocks) != 0 {
+		t.Errorf("blocks = %v，拉黑不该顺带触发禁言", bs.blocks)
+	}
+}
+
 func TestRoomBotPropagatesError(t *testing.T) {
 	bs := &bindingStub{err: errors.New("发送失败")}
 	b := newRoomBot(bs, context.Background())
@@ -94,6 +123,212 @@ func TestRoomBotPropagatesError(t *testing.T) {
 	}
 	if err := b.Block("1", 1); err == nil {
 		t.Error("底层错误应当上报")
+	}
+	if err := b.Blacklist("1"); err == nil {
+		t.Error("底层错误应当上报")
+	}
+}
+
+// fakeAccountActions 是 connector.Actions 的测试替身，供构造
+// account.Binding 时注入——roomRuntime.Blacklist/Unblacklist/
+// BlacklistStatus/Nickname 直接调用 rt.binding（*account.Binding），
+// 不经过 roomBot，所以不能复用 bindingStub（那是 danmakuSender 的替身）。
+type fakeAccountActions struct {
+	mu           sync.Mutex
+	blacklists   []string
+	unblacklists []string
+	attribute    int
+	nickname     string
+	err          error
+	nicknameErr  error
+}
+
+func (f *fakeAccountActions) SendDanmaku(context.Context, connector.SendDanmakuRequest) error {
+	return nil
+}
+func (f *fakeAccountActions) BlockUser(context.Context, connector.BlockRequest) error { return nil }
+func (f *fakeAccountActions) UnblockUser(context.Context, string, string) error       { return nil }
+
+func (f *fakeAccountActions) BlacklistUser(_ context.Context, uid string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.err != nil {
+		return f.err
+	}
+	f.blacklists = append(f.blacklists, uid)
+	return nil
+}
+
+func (f *fakeAccountActions) UnblacklistUser(_ context.Context, uid string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.err != nil {
+		return f.err
+	}
+	f.unblacklists = append(f.unblacklists, uid)
+	return nil
+}
+
+func (f *fakeAccountActions) RelationAttribute(context.Context, string) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.attribute, f.err
+}
+
+func (f *fakeAccountActions) Nickname(context.Context, string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.nicknameErr != nil {
+		return "", f.nicknameErr
+	}
+	return f.nickname, nil
+}
+
+// newTestRoomRuntimeForBlacklist 建一个只够 Blacklist/Unblacklist/
+// BlacklistStatus/Nickname 用的最小 roomRuntime——这几个方法不碰
+// st/sched/storage/engine，不需要数据库，比 newReloadTestStore 轻得多。
+//
+// 返回的 *logging.ActivityWriter 由调用方自己决定何时 Close()：
+// 业务日志是异步落库的，测试要断言"确实记了几条"就必须先 Close()
+// 把缓冲排空、等后台协程真正写完，不能在 Enqueue 之后立刻读——
+// 那是"绕开真实时序"的假绿。
+func newTestRoomRuntimeForBlacklist(t *testing.T, actions *fakeAccountActions, flush func(context.Context, []store.ActivityRow) error) (*roomRuntime, *logging.ActivityWriter) {
+	t.Helper()
+	activity := logging.NewActivityWriter(logging.ActivityWriterOptions{
+		Flush:     flush,
+		BatchSize: 1,
+		Interval:  time.Hour,
+	})
+
+	binding := &account.Binding{
+		Account: account.New("小号", nil, 0),
+		RoomID:  "123",
+		Actions: actions,
+	}
+	rt := &roomRuntime{
+		binding: binding,
+		sink:    activity.Sink(1, 1, "123"),
+		label:   "小号@123",
+		roomID:  "123",
+		log:     slog.Default(),
+	}
+	return rt, activity
+}
+
+// TestRoomRuntimeBlacklistRecordsActivity 钉住「拉黑无论成败都要落业务
+// 日志」——这是用户明确要求的（把操作失败写日志，是 recordManual 早就
+// 定下的约定，拉黑不能是例外）。
+func TestRoomRuntimeBlacklistRecordsActivity(t *testing.T) {
+	var mu sync.Mutex
+	var rows []store.ActivityRow
+	collect := func(_ context.Context, batch []store.ActivityRow) error {
+		mu.Lock()
+		rows = append(rows, batch...)
+		mu.Unlock()
+		return nil
+	}
+
+	actions := &fakeAccountActions{}
+	rt, activity := newTestRoomRuntimeForBlacklist(t, actions, collect)
+
+	if err := rt.Blacklist(context.Background(), "10086"); err != nil {
+		t.Fatalf("Blacklist 失败: %v", err)
+	}
+	if len(actions.blacklists) != 1 || actions.blacklists[0] != "10086" {
+		t.Errorf("blacklists = %v", actions.blacklists)
+	}
+
+	// 让失败的那次也走一遍，两条都要落日志
+	actions.err = errors.New("B 站返回风控")
+	if err := rt.Blacklist(context.Background(), "10087"); err == nil {
+		t.Fatal("失败的拉黑应当把错误传出去")
+	}
+
+	// 业务日志异步落库：必须先 Close() 排空缓冲、等后台协程真正写完，
+	// 才能确定性地断言写了几条——不能在 Enqueue 之后立刻读 rows。
+	activity.Close()
+
+	mu.Lock()
+	got := append([]store.ActivityRow{}, rows...)
+	mu.Unlock()
+
+	if len(got) != 2 {
+		t.Fatalf("业务日志条数 = %d, 期望 2（成功一条失败一条）", len(got))
+	}
+	for i, r := range got {
+		if r.ActionType != string(rules.ActionBlacklist) {
+			t.Errorf("第 %d 条 ActionType = %q, 期望 %q", i+1, r.ActionType, rules.ActionBlacklist)
+		}
+	}
+	if got[1].Detail == nil {
+		t.Error("失败那条也应当带上事件详情")
+	}
+}
+
+func TestRoomRuntimeUnblacklistForwards(t *testing.T) {
+	actions := &fakeAccountActions{}
+	rt, activity := newTestRoomRuntimeForBlacklist(t, actions, func(context.Context, []store.ActivityRow) error { return nil })
+	t.Cleanup(activity.Close)
+
+	if err := rt.Unblacklist(context.Background(), "10086"); err != nil {
+		t.Fatalf("Unblacklist 失败: %v", err)
+	}
+	if len(actions.unblacklists) != 1 || actions.unblacklists[0] != "10086" {
+		t.Errorf("unblacklists = %v", actions.unblacklists)
+	}
+}
+
+// TestRoomRuntimeBlacklistStatusReportsBlacklisted 钉住 attribute==128
+// 的判据经过完整链路（api.IsBlacklisted）后仍然正确——这是「自检变异
+// (c)」在 cmd/magicd 这一层的对应防线。
+func TestRoomRuntimeBlacklistStatusReportsBlacklisted(t *testing.T) {
+	actions := &fakeAccountActions{attribute: 128, nickname: "测试昵称"}
+	rt, activity := newTestRoomRuntimeForBlacklist(t, actions, func(context.Context, []store.ActivityRow) error { return nil })
+	t.Cleanup(activity.Close)
+
+	blacklisted, name, err := rt.BlacklistStatus(context.Background(), "10086")
+	if err != nil {
+		t.Fatalf("BlacklistStatus 失败: %v", err)
+	}
+	if !blacklisted {
+		t.Error("attribute=128 应判定为已拉黑")
+	}
+	if name != "测试昵称" {
+		t.Errorf("nickname = %q", name)
+	}
+}
+
+func TestRoomRuntimeBlacklistStatusReportsNotBlacklisted(t *testing.T) {
+	actions := &fakeAccountActions{attribute: 0}
+	rt, activity := newTestRoomRuntimeForBlacklist(t, actions, func(context.Context, []store.ActivityRow) error { return nil })
+	t.Cleanup(activity.Close)
+
+	blacklisted, _, err := rt.BlacklistStatus(context.Background(), "10086")
+	if err != nil {
+		t.Fatalf("BlacklistStatus 失败: %v", err)
+	}
+	if blacklisted {
+		t.Error("attribute=0 不应判定为已拉黑")
+	}
+}
+
+// TestRoomRuntimeBlacklistStatusToleratesNicknameFailure 昵称查询失败
+// 不该拖累状态回读本身——两者失败模式独立，拉黑状态是主流程，昵称只是
+// 锦上添花的自动回填。
+func TestRoomRuntimeBlacklistStatusToleratesNicknameFailure(t *testing.T) {
+	actions := &fakeAccountActions{attribute: 128, nicknameErr: errors.New("查询昵称失败")}
+	rt, activity := newTestRoomRuntimeForBlacklist(t, actions, func(context.Context, []store.ActivityRow) error { return nil })
+	t.Cleanup(activity.Close)
+
+	blacklisted, name, err := rt.BlacklistStatus(context.Background(), "10086")
+	if err != nil {
+		t.Fatalf("BlacklistStatus 不该因为昵称查询失败而报错: %v", err)
+	}
+	if !blacklisted {
+		t.Error("attribute=128 应判定为已拉黑")
+	}
+	if name != "" {
+		t.Errorf("name = %q, 期望空串（昵称查询失败时留空）", name)
 	}
 }
 

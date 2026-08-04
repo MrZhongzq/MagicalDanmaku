@@ -267,6 +267,7 @@ describe('Admin 三、授权管理：门禁判断委托给 auth.hasPerm，文案
       enabled: true,
       ruleCount: 0,
       permissions,
+      isOwner: true,
       liveStatus: 'unknown' as const,
       liveCheckedAt: null,
       anchorUid: '',

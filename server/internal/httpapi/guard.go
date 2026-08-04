@@ -66,6 +66,66 @@ func (s *Server) requirePerm(p perm.Permission, h http.HandlerFunc) http.Handler
 	})
 }
 
+// requireBindingOwner 要求调用者是 URL 里 {binding} 所属账号的所有者
+// （或管理员）。
+//
+// 拉黑是账号级操作——"谁的号就拉黑到谁的黑名单里"，与直播间无关。
+// 房管持有的 user:block 能代为禁言（房间级权限），但不能代表账号本人
+// 去拉黑一个陌生人的社交关系；这正是"主播能禁言和拉黑，房管只能禁言"
+// 的边界。因此拉黑不走 requirePerm（那是权限点体系，权限点只在
+// internal/perm 定义），而是复用 isAccountOwner——与 perm.go 里删除
+// account:manage 权限点是同一个先例：账号级操作一律走"账号所有者或
+// 管理员"，不挂在权限点体系里，判定只此一处（isAccountOwner），不在
+// 这里新造判定逻辑。
+//
+// URL 仍然带 {binding} 而不是账号名，是为了复用现有的 BindingSelector
+// 前端组件与 BindingRuntime 注册表（拉黑要用哪个账号的 Cookie/Session，
+// 由这个绑定所属的账号决定）——路由形状与"账号级操作"并不矛盾，判定
+// 逻辑才是账号级的。
+//
+// 可见性判定与 requirePerm 完全一致：完全不可见（不是所有者、没有
+// 任何绑定授权、非管理员）返回 404；可见但不是所有者返回 403。
+func (s *Server) requireBindingOwner(h http.HandlerFunc) http.HandlerFunc {
+	return s.requireAuth(func(w http.ResponseWriter, r *http.Request) {
+		u := userFrom(r.Context())
+
+		raw := r.PathValue("binding")
+		id, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil {
+			respondError(w, http.StatusNotFound, "绑定 %q 不存在", raw)
+			return
+		}
+
+		b, err := s.bindingByID(r.Context(), id)
+		if err != nil {
+			respondStoreError(w, err, "绑定不存在")
+			return
+		}
+
+		acc, err := s.store.GetAccountByName(r.Context(), b.AccountName)
+		if err != nil {
+			respondStoreError(w, err, "")
+			return
+		}
+
+		if !s.isAccountOwner(u, acc) {
+			visible, err := s.canSeeBinding(r.Context(), u, b)
+			if err != nil {
+				respondStoreError(w, err, "")
+				return
+			}
+			if !visible {
+				respondError(w, http.StatusNotFound, "绑定不存在")
+				return
+			}
+			respondError(w, http.StatusForbidden, "只有账号所有者能操作 %s 的拉黑", b.Label())
+			return
+		}
+
+		h(w, r.WithContext(context.WithValue(r.Context(), ctxKeyBinding, b)))
+	})
+}
+
 // isAccountOwner 判断调用者能否以「账号所有者」的身份操作这个账号。
 //
 // 管理员一律放行。非所有者返回 false，调用方应当回 404 而不是

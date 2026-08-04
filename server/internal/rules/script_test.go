@@ -29,6 +29,13 @@ func (f *fakeBot) Block(uid string, hours int) error {
 	return nil
 }
 
+func (f *fakeBot) Blacklist(uid string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.blocks = append(f.blocks, uid)
+	return nil
+}
+
 // memStore 是 Storage 的内存实现，测试用。
 type memStore struct {
 	mu sync.Mutex

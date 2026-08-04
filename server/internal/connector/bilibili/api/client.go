@@ -43,6 +43,18 @@ var defaultBaseURLs = map[string]string{
 	// 的「当前观众名单」接口，这是拿房间近期弹幕发送者 uid 当近似值的既有
 	// 做法，原样照抄语义。
 	"roomAudience": "https://api.live.bilibili.com/ajax/msg",
+
+	// 以下三个是 P5-6 新增的账号级接口，注意域名是 api.bilibili.com（主站），
+	// 不是上面全部接口用的 api.live.bilibili.com（直播）——拉黑是账号级
+	// 操作，与直播间无关，这是本表里第一批主站接口。
+	//
+	// relationModify/accRelation 的地址与全部表单/查询字段都照抄自用户
+	// 2026-08-04 的真实抓包（见 task-p5-6-blackapi.md），拉黑与取消拉黑
+	// 是同一个接口只差 act。accInfo（查昵称）不在那次抓包范围内，是
+	// 独立找的标准只读接口，见 relation.go 里 Nickname 的注释。
+	"relationModify": "https://api.bilibili.com/x/relation/modify",
+	"accRelation":    "https://api.bilibili.com/x/space/wbi/acc/relation",
+	"accInfo":        "https://api.bilibili.com/x/space/wbi/acc/info",
 }
 
 // riskControlCode 是 B 站的风控错误码。

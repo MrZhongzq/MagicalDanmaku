@@ -59,6 +59,9 @@ func httpAddr() string {
 type danmakuSender interface {
 	SendDanmaku(ctx context.Context, text string) error
 	Block(ctx context.Context, uid string, hours int) error
+	// Blacklist 是账号级拉黑，供「自动拉黑规则」（rules.ActionBlacklist）
+	// 通过 roomBot 调用，与 Block（房间级禁言）是两条独立的能力。
+	Blacklist(ctx context.Context, uid string) error
 }
 
 // roomBot 把「账号-直播间」绑定适配成 rules.BotAPI。
@@ -99,6 +102,10 @@ func (b *roomBot) SendDanmaku(text string) error {
 
 func (b *roomBot) Block(uid string, hours int) error {
 	return b.binding.Block(*b.ctx.Load(), uid, hours)
+}
+
+func (b *roomBot) Blacklist(uid string) error {
+	return b.binding.Blacklist(*b.ctx.Load(), uid)
 }
 
 // accountRuntime 是一个账号的运行时资源。
@@ -171,6 +178,46 @@ func (rt *roomRuntime) Unblock(ctx context.Context, uid string) error {
 	rt.recordManual(rules.Action{Type: rules.ActionBlock, Hours: 0},
 		map[string]any{"user": map[string]any{"uid": uid}}, err)
 	return err
+}
+
+// Blacklist 是账号级拉黑（不是禁言的一个时长档位），走与 Block/Unblock
+// 相同的「无论成败都记业务日志」约定——拉黑是不可逆的对外操作，失败原因
+// 尤其要能在日志页看到。
+func (rt *roomRuntime) Blacklist(ctx context.Context, uid string) error {
+	err := rt.binding.Blacklist(ctx, uid)
+	rt.recordManual(rules.Action{Type: rules.ActionBlacklist},
+		map[string]any{"user": map[string]any{"uid": uid}}, err)
+	return err
+}
+
+// Unblacklist 是账号级取消拉黑。
+func (rt *roomRuntime) Unblacklist(ctx context.Context, uid string) error {
+	err := rt.binding.Unblacklist(ctx, uid)
+	rt.recordManual(rules.Action{Type: rules.ActionBlacklist},
+		map[string]any{"user": map[string]any{"uid": uid}}, err)
+	return err
+}
+
+// BlacklistStatus 回读账号与 uid 的关系状态，供界面显示真实拉黑状态。
+//
+// 昵称查询失败是尽力而为——不能让"昵称查不到"拖累"拉黑状态查得到"，
+// 两者失败模式完全独立，所以昵称失败只记日志、返回空串，不让整个
+// 调用报错。
+func (rt *roomRuntime) BlacklistStatus(ctx context.Context, uid string) (bool, string, error) {
+	attr, err := rt.binding.RelationAttribute(ctx, uid)
+	if err != nil {
+		return false, "", err
+	}
+	name, nameErr := rt.binding.Nickname(ctx, uid)
+	if nameErr != nil {
+		rt.log.Warn("查询昵称失败，回读状态时留空", "binding", rt.label, "uid", uid, "err", nameErr)
+	}
+	return api.IsBlacklisted(attr), name, nil
+}
+
+// Nickname 查询 uid 的昵称，用于「加入禁言名单」时自动回填。
+func (rt *roomRuntime) Nickname(ctx context.Context, uid string) (string, error) {
+	return rt.binding.Nickname(ctx, uid)
 }
 
 // State 报告连接状态，供 /api/meta/runtime 展示——连接（client）与它的

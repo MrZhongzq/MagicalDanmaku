@@ -263,6 +263,31 @@ func TestActionValidateRejectsUnknownType(t *testing.T) {
 	}
 }
 
+// TestActionValidateAcceptsBlacklist 钉住「拉黑是独立动作类型」——
+// ActionBlacklist 没有必填字段（不像 ActionBlock 那样可选 Hours），
+// 与 ActionLog 同一档。
+func TestActionValidateAcceptsBlacklist(t *testing.T) {
+	if err := (Action{Type: ActionBlacklist}).Validate(); err != nil {
+		t.Errorf("blacklist 动作不应报错: %v", err)
+	}
+}
+
+// TestAllActionTypesIncludesBlacklist 防止 AllActionTypes（供
+// /api/meta/action-types 下发给前端）漏登记新动作类型——历史上
+// AggregateByBlindBox 就发生过这类漏登记，见 rule.go 里
+// allAggregateBy 的说明。
+func TestAllActionTypesIncludesBlacklist(t *testing.T) {
+	found := false
+	for _, t2 := range AllActionTypes() {
+		if t2 == ActionBlacklist {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("AllActionTypes() 应包含 ActionBlacklist")
+	}
+}
+
 func TestActionValidateAcceptsKnownPickValues(t *testing.T) {
 	for _, pick := range []string{"", PickRandom, PickSequential} {
 		a := Action{Type: ActionDanmaku, Template: []string{"x"}, Pick: pick}

@@ -14,13 +14,19 @@ type ActionType string
 // 全部动作类型。
 const (
 	ActionDanmaku ActionType = "danmaku" // 发弹幕
-	ActionBlock   ActionType = "block"   // 禁言
-	ActionScript  ActionType = "script"  // 执行脚本
-	ActionLog     ActionType = "log"     // 只记日志，用于调试规则
+	ActionBlock   ActionType = "block"   // 禁言（房间级，房管权限）
+	// ActionBlacklist 是账号级拉黑，与 ActionBlock 是两条独立的路径——
+	// **不是禁言的一个时长档位**。P5-6 明确要求拉黑与禁言分开处理：
+	// 「自动拉黑规则」与「自动禁言规则」是两种不同的规则，不共用同一个
+	// 动作类型只靠 Hours 字段区分（原 C++ 项目与本项目早期版本都是
+	// 把"拉黑"做成"禁言 720 小时"，用户纠正过两次）。
+	ActionBlacklist ActionType = "blacklist"
+	ActionScript    ActionType = "script" // 执行脚本
+	ActionLog       ActionType = "log"    // 只记日志，用于调试规则
 )
 
 // allActionTypes 按声明顺序排列，AllActionTypes 依赖这个顺序。
-var allActionTypes = []ActionType{ActionDanmaku, ActionBlock, ActionScript, ActionLog}
+var allActionTypes = []ActionType{ActionDanmaku, ActionBlock, ActionBlacklist, ActionScript, ActionLog}
 
 // AllActionTypes 返回全部动作类型的副本——跟 AllAggregateBy 同一个理由
 // （见其注释）：httpapi/meta_handler.go 不再自己手抄一份，减少「加了
@@ -317,8 +323,9 @@ func (a Action) Validate() error {
 		if a.Script == "" {
 			return fmt.Errorf("script 动作必须提供脚本内容")
 		}
-	case ActionBlock, ActionLog:
-		// 无必填字段
+	case ActionBlock, ActionBlacklist, ActionLog:
+		// 无必填字段。ActionBlacklist 没有 Hours 这类可选参数——拉黑
+		// 没有时长概念，账号要么在黑名单里要么不在。
 	default:
 		return fmt.Errorf("未知的动作类型 %q", a.Type)
 	}

@@ -63,10 +63,11 @@ var eventTypeLabels = []struct {
 // 一起使用：说明缺失时用值本身兜底，新增动作类型忘了写说明也不会让
 // 前端渲染不出那一项（同 permissionLabels 的写法）。
 var actionTypeLabelText = map[rules.ActionType]string{
-	rules.ActionDanmaku: "发送弹幕",
-	rules.ActionBlock:   "禁言",
-	rules.ActionScript:  "执行脚本",
-	rules.ActionLog:     "只记日志（调试规则用）",
+	rules.ActionDanmaku:   "发送弹幕",
+	rules.ActionBlock:     "禁言（房间级，仅本直播间生效）",
+	rules.ActionBlacklist: "拉黑（账号级，与直播间无关）",
+	rules.ActionScript:    "执行脚本",
+	rules.ActionLog:       "只记日志（调试规则用）",
 }
 
 // operatorLabelText 是条件操作符的中文说明，与 rules.AllOperators()

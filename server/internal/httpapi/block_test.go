@@ -3,10 +3,12 @@ package httpapi_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"testing"
 	"time"
 
+	"github.com/MrZhongzq/MagicalDanmaku/server/internal/httpapi"
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/perm"
 )
 
@@ -280,6 +282,88 @@ func TestBlockListRequiresUserBlock(t *testing.T) {
 		if resp.StatusCode != http.StatusForbidden {
 			t.Errorf("%s %s 状态码 = %d, 期望 403", tc.method, tc.url, resp.StatusCode)
 		}
+	}
+}
+
+// TestBlockListAddAutoFillsNicknameWhenBlank 钉住 P5-6 的要求：昵称不再
+// 要求手填，留空时由后端按 UID 自动查询回填。
+func TestBlockListAddAutoFillsNicknameWhenBlank(t *testing.T) {
+	srv, st, api := newTestServerWithAPI(t)
+	c := loginAs(t, srv, st, "张三", false)
+	bid := mustBindingFor(t, st, "张三", "小号", "123")
+	if err := st.Grant(context.Background(), "张三", "小号", "123",
+		[]perm.Permission{perm.UserBlock}); err != nil {
+		t.Fatalf("授权报错: %v", err)
+	}
+	api.SetRuntime(map[int64]httpapi.BindingRuntime{
+		bid: &fakeRuntime{blacklistedName: "自动回填的昵称"},
+	})
+
+	add := jsonRequest(t, c, "POST", srv.URL+"/api/bindings/"+itoa(bid)+"/blocklist", `{"uid":"10086"}`)
+	add.Body.Close()
+
+	list, err := st.ListBlockList(context.Background(), bid)
+	if err != nil {
+		t.Fatalf("查名单报错: %v", err)
+	}
+	if len(list) != 1 || list[0].Username != "自动回填的昵称" {
+		t.Errorf("名单 = %+v，期望昵称自动回填", list)
+	}
+}
+
+// TestBlockListAddToleratesNicknameLookupFailure 昵称查不到不该拖累
+// 加入名单这个主流程——这是尽力而为的自动回填，不是硬依赖。
+func TestBlockListAddToleratesNicknameLookupFailure(t *testing.T) {
+	srv, st, api := newTestServerWithAPI(t)
+	c := loginAs(t, srv, st, "张三", false)
+	bid := mustBindingFor(t, st, "张三", "小号", "123")
+	if err := st.Grant(context.Background(), "张三", "小号", "123",
+		[]perm.Permission{perm.UserBlock}); err != nil {
+		t.Fatalf("授权报错: %v", err)
+	}
+	api.SetRuntime(map[int64]httpapi.BindingRuntime{
+		bid: &fakeRuntime{statusErr: errors.New("查询昵称失败")},
+	})
+
+	add := jsonRequest(t, c, "POST", srv.URL+"/api/bindings/"+itoa(bid)+"/blocklist", `{"uid":"10086"}`)
+	defer add.Body.Close()
+	if add.StatusCode != http.StatusCreated {
+		t.Fatalf("状态码 = %d, 期望 201（昵称查询失败不该让加入名单本身失败）", add.StatusCode)
+	}
+
+	list, err := st.ListBlockList(context.Background(), bid)
+	if err != nil {
+		t.Fatalf("查名单报错: %v", err)
+	}
+	if len(list) != 1 || list[0].Username != "" {
+		t.Errorf("名单 = %+v，昵称查询失败时应留空而不是报错", list)
+	}
+}
+
+// TestBlockListAddKeepsExplicitUsername 显式传了昵称就不该被自动查询覆盖——
+// 向后兼容旧的调用方式（比如脚本化调用仍然传 username）。
+func TestBlockListAddKeepsExplicitUsername(t *testing.T) {
+	srv, st, api := newTestServerWithAPI(t)
+	c := loginAs(t, srv, st, "张三", false)
+	bid := mustBindingFor(t, st, "张三", "小号", "123")
+	if err := st.Grant(context.Background(), "张三", "小号", "123",
+		[]perm.Permission{perm.UserBlock}); err != nil {
+		t.Fatalf("授权报错: %v", err)
+	}
+	api.SetRuntime(map[int64]httpapi.BindingRuntime{
+		bid: &fakeRuntime{blacklistedName: "不该被用到的名字"},
+	})
+
+	add := jsonRequest(t, c, "POST", srv.URL+"/api/bindings/"+itoa(bid)+"/blocklist",
+		`{"uid":"10086","username":"手动填的昵称"}`)
+	add.Body.Close()
+
+	list, err := st.ListBlockList(context.Background(), bid)
+	if err != nil {
+		t.Fatalf("查名单报错: %v", err)
+	}
+	if len(list) != 1 || list[0].Username != "手动填的昵称" {
+		t.Errorf("名单 = %+v，显式传入的昵称不该被覆盖", list)
 	}
 }
 

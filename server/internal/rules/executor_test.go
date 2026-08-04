@@ -16,10 +16,11 @@ import (
 
 // failingBot 让指定次数的发送失败，用于测试错误隔离。
 type failingBot struct {
-	mu       sync.Mutex
-	danmakus []string
-	blocks   []blockCall
-	failNext bool
+	mu         sync.Mutex
+	danmakus   []string
+	blocks     []blockCall
+	blacklists []string
+	failNext   bool
 }
 
 type blockCall struct {
@@ -42,6 +43,13 @@ func (f *failingBot) Block(uid string, hours int) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.blocks = append(f.blocks, blockCall{uid, hours})
+	return nil
+}
+
+func (f *failingBot) Blacklist(uid string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.blacklists = append(f.blacklists, uid)
 	return nil
 }
 
@@ -310,6 +318,47 @@ func TestExecuteBlockAppliesToAllMergedUsers(t *testing.T) {
 	}
 	if len(bot.blocks) != 2 {
 		t.Errorf("应禁言 2 个用户，实际 %d", len(bot.blocks))
+	}
+}
+
+// TestExecuteBlacklistAction 钉住「拉黑是独立动作类型」——ActionBlacklist
+// 与 ActionBlock 是两条不同的执行路径，不共用 Hours 字段（拉黑没有时长
+// 概念）。
+func TestExecuteBlacklistAction(t *testing.T) {
+	bot := &failingBot{}
+	ex := newTestExecutor(bot)
+
+	r := Rule{Name: "自动拉黑", Do: []Action{{Type: ActionBlacklist}}}
+	if err := ex.Execute(context.Background(), r, enterTrigger("999", "坏人")); err != nil {
+		t.Fatalf("Execute 失败: %v", err)
+	}
+	if len(bot.blacklists) != 1 || bot.blacklists[0] != "999" {
+		t.Errorf("blacklists = %v", bot.blacklists)
+	}
+	// 拉黑不该顺带触发禁言——两条路径必须互不影响
+	if len(bot.blocks) != 0 {
+		t.Errorf("blocks = %v，拉黑动作不该触发禁言", bot.blocks)
+	}
+}
+
+func TestExecuteBlacklistAppliesToAllMergedUsers(t *testing.T) {
+	bot := &failingBot{}
+	ex := newTestExecutor(bot)
+
+	tr := Trigger{
+		Type: event.TypeDanmaku,
+		Events: []event.Event{
+			{Type: event.TypeDanmaku, Payload: event.Danmaku{User: event.User{UID: "1"}}},
+			{Type: event.TypeDanmaku, Payload: event.Danmaku{User: event.User{UID: "2"}}},
+		},
+		Vars: map[string]any{"user": map[string]any{"uid": "1"}},
+	}
+	r := Rule{Name: "自动拉黑", Do: []Action{{Type: ActionBlacklist}}}
+	if err := ex.Execute(context.Background(), r, tr); err != nil {
+		t.Fatalf("Execute 失败: %v", err)
+	}
+	if len(bot.blacklists) != 2 {
+		t.Errorf("应拉黑 2 个用户，实际 %d", len(bot.blacklists))
 	}
 }
 

@@ -49,10 +49,48 @@ type bindingView struct {
 	Enabled       bool     `json:"enabled"`
 	RuleCount     int      `json:"ruleCount"`
 	Permissions   []string `json:"permissions"`
+	IsOwner       bool     `json:"isOwner"`
 	LiveStatus    string   `json:"liveStatus"`
 	LiveCheckedAt *string  `json:"liveCheckedAt"`
 	AnchorUID     string   `json:"anchorUid"`
 	AnchorName    string   `json:"anchorName"`
+}
+
+// TestListBindingsIncludesIsOwner 钉住 P5-6 新增字段：拉黑走账号所有权，
+// 不走权限点，前端需要一个独立于 Permissions 的信号来决定要不要显示
+// 「拉黑」区——持有 user:block 不代表是账号所有者。
+func TestListBindingsIncludesIsOwner(t *testing.T) {
+	srv, st := newTestServer(t)
+	zhang := loginAs(t, srv, st, "张三", false)
+	mustBindingFor(t, st, "张三", "小号", "123")
+
+	li := loginAs(t, srv, st, "李四", false)
+	if err := st.Grant(context.Background(), "李四", "小号", "123",
+		[]perm.Permission{perm.UserBlock}); err != nil {
+		t.Fatalf("授权报错: %v", err)
+	}
+
+	// 张三（所有者）应看到 isOwner=true
+	ownerResp := jsonRequest(t, zhang, "GET", srv.URL+"/api/bindings", "")
+	defer ownerResp.Body.Close()
+	var ownerGot []bindingView
+	if err := json.NewDecoder(ownerResp.Body).Decode(&ownerGot); err != nil {
+		t.Fatalf("解析报错: %v", err)
+	}
+	if len(ownerGot) != 1 || !ownerGot[0].IsOwner {
+		t.Errorf("张三应看到 isOwner=true, 实际 %+v", ownerGot)
+	}
+
+	// 李四（持有 user:block 但非所有者）应看到 isOwner=false
+	liResp := jsonRequest(t, li, "GET", srv.URL+"/api/bindings", "")
+	defer liResp.Body.Close()
+	var liGot []bindingView
+	if err := json.NewDecoder(liResp.Body).Decode(&liGot); err != nil {
+		t.Fatalf("解析报错: %v", err)
+	}
+	if len(liGot) != 1 || liGot[0].IsOwner {
+		t.Errorf("李四持有 user:block 但非所有者，应看到 isOwner=false, 实际 %+v", liGot)
+	}
 }
 
 func TestListBindingsIncludesCallerPermissions(t *testing.T) {

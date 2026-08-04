@@ -20,6 +20,9 @@ const defaultScriptTimeout = 200 * time.Millisecond
 type BotAPI interface {
 	SendDanmaku(text string) error
 	Block(uid string, hours int) error
+	// Blacklist 是账号级拉黑，与 Block（房间级禁言）是两条独立的能力——
+	// 不接受 hours 参数，拉黑没有时长概念。
+	Blacklist(uid string) error
 }
 
 // Storage 是注入脚本的房间级键值存储。
@@ -92,6 +95,14 @@ func (s *Sandbox) newRuntime() *goja.Runtime {
 		}
 		if err := s.bot.Block(uid, hours); err != nil {
 			panic(vm.ToValue("禁言失败: " + err.Error()))
+		}
+	})
+	_ = bot.Set("blacklist", func(uid string) {
+		if s.bot == nil {
+			panic(vm.ToValue("bot 能力未启用"))
+		}
+		if err := s.bot.Blacklist(uid); err != nil {
+			panic(vm.ToValue("拉黑失败: " + err.Error()))
 		}
 	})
 	_ = vm.Set("bot", bot)

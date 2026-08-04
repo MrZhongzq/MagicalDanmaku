@@ -1,34 +1,39 @@
 <script setup lang="ts">
 /**
- * Moderation 是「房管」页（设计文档 §7.2 页面 3），分两个区：
+ * Moderation 是「房管」页（设计文档 §7.2 页面 3），分两个区，且**彻底
+ * 分开处理**（P5-6，用户明确纠正过两次）：
  *
- *   - 房管区：禁言、解除禁言、禁言名单。主播本人与粉丝房管都能用，
- *     对应权限点 user:block。
- *   - 主播区：拉黑、解除拉黑。
+ *   - 房管区：禁言、解除禁言、禁言名单。房间级操作，走 B 站直播间禁言
+ *     接口，主播本人与粉丝房管都能用，对应权限点 user:block。
+ *   - 拉黑区：拉黑、解除拉黑。**账号级操作，与直播间无关**——用户原话
+ *     「拉黑是个账号操作，是指账号拉黑，直播间没有拉黑。主播在直播间
+ *     拉黑一个人和她从评论区拉黑一个人没有区别」。
  *
- * **「拉黑」不是独立的封禁动作，B 站没有独立的直播间拉黑接口**（P4-3
- * 查证结论，见悬空清单第 2 条）。原 C++ 项目的「拉黑」按钮实际调的是
- * `livedanmakuwindow.cpp:3049` 的 `signalAddBlockUser(uid, 720, msg)`——
- * 就是把禁言时长打满 720 小时（30 天，B 站最长禁言时长），走的是同一个
- * 禁言接口。所以这里「拉黑」直接接 `POST .../block`（`hours` 固定
- * 720），「解除拉黑」直接接 `POST .../unblock`，与房管区的禁言/解禁是
- * 同一个后端动作，只是时长固定、界面上分开摆放。**文案必须诚实**：
- * 不能让用户以为这是一个独立于禁言之外的功能。
+ * **这不是「禁言的一个时长档位」。** 早期版本（以及原 C++ 项目的
+ * `signalAddBlockUser(uid, 720, msg)`）把「拉黑」实现成「禁言 720
+ * 小时」，用户纠正过两次——账号拉黑（`POST x/relation/modify`，
+ * act=5）与直播间禁言是完全不同的两个 B 站接口，走完全不同的权限
+ * 判定（见下）。
  *
- * 全页最重要的一条，来自用户原话：
+ * 两区的权限判定是两条不同的轴：
  *
- * > 主播账号本人和粉丝房管的区别在于主播可以禁言和拉黑，房管只能禁言，
- * > 此处如果发现没有房管权限应该提示警告，但是面板不应该全是灰的锁死。
- * > 如果有人非要在不是房管的直播间开启房管功能，b 站会回退操作失败，
- * > 把操作失败写日志。
+ *   - 房管区走 `user:block` 权限点——持有它的人（主播本人或被授权的
+ *     房管）都能禁言/解禁。缺权限时只顶一条 PermissionWarning，
+ *     **所有控件保持可用**：B 站可能刚给房管权限、刚撤，接口返回的
+ *     状态可能滞后，把面板灰掉等于替用户预判一个可能是错的结论。
+ *     操作失败时把后端 502 的原文原样显示，不包装成「操作失败，请
+ *     重试」——那句话（例如「你不是本房间的房管」）正是操作者要看的。
+ *   - 拉黑区走**账号所有权**（`binding.isOwner`，对应后端
+ *     `isAccountOwner`），不是 `user:block`——房管持有 user:block
+ *     能代为禁言，但不能代表账号本人去拉黑一个陌生人的社交关系。
+ *     同样只警告不锁死，理由与上面一致。
  *
- * 原因：我们无法可靠预判某账号在某直播间到底有没有房管权限——B 站可能
- * 刚给、刚撤，或者接口返回的状态是滞后的。把面板灰掉等于「我判断你没
- * 权限所以不让你试」，而这个判断本身可能是错的。所以缺 user:block 时
- * 只顶一条 PermissionWarning，**所有控件保持可用**；操作失败时把后端
- * 返回的 error 原样显示——后端对 B 站上游失败返回 502，文案形如
- * 「禁言失败: ...」，那句话正是操作者要看的（例如「你不是本房间的房管」），
- * **不能包装成「操作失败，请重试」**，重试没用，原因才有用。
+ * 拉黑是不可逆的对外操作（真的会影响 B 站账号的社交关系），下手前要有
+ * 明确确认——用 `useDialog()`，与 Custom.vue 删规则草稿同一套模式。
+ *
+ * 状态回读：`GET .../blacklist-status` 是"白捡"的接口（`attribute==128`
+ * 即已拉黑），让界面显示真实状态而不是"发了请求所以大概成功了"；
+ * 顺带自动回填昵称。
  */
 import { computed, h, ref, watch } from 'vue'
 import {
@@ -41,13 +46,13 @@ import {
   NSelect,
   NSpin,
   NTag,
-  NTooltip,
+  useDialog,
   useMessage,
 } from 'naive-ui'
 import type { DataTableColumns } from 'naive-ui'
 import { useRouter } from 'vue-router'
 import { ApiError, request } from '@/api'
-import type { BlockedUser } from '@/api'
+import type { BlacklistStatus, BlockedUser } from '@/api'
 import { useAuthStore } from '@/stores/auth'
 import { useBindingsStore } from '@/stores/bindings'
 import PermissionWarning from '@/components/PermissionWarning.vue'
@@ -56,6 +61,7 @@ import BindingSelector from '@/components/BindingSelector.vue'
 const auth = useAuthStore()
 const bindings = useBindingsStore()
 const message = useMessage()
+const dialog = useDialog()
 const router = useRouter()
 
 /**
@@ -65,6 +71,15 @@ const router = useRouter()
 const missingBlockPerm = computed(() => {
   const b = bindings.current
   return b !== null && !auth.hasPerm(b, 'user:block')
+})
+
+/**
+ * 拉黑区的权限警告：账号所有权，不是 user:block。持有 user:block
+ * （普通房管）的人会在这里看到警告——这正是"房管只能禁言"的界面表现。
+ */
+const missingOwnerPerm = computed(() => {
+  const b = bindings.current
+  return b !== null && !b.isOwner
 })
 
 // ---- 禁言名单 ----
@@ -133,10 +148,12 @@ const columns: DataTableColumns<BlockedUser> = [
 ]
 
 // ---- 加入名单 ----
+//
+// 只留 UID 输入框——昵称由后端按 UID 自动查询回填，理由框直接删掉
+// （P5-6 用户原话：「这里不要禁言理由和昵称的输入，昵称自动 UID
+// 获取，禁言理由无意义」）。
 
 const addUid = ref('')
-const addUsername = ref('')
-const addReason = ref('')
 
 async function addToBlockList() {
   const b = bindings.current
@@ -150,15 +167,9 @@ async function addToBlockList() {
     return
   }
   try {
-    await request('POST', `/api/bindings/${b.id}/blocklist`, {
-      uid,
-      username: addUsername.value.trim(),
-      reason: addReason.value.trim(),
-    })
+    await request('POST', `/api/bindings/${b.id}/blocklist`, { uid })
     message.success('已加入名单')
     addUid.value = ''
-    addUsername.value = ''
-    addReason.value = ''
   } catch (e) {
     message.error(e instanceof ApiError ? e.message : '加入名单失败')
   } finally {
@@ -224,61 +235,103 @@ async function doUnblock() {
   }
 }
 
-// ---- 主播区：拉黑 / 解除拉黑 ----
+// ---- 拉黑区：账号级拉黑 / 解除拉黑（P5-6，独立于禁言的动作）----
 //
-// 「拉黑」= 禁言 720 小时（B 站最长时限），走与房管区完全相同的接口，
-// 只是时长固定。「保持不锁死」原则同样适用：非主播账号点这两个按钮
-// 一样可用，B 站会在真正调用时回退操作失败，把原因原样透出。
+// 走 x/relation/modify（act=5 拉黑 / act=6 取消拉黑），账号级，与直播间
+// 无关。权限判定是 binding.isOwner（账号所有权），不是 user:block。
 
-/** 拉黑固定用 B 站允许的最长禁言时长——这就是「拉黑」在协议层的真实含义。 */
-const BLACKLIST_HOURS = 720
+const blacklistUid = ref('')
+const blacklistChecking = ref(false)
+const blacklistStatus = ref<BlacklistStatus | null>(null)
 
-const ownerBlockUid = ref('')
-const ownerUnblockUid = ref('')
-
-async function doOwnerBlock() {
+/** checkBlacklistStatus 是"白捡"的状态回读——拉黑前后都可以查，
+ * 让操作者在下手前后都能看到真实状态，而不是"发了请求所以大概成功了"。
+ */
+async function checkBlacklistStatus() {
   const b = bindings.current
-  if (!b) {
-    message.warning('请先选择直播间')
+  const uid = blacklistUid.value.trim()
+  if (!b || !uid) {
+    message.warning('请先选择直播间并填写 UID')
     return
   }
-  const uid = ownerBlockUid.value.trim()
-  if (!uid) {
-    message.warning('请输入 UID')
-    return
-  }
+  blacklistChecking.value = true
   try {
-    await request('POST', `/api/bindings/${b.id}/block`, { uid, hours: BLACKLIST_HOURS })
-    message.success(`已拉黑 UID ${uid}（禁言 ${BLACKLIST_HOURS} 小时）`)
-    ownerBlockUid.value = ''
+    blacklistStatus.value = await request<BlacklistStatus>(
+      'GET',
+      `/api/bindings/${b.id}/blacklist-status?uid=${encodeURIComponent(uid)}`,
+    )
   } catch (e) {
-    // 与房管区的禁言一致：原样显示后端错误（例如「你不是本直播间的主播」），
-    // 不包装成笼统提示——重试没用，原因才有用。
+    message.error(e instanceof ApiError ? e.message : '查询拉黑状态失败')
+  } finally {
+    blacklistChecking.value = false
+  }
+}
+
+async function doBlacklistRequest() {
+  const b = bindings.current
+  const uid = blacklistUid.value.trim()
+  if (!b || !uid) return
+  try {
+    await request('POST', `/api/bindings/${b.id}/blacklist`, { uid })
+    message.success(`已拉黑 UID ${uid}`)
+    await checkBlacklistStatus()
+  } catch (e) {
+    // 拉黑失败的原因（例如"你不是这个账号的所有者"）正是操作者要看的，
+    // 不能包装成笼统提示。
     message.error(e instanceof ApiError ? e.message : '拉黑失败')
   }
 }
 
-async function doOwnerUnblock() {
+/** doBlacklist 下手前弹一道明确确认——拉黑是不可逆的对外操作，真的会
+ * 影响 B 站账号的社交关系，不能一点就发。
+ */
+function doBlacklist() {
+  const b = bindings.current
+  const uid = blacklistUid.value.trim()
+  if (!b) {
+    message.warning('请先选择直播间')
+    return
+  }
+  if (!uid) {
+    message.warning('请输入 UID')
+    return
+  }
+  dialog.warning({
+    title: '确认拉黑',
+    content: `确定要拉黑 UID ${uid} 吗？这会真实影响该账号在 B 站的社交关系，且不是本地可撤销的操作（可以随时再次「解除拉黑」，但拉黑这个动作本身已经真实发生过）。`,
+    positiveText: '确认拉黑',
+    negativeText: '取消',
+    onPositiveClick: () => void doBlacklistRequest(),
+  })
+}
+
+async function doUnblacklist() {
   const b = bindings.current
   if (!b) {
     message.warning('请先选择直播间')
     return
   }
-  const uid = ownerUnblockUid.value.trim()
+  const uid = blacklistUid.value.trim()
   if (!uid) {
     message.warning('请输入 UID')
     return
   }
   try {
-    await request('POST', `/api/bindings/${b.id}/unblock`, { uid })
+    await request('POST', `/api/bindings/${b.id}/unblacklist`, { uid })
     message.success(`已解除 UID ${uid} 的拉黑`)
-    ownerUnblockUid.value = ''
+    await checkBlacklistStatus()
   } catch (e) {
     message.error(e instanceof ApiError ? e.message : '解除拉黑失败')
   }
 }
 
-// ---- 自动禁言规则：跳转到「自定义弹幕姬」页并预填一条草稿 ----
+// 切直播间/改 UID 之后，上一次查到的状态就不再可信，必须清掉——
+// 否则界面可能显示"绑定 A 里 UID X 已拉黑"，实际当前选中的是绑定 B。
+watch([() => bindings.currentId, blacklistUid], () => {
+  blacklistStatus.value = null
+})
+
+// ---- 自动规则：跳转到「自定义弹幕姬」页并预填一条草稿 ----
 //
 // Task 6 留下的松脱：当时 custom 路由还不存在，按钮跳不过去也看不出问题。
 // custom 路由做出来之后（Task 11），按钮真能跳了，但「预填自动禁言模板」
@@ -287,16 +340,27 @@ async function doOwnerUnblock() {
 // 「弹幕匹配关键词 → 禁言」的规则骨架（事件类型 danmaku、条件 text contains
 // 关键词、动作 block），关键词留空由用户自己填——禁言关键词因人而异，
 // 编不出默认值，硬编一个反而可能被误当成"已经配置好"直接保存。
-function goToCustomDanmaku() {
+//
+// P5-6：新增 preset=autoblacklist，往草稿里插的是「弹幕匹配关键词 →
+// 拉黑」（动作类型 blacklist）——与 automute 是两条**独立**的预设，
+// 不共用同一条草稿骨架，呼应"拉黑规则与禁言规则要分开处理"的要求。
+type CustomPreset = 'automute' | 'autoblacklist'
+
+const presetLabel: Record<CustomPreset, string> = {
+  automute: '自动禁言',
+  autoblacklist: '自动拉黑',
+}
+
+function goToCustomDanmaku(preset: CustomPreset) {
   // 「自定义弹幕姬」现在已经注册路由，这个判断理论上总是为真；保留它是因为
   // router.push({name}) 找不到 name 时 vue-router 会同步抛
   // MATCHER_NOT_FOUND——万一将来路由表被改动导致 custom 临时缺席，这里
   // 也不会把同步异常炸到调用方（与 Shell.vue 里 go() 的处理一致）。
   if (!router.hasRoute('custom')) {
-    message.info('『自定义弹幕姬』页还没做，做好之后这里会跳过去配置自动禁言规则')
+    message.info(`『自定义弹幕姬』页还没做，做好之后这里会跳过去配置${presetLabel[preset]}规则`)
     return
   }
-  void router.push({ name: 'custom', query: { preset: 'automute' } })
+  void router.push({ name: 'custom', query: { preset } })
 }
 </script>
 
@@ -342,40 +406,45 @@ function goToCustomDanmaku() {
 
         <div class="row add-row">
           <NInput v-model:value="addUid" placeholder="UID" style="width: 140px" />
-          <NInput v-model:value="addUsername" placeholder="昵称（可选）" style="width: 140px" />
-          <NInput v-model:value="addReason" placeholder="原因（可选）" style="width: 200px" />
           <NButton @click="addToBlockList">加入名单</NButton>
         </div>
       </NCard>
 
       <NCard class="section-card">
         <template #header>
-          <span>主播区</span>
-        </template>
-        <template #header-extra>
-          <NTooltip>
-            <template #trigger>
-              <NTag type="info" size="small">拉黑＝禁言到顶</NTag>
-            </template>
-            B 站没有独立的直播间拉黑接口——「拉黑」在这里是禁言 720 小时 （30 天，B
-            站允许的最长禁言时长），走的是与房管区完全相同的接口， 不是另一个独立的封禁动作
-          </NTooltip>
+          <span>拉黑区（账号级，与直播间无关）</span>
         </template>
 
+        <PermissionWarning
+          v-if="missingOwnerPerm"
+          text="你不是这个账号的所有者，拉黑操作会被拒绝——房管只能禁言，拉黑只有账号所有者能做"
+        />
+
         <p class="hint">
-          拉黑（禁言 720 小时，B 站最长时限）——这不是一个独立的封禁动作，只是把
-          禁言时长打满，与上面「房管区」的禁言/解禁走同一个接口
+          拉黑是独立于禁言的账号动作：拉黑之后，这个账号在 B 站的黑名单里会真的多一个人，
+          与直播间、与禁言完全无关。这是不可逆的对外操作，请在确认框里再次确认。
         </p>
 
         <div class="row">
-          <span class="label">拉黑</span>
-          <NInput v-model:value="ownerBlockUid" placeholder="UID" style="width: 140px" />
-          <NButton type="primary" @click="doOwnerBlock">拉黑</NButton>
+          <span class="label">目标 UID</span>
+          <NInput v-model:value="blacklistUid" placeholder="UID" style="width: 140px" />
+          <NButton size="small" :loading="blacklistChecking" @click="checkBlacklistStatus">
+            查询状态
+          </NButton>
         </div>
+
+        <p v-if="blacklistStatus" class="hint status-line">
+          UID {{ blacklistStatus.uid }}
+          <NTag v-if="blacklistStatus.nickname" size="small">{{ blacklistStatus.nickname }}</NTag>
+          当前状态：
+          <NTag :type="blacklistStatus.blacklisted ? 'error' : 'default'" size="small">
+            {{ blacklistStatus.blacklisted ? '已拉黑' : '未拉黑' }}
+          </NTag>
+        </p>
+
         <div class="row">
-          <span class="label">解除拉黑</span>
-          <NInput v-model:value="ownerUnblockUid" placeholder="UID" style="width: 140px" />
-          <NButton @click="doOwnerUnblock">解除拉黑</NButton>
+          <NButton type="error" @click="doBlacklist">拉黑</NButton>
+          <NButton @click="doUnblacklist">解除拉黑</NButton>
         </div>
       </NCard>
 
@@ -388,7 +457,20 @@ function goToCustomDanmaku() {
           「自定义弹幕姬」页配置，不在这里。点「去配置」会跳过去并预填一条 「弹幕匹配关键词 →
           禁言」的规则草稿，关键词需要自己填，草稿仍要在那边 点「保存并生效」才会真正生效。
         </p>
-        <NButton size="small" @click="goToCustomDanmaku">去配置</NButton>
+        <NButton size="small" @click="goToCustomDanmaku('automute')">去配置</NButton>
+      </NCard>
+
+      <NCard class="section-card">
+        <template #header>
+          <span>自动拉黑规则</span>
+        </template>
+        <p class="hint">
+          与「自动禁言规则」是两种**独立**的规则（P5-6：拉黑规则与禁言规则要分开处理），
+          点「去配置」会跳过去并预填一条「弹幕匹配关键词 → 拉黑」的规则草稿，关键词需要
+          自己填，草稿仍要在那边点「保存并生效」才会真正生效。自动拉黑一旦触发就是真实的
+          账号级拉黑，配置关键词时请务必谨慎。
+        </p>
+        <NButton size="small" @click="goToCustomDanmaku('autoblacklist')">去配置</NButton>
       </NCard>
     </template>
   </div>

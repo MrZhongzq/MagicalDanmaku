@@ -15,12 +15,16 @@ import (
 
 // stubActions 是 connector.Actions 的测试替身。
 type stubActions struct {
-	mu       sync.Mutex
-	sent     []string
-	blocks   []string
-	unblocks []string
-	rooms    []string
-	err      error
+	mu          sync.Mutex
+	sent        []string
+	blocks      []string
+	unblocks    []string
+	rooms       []string
+	blacklists  []string
+	unblacklist []string
+	attribute   int
+	nickname    string
+	err         error
 }
 
 func (s *stubActions) SendDanmaku(ctx context.Context, req connector.SendDanmakuRequest) error {
@@ -54,6 +58,44 @@ func (s *stubActions) UnblockUser(ctx context.Context, roomID, uid string) error
 	s.unblocks = append(s.unblocks, uid)
 	s.rooms = append(s.rooms, roomID)
 	return nil
+}
+
+func (s *stubActions) BlacklistUser(ctx context.Context, uid string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.err != nil {
+		return s.err
+	}
+	s.blacklists = append(s.blacklists, uid)
+	return nil
+}
+
+func (s *stubActions) UnblacklistUser(ctx context.Context, uid string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.err != nil {
+		return s.err
+	}
+	s.unblacklist = append(s.unblacklist, uid)
+	return nil
+}
+
+func (s *stubActions) RelationAttribute(ctx context.Context, uid string) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.err != nil {
+		return 0, s.err
+	}
+	return s.attribute, nil
+}
+
+func (s *stubActions) Nickname(ctx context.Context, uid string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.err != nil {
+		return "", s.err
+	}
+	return s.nickname, nil
 }
 
 func testSession(t *testing.T) *auth.Session {
@@ -228,6 +270,96 @@ func TestBindingUnblockReportsErrorWithLabel(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "甲") {
 		t.Errorf("错误信息应含房间号，实际 %v", err)
+	}
+}
+
+// TestBindingBlacklist 照着 Unblock 的用例写：断言 BlacklistUser 被调用
+// （账号级，不带房间号），且共享的限流器确实被等待过。
+func TestBindingBlacklist(t *testing.T) {
+	acc := New("账号", testSession(t), 60*time.Millisecond)
+	st := &stubActions{}
+	b := &Binding{Account: acc, RoomID: "1706666491", Actions: st}
+
+	ctx := context.Background()
+	if err := b.Blacklist(ctx, "999"); err != nil {
+		t.Fatalf("Blacklist 失败: %v", err)
+	}
+	start := time.Now()
+	if err := b.Blacklist(ctx, "999"); err != nil {
+		t.Fatalf("Blacklist 失败: %v", err)
+	}
+	if d := time.Since(start); d < 40*time.Millisecond {
+		t.Errorf("第二次 Blacklist 应等待限流器，实际间隔 %v", d)
+	}
+	if len(st.blacklists) != 2 || st.blacklists[0] != "999" {
+		t.Errorf("blacklists = %v", st.blacklists)
+	}
+}
+
+func TestBindingUnblacklist(t *testing.T) {
+	acc := New("账号", testSession(t), 0)
+	st := &stubActions{}
+	b := &Binding{Account: acc, RoomID: "1706666491", Actions: st}
+
+	if err := b.Unblacklist(context.Background(), "999"); err != nil {
+		t.Fatalf("Unblacklist 失败: %v", err)
+	}
+	if len(st.unblacklist) != 1 || st.unblacklist[0] != "999" {
+		t.Errorf("unblacklist = %v", st.unblacklist)
+	}
+}
+
+func TestBindingRelationAttribute(t *testing.T) {
+	acc := New("账号", testSession(t), 0)
+	st := &stubActions{attribute: 128}
+	b := &Binding{Account: acc, RoomID: "甲", Actions: st}
+
+	attr, err := b.RelationAttribute(context.Background(), "999")
+	if err != nil {
+		t.Fatalf("RelationAttribute 失败: %v", err)
+	}
+	if attr != 128 {
+		t.Errorf("attribute = %d, 期望 128", attr)
+	}
+}
+
+func TestBindingNickname(t *testing.T) {
+	acc := New("账号", testSession(t), 0)
+	st := &stubActions{nickname: "小明"}
+	b := &Binding{Account: acc, RoomID: "甲", Actions: st}
+
+	name, err := b.Nickname(context.Background(), "999")
+	if err != nil {
+		t.Fatalf("Nickname 失败: %v", err)
+	}
+	if name != "小明" {
+		t.Errorf("name = %q", name)
+	}
+}
+
+func TestBindingBlacklistWithoutAccountFails(t *testing.T) {
+	b := &Binding{RoomID: "甲", Actions: &stubActions{}}
+	if err := b.Blacklist(context.Background(), "999"); !errors.Is(err, ErrNoAccount) {
+		t.Errorf("err = %v, 期望 ErrNoAccount", err)
+	}
+}
+
+// TestBindingBlacklistReportsErrorWithLabel 与 Block/Unblock 一致：错误信息
+// 要能定位到是哪个账号出的问题（拉黑没有房间号，但账号名仍然要在）。
+func TestBindingBlacklistReportsErrorWithLabel(t *testing.T) {
+	st := &stubActions{err: &api.APIError{Code: -101, Message: "账号未登录"}}
+	b := &Binding{
+		Account: New("失效账号", testSession(t), 0),
+		RoomID:  "甲",
+		Actions: st,
+	}
+
+	err := b.Blacklist(context.Background(), "999")
+	if err == nil {
+		t.Fatal("账号失效应当报错")
+	}
+	if !strings.Contains(err.Error(), "失效账号") {
+		t.Errorf("错误信息应含账号名，实际 %v", err)
 	}
 }
 

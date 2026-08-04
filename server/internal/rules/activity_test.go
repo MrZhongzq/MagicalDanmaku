@@ -65,6 +65,7 @@ func (b *fakeBot) SendDanmaku(text string) error {
 }
 
 func (b *fakeBot) Block(string, int) error { return nil }
+func (b *fakeBot) Blacklist(string) error  { return nil }
 
 // danmakuEvent 构造一条弹幕事件。
 func danmakuEvent(uid, name, text string) event.Event {

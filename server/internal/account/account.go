@@ -107,3 +107,62 @@ func (b *Binding) Unblock(ctx context.Context, uid string) error {
 	}
 	return nil
 }
+
+// Blacklist 以本绑定的账号身份把 uid 加入黑名单。
+//
+// 账号级操作，不带房间号——同一账号在绑定 A 与绑定 B 拉黑同一个 uid
+// 是同一件事，不是两件独立的事。仍然走 Account.Limiter：拉黑请求与
+// 禁言/发弹幕共用同一个账号的风控节奏，账号被限流时拉黑也该等待，
+// 而不是抢在禁言前面把请求打出去触发风控。
+func (b *Binding) Blacklist(ctx context.Context, uid string) error {
+	if b.Account == nil {
+		return ErrNoAccount
+	}
+	if err := b.Account.Limiter.Wait(ctx); err != nil {
+		return err
+	}
+	if err := b.Actions.BlacklistUser(ctx, uid); err != nil {
+		return fmt.Errorf("%s 拉黑 %s 失败: %w", b.Label(), uid, err)
+	}
+	return nil
+}
+
+// Unblacklist 以本绑定的账号身份把 uid 移出黑名单。
+func (b *Binding) Unblacklist(ctx context.Context, uid string) error {
+	if b.Account == nil {
+		return ErrNoAccount
+	}
+	if err := b.Account.Limiter.Wait(ctx); err != nil {
+		return err
+	}
+	if err := b.Actions.UnblacklistUser(ctx, uid); err != nil {
+		return fmt.Errorf("%s 解除拉黑 %s 失败: %w", b.Label(), uid, err)
+	}
+	return nil
+}
+
+// RelationAttribute 查询本绑定账号与 uid 的关系属性值，供调用方用
+// bilibili/api.IsBlacklisted 判断是否已拉黑。只读查询，不占用限流器
+// 配额（与 Block/Blacklist 等会真正触发写操作的动作不同）。
+func (b *Binding) RelationAttribute(ctx context.Context, uid string) (int, error) {
+	if b.Account == nil {
+		return 0, ErrNoAccount
+	}
+	attr, err := b.Actions.RelationAttribute(ctx, uid)
+	if err != nil {
+		return 0, fmt.Errorf("%s 查询与 %s 的关系状态失败: %w", b.Label(), uid, err)
+	}
+	return attr, nil
+}
+
+// Nickname 查询 uid 的昵称，用于自动回填。只读查询，不占用限流器配额。
+func (b *Binding) Nickname(ctx context.Context, uid string) (string, error) {
+	if b.Account == nil {
+		return "", ErrNoAccount
+	}
+	name, err := b.Actions.Nickname(ctx, uid)
+	if err != nil {
+		return "", fmt.Errorf("%s 查询 %s 的昵称失败: %w", b.Label(), uid, err)
+	}
+	return name, nil
+}

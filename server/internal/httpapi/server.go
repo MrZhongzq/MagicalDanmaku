@@ -205,6 +205,17 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/bindings/{binding}/unblock",
 		s.requirePerm(perm.UserBlock, s.handleUnblockUser))
 
+	// 账号级拉黑：与上面的房间级禁言/解禁是两条独立的能力，守卫也不同——
+	// requireBindingOwner（账号所有者或管理员），不是 requirePerm(user:block)。
+	// 见 guard.go 里 requireBindingOwner 的注释。状态回读是只读查询，
+	// 用 GET 不违反"改变状态的接口不得用 GET"。
+	s.mux.HandleFunc("POST /api/bindings/{binding}/blacklist",
+		s.requireBindingOwner(s.handleBlacklistUser))
+	s.mux.HandleFunc("POST /api/bindings/{binding}/unblacklist",
+		s.requireBindingOwner(s.handleUnblacklistUser))
+	s.mux.HandleFunc("GET /api/bindings/{binding}/blacklist-status",
+		s.requireBindingOwner(s.handleBlacklistStatus))
+
 	// 热重载：改完规则按保存才生效。走 rule:write——能改规则的人才能让它生效
 	s.mux.HandleFunc("POST /api/bindings/{binding}/reload",
 		s.requirePerm(perm.RuleWrite, s.handleReload))

@@ -209,6 +209,7 @@ describe('Accounts 直播间开播状态展示', () => {
     enabled: true,
     ruleCount: 0,
     permissions: [],
+    isOwner: true,
     liveStatus: 'unknown',
     liveCheckedAt: null,
     anchorUid: '',

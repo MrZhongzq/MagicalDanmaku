@@ -94,6 +94,16 @@ export interface Binding {
   ruleCount: number
   /** 调用者在这个绑定上拥有的权限点，前端据此决定显示哪些按钮。 */
   permissions: Permission[]
+  /**
+   * 调用者是不是这个绑定所属账号的所有者（管理员也为 true）。
+   *
+   * **拉黑（P5-6）走这个字段，不走 permissions。** 拉黑是账号级操作，
+   * 与直播间无关——房管持有 `user:block` 能代为禁言，但不能代表账号
+   * 本人拉黑一个陌生人，这条边界与权限点体系是两条独立的轴。不要用
+   * `permissions.includes('user:block')` 来判断能不能拉黑，那是禁言
+   * 的权限，不是拉黑的。
+   */
+  isOwner: boolean
 
   /**
    * 最近一次直播间开播状态检测的结果，由后端 60 秒一轮的心跳循环，
@@ -106,6 +116,19 @@ export interface Binding {
   anchorUid: string
   /** 主播昵称。探测成功前为空串；探测失败时保留上一次已知值。 */
   anchorName: string
+}
+
+/**
+ * `GET /api/bindings/{id}/blacklist-status?uid=` 的响应。
+ *
+ * `blacklisted` 是 B 站 `x/space/wbi/acc/relation` 的 `attribute==128`
+ * 换算结果（后端已经做了判定，前端不重新解释 attribute 原始值）。
+ * `nickname` 是尽力而为的自动回填，查不到时是空串，不代表查询失败。
+ */
+export interface BlacklistStatus {
+  uid: string
+  blacklisted: boolean
+  nickname: string
 }
 
 export interface BlockedUser {

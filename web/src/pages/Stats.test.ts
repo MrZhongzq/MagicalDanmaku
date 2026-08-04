@@ -16,6 +16,7 @@ const 绑定: {
   permissions: (
     'rule:read' | 'rule:write' | 'danmaku:send' | 'user:block' | 'member:manage' | 'event:read'
   )[]
+  isOwner: boolean
   liveStatus: 'living' | 'offline' | 'unknown'
   liveCheckedAt: string | null
   anchorUid: string
@@ -28,6 +29,7 @@ const 绑定: {
   enabled: true,
   ruleCount: 0,
   permissions: ['event:read'],
+  isOwner: true,
   liveStatus: 'unknown',
   liveCheckedAt: null,
   anchorUid: '',

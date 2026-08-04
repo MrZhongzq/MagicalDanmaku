@@ -112,6 +112,8 @@ func (e *Executor) runAction(ctx context.Context, ruleName string, actionIdx int
 		return e.sendDanmaku(ctx, ruleName, actionIdx, a, tr)
 	case ActionBlock:
 		return e.blockUsers(ctx, ruleName, a, tr)
+	case ActionBlacklist:
+		return e.blacklistUsers(ctx, ruleName, tr)
 	case ActionScript:
 		if e.script == nil {
 			return errors.New("rules: 未配置脚本沙箱")
@@ -232,6 +234,30 @@ func (e *Executor) blockUsers(ctx context.Context, ruleName string, a Action, tr
 			continue
 		}
 		e.log.Info("已禁言用户", "rule", ruleName, "uid", uid, "hours", hours)
+	}
+	return errors.Join(errs...)
+}
+
+// blacklistUsers 拉黑 Trigger 涉及的全部用户（账号级操作，不带房间号、
+// 不带时长）。与 blockUsers 分开实现是有意的——ActionBlacklist 没有
+// Hours 参数，混进 blockUsers 会需要一个没有意义的默认值。
+func (e *Executor) blacklistUsers(ctx context.Context, ruleName string, tr Trigger) error {
+	if e.bot == nil {
+		return errors.New("rules: 未配置机器人接口")
+	}
+
+	uids := uidsOf(tr)
+	if len(uids) == 0 {
+		return errors.New("rules: 事件中没有可拉黑的用户")
+	}
+
+	var errs []error
+	for _, uid := range uids {
+		if err := e.bot.Blacklist(uid); err != nil {
+			errs = append(errs, fmt.Errorf("拉黑 %s 失败: %w", uid, err))
+			continue
+		}
+		e.log.Info("已拉黑用户", "rule", ruleName, "uid", uid)
 	}
 	return errors.Join(errs...)
 }

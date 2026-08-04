@@ -592,9 +592,11 @@ async function loadRules() {
   }
 }
 
-// ---- 自动禁言预填：从「房管页 -> 去配置」跳转过来时预填一条草稿 ----
+// ---- 自动禁言/自动拉黑预填：从「房管页 -> 去配置」跳转过来时预填一条草稿 ----
 //
-// Moderation.vue 的「自动禁言规则」卡片跳过来时带 query preset=automute。
+// Moderation.vue 的「自动禁言规则」卡片带 query preset=automute 跳过来，
+// 「自动拉黑规则」卡片带 preset=autoblacklist（P5-6 新增）——两条独立的
+// 预设，呼应"拉黑规则与禁言规则要分开处理"的要求，不共用同一条草稿骨架。
 // 不用 useRoute()——本页很多测试直接 mount(Custom.vue) 不挂 vue-router，
 // useRoute() 在没有 router 插件时拿到 undefined，访问 .query 会直接抛错。
 // 改用 URLSearchParams 读 window.location.search：vue-router 的 history
@@ -609,10 +611,16 @@ let presetApplied = false
  * 没有 preset 参数的正常访问路径上做任何事。
  */
 function maybeApplyPreset() {
-  if (presetApplied || presetParam !== 'automute') return
-  presetApplied = true
-  customRules.push(buildAutoMutePresetDraft())
-  message.info('已为你预填一条「关键词禁言」草稿，填好关键词后记得点右上角保存')
+  if (presetApplied) return
+  if (presetParam === 'automute') {
+    presetApplied = true
+    customRules.push(buildAutoMutePresetDraft())
+    message.info('已为你预填一条「关键词禁言」草稿，填好关键词后记得点右上角保存')
+  } else if (presetParam === 'autoblacklist') {
+    presetApplied = true
+    customRules.push(buildAutoBlacklistPresetDraft())
+    message.info('已为你预填一条「关键词拉黑」草稿，填好关键词后记得点右上角保存')
+  }
 }
 
 /**
@@ -628,6 +636,23 @@ function buildAutoMutePresetDraft(): CustomRuleDraft {
   draft.whenEnabled = true
   draft.when = { field: 'text', op: 'contains', value: '' }
   draft.actions = [defaultActionDraft('block')]
+  return draft
+}
+
+/**
+ * buildAutoBlacklistPresetDraft 与 buildAutoMutePresetDraft 同构，唯一的
+ * 区别是动作类型换成 blacklist——拉黑没有 hours 概念，defaultActionDraft
+ * 生成的字段里 hours 会被 buildCustomAction 直接忽略（见其 switch 分支）。
+ * 关键词同样留空，理由与自动禁言一致：自动拉黑一旦触发就是真实的账号级
+ * 拉黑，硬编一个示例词风险比禁言更高，绝不能替用户预先填好。
+ */
+function buildAutoBlacklistPresetDraft(): CustomRuleDraft {
+  const draft = defaultCustomRuleDraft()
+  draft.name = '自动拉黑（关键词，待填写）'
+  draft.on = ['danmaku']
+  draft.whenEnabled = true
+  draft.when = { field: 'text', op: 'contains', value: '' }
+  draft.actions = [defaultActionDraft('blacklist')]
   return draft
 }
 
