@@ -2,6 +2,8 @@ name: CI
 
 # 每次推送与 PR 都跑：格式、静态检查、测试、竞态检测、交叉编译。
 on:
+  # 手动触发：流水线本身出问题时要能重跑，而不是靠推一个空提交去撞触发条件。
+  workflow_dispatch:
   push:
     branches:
       # 默认分支是 main（不是 master——那是从上游 fork 来的名字，已经删掉了）。
