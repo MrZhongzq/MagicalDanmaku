@@ -839,7 +839,14 @@ const previewColumns: DataTableColumns<PreviewRow> = [
   flex-wrap: wrap;
 }
 .timezone-select {
-  min-width: 220px;
+  /* 必须给定宽（而不是只给 min-width）：naive-ui 的 NSelect 自带
+     `width: 100%`（见 naive-ui/es/select/src/styles/index.cssr.mjs），
+     在 .dimension-row 这种 flex + flex-wrap 的容器里，100% 会让它成为
+     一个整行宽的 flex item 被挤到下一行去 —— 表现是「统计时区」标签
+     孤零零留在第一行、控件看起来根本不存在（真机反馈就是这么报上来的）。
+     min-width 拦不住这一点，因为 100% 比 220px 大。 */
+  width: 220px;
+  flex: 0 0 auto;
 }
 .dimension-label {
   font-weight: 600;
