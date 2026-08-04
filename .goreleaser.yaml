@@ -105,7 +105,15 @@ docker_manifests:
     image_templates:
       - "ghcr.io/mrzhongzq/magicd:{{ .Version }}-amd64"
       - "ghcr.io/mrzhongzq/magicd:{{ .Version }}-arm64"
+  # latest 只在正式版上移动。
+  #
+  # prerelease: auto 只管 GitHub Release 上的「预发布」标记，**管不到 Docker
+  # tag**——不加这个 skip，推一个 alpha 就会把 latest 指过去，而
+  # docker-compose.yml 默认拉的正是 latest。表现是：照 README 走的人静默
+  # 拿到预发布版；更糟的是正式版发布之后再发一个 alpha，latest 会**倒退**
+  # 回预发布。skip_push: auto 在 prerelease 与 snapshot 时跳过这一条。
   - name_template: "ghcr.io/mrzhongzq/magicd:latest"
+    skip_push: auto
     image_templates:
       - "ghcr.io/mrzhongzq/magicd:latest-amd64"
       - "ghcr.io/mrzhongzq/magicd:latest-arm64"

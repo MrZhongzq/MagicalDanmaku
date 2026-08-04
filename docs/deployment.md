@@ -103,14 +103,28 @@ magicd run
 接口的话，`/api/meta/runtime` 会在保存的配置版本与运行中的版本不一致时
 报告 `configStale=true`。
 
-这和「加一个全新的账号/绑定」是两回事：全新绑定要机器人去建立一条
-新的直播间连接，仍然需要重启 `magicd run`（见下面「用 Docker 部署」
-一节里 `docker compose restart magicd` 那步）。热重载只对**已经在跑的
-绑定**的规则改动生效。
+加一个全新的账号/绑定**也不需要重启**：P5-1 起，绑定的新增、删除、
+启用、停用都在运行期即时生效——WebUI 里加完直播间，机器人会自己建立
+连接。（这一条以前是要重启的，文档一度没跟上；真机上验证过：停用 →
+日志出现「已移除定时任务」，启用 → 「已配置绑定」+「已连接直播间」，
+容器全程没重启。）
 
 ## 用 Docker 部署（推荐）
 
-镜像支持 linux/amd64 与 linux/arm64，`docker pull` 会自动拿到对的那个。
+镜像地址是 `ghcr.io/mrzhongzq/magicd`，公开、拉取不需要登录 GHCR。
+支持 linux/amd64 与 linux/arm64，多架构 manifest 会自动选对的那个。
+
+**群晖 Container Manager、TrueNAS 这类图形化容器平台**要求镜像先存在于
+本地才能创建容器或套用模板，不会替你去拉，所以先手动拉一次：
+
+```bash
+docker pull ghcr.io/mrzhongzq/magicd:latest
+```
+
+版本 tag **没有 `v` 前缀**（`7.0.0-alpha1`，不是 `v7.0.0-alpha1`）——
+GitHub 上的 Release tag 带 `v`，镜像 tag 不带，这两者不一致是 GoReleaser
+的默认行为，照抄 Release 名字会拉不到。要钉死版本就在 `.env` 里设
+`MAGICD_TAG=7.0.0-alpha1`。
 
 ```bash
 git clone https://github.com/MrZhongzq/MagicalDanmaku.git

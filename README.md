@@ -27,9 +27,28 @@
 最省事的是 Docker（自带 PostgreSQL）：
 
 ```bash
+docker pull ghcr.io/mrzhongzq/magicd:latest
 cp .env.example .env    # 改掉 POSTGRES_PASSWORD 与 MAGICD_ADMIN_PASSWORD
 docker compose up -d
 ```
+
+`docker compose up` 本来会自己拉镜像，单独列出 `docker pull` 是给
+**群晖 Container Manager、TrueNAS 这类图形化容器平台**用的——它们要求
+镜像先存在于本地才能创建容器或套用模板，不会替你去拉。
+
+镜像地址：
+
+| | |
+|---|---|
+| 最新正式版 | `ghcr.io/mrzhongzq/magicd:latest` |
+| 指定版本 | `ghcr.io/mrzhongzq/magicd:7.0.0-alpha1`（**没有 `v` 前缀**） |
+| 架构 | linux/amd64、linux/arm64（多架构 manifest，自动选） |
+
+镜像是公开的，拉取不需要登录 GHCR。
+
+⚠️ **当前 `latest` 指向的是 `7.0.0-alpha1`**（唯一一个已发布的版本）。
+从下一次发布起，`latest` 只跟随**正式版**移动，预发布（alpha/beta/rc）
+不再顶掉它。想钉死某个版本就在 `.env` 里设 `MAGICD_TAG=7.0.0-alpha1`。
 
 `MAGICD_ADMIN_PASSWORD` 就是管理员的初始密码——不用再翻
 `docker compose logs migrate` 找一次性密码了；忘了设的话 `migrate`
