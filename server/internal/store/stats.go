@@ -393,8 +393,17 @@ func (s *Store) rawLiveSessions(ctx context.Context, accountID, bindingID int64)
 		switch eventType {
 		case "live_start":
 			if openStart != nil {
-				// 漏记了上一场的下播：单独收一场只有 Start 的场次
-				sessions = append(sessions, liveSession{Start: openStart})
+				// 连续两个 live_start 之间没有夹 live_stop：可能是 B 站
+				// 重连时重发了同一条 LIVE 报文（同一场直播），也可能是真的
+				// 漏记了下播、重新开了一场。不管哪种，都不能让前一场的
+				// 结束时刻延伸到 until/now——那样后面 effectiveSessionBounds
+				// 会把每一场都伸到"现在"，多场互相重叠的时段被分别计入、
+				// 叠加成远超实际的时长（真机故障：一天算出 35 小时）。
+				// 用这条新 live_start 的时刻收尾：如果是重连重发，
+				// [t1,t2]+[t2,...] 拼起来正好等于 [t1,...]，总时长不变；
+				// 如果是真漏记下播，[t1,t2] 至少是个有上界的合理估计，
+				// 不会无限膨胀。
+				sessions = append(sessions, liveSession{Start: openStart, End: &t})
 			}
 			openStart = &t
 		case "live_stop":

@@ -833,3 +833,118 @@ func TestQueryStatsBySessionIsolatedPerBinding(t *testing.T) {
 		t.Errorf("绑定隔离失败: %+v", got)
 	}
 }
+
+// ---- P8：真机 35 小时直播时长故障的回归测试 ----
+//
+// 真机数据（绑定 1，2026-08-04）：四条 live_start、零条 live_stop，其中
+// 两条相差 13 微秒（同一批帧里 B 站重连重发了两次 LIVE 报文）：
+//   02:55:12.512416
+//   02:55:12.512429   ← 与上一条相差 13 微秒
+//   03:29:53.816369
+//   03:29:59.014680
+//
+// 旧的配对算法遇到连续 live_start（中间没有 live_stop）时，把前一次
+// 开播单独收成一场"只有 Start"的场次；effectiveSessionBounds 对这种
+// 场次一律拿 until/now 兜底结束时间。于是四场互相重叠、各自都伸到
+// "现在"的场次被分别计入，加总成了 35 小时 9 分钟——一天最多只有 24
+// 小时。
+
+// TestQueryStatsByDayConsecutiveLiveStartsDoNotInflateLiveSeconds 是这个
+// 缺陷本身的验收标准：断言修好之后算出来的当天直播时长不超过查询窗口
+// 的长度，且恰好等于"第一条 live_start 到窗口结束"——连续 live_start
+// 之间没有 live_stop 时，前一场的结束时刻应该是下一条 live_start 的
+// 时刻，四段场次首尾相接、互不重叠，加总正好等于整段时间，不会因为
+// 中间的"缝"被各自延伸到 until 而重复计入。
+//
+// until 特意取 t4 加整数小时：这样 until 与 t4 的秒内小数部分完全相同
+// （until-t4 是整数秒），四段场次各自按秒截断后再相加，才能与
+// "until-t1 整体截断"严格相等，不会因为四次独立截断各自丢一点小数、
+// 累积出与预期差 1 秒的假失败——四条真机时间戳里前三段小数部分之和
+// 是 0.502264 秒，不足 1 秒，不会发生截断进位，这条等式在算术上是成立的。
+func TestQueryStatsByDayConsecutiveLiveStartsDoNotInflateLiveSeconds(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	accID := mustAccount(t, s, "小号")
+	b, err := s.UpsertBinding(ctx, accID, "1")
+	if err != nil {
+		t.Fatalf("创建绑定报错: %v", err)
+	}
+
+	day := time.Date(2026, 8, 4, 0, 0, 0, 0, time.UTC)
+	t1 := time.Date(2026, 8, 4, 2, 55, 12, 512416000, time.UTC)
+	t2 := time.Date(2026, 8, 4, 2, 55, 12, 512429000, time.UTC) // 与 t1 相差 13 微秒
+	t3 := time.Date(2026, 8, 4, 3, 29, 53, 816369000, time.UTC)
+	t4 := time.Date(2026, 8, 4, 3, 29, 59, 14680000, time.UTC)
+	until := t4.Add(18 * time.Hour) // 与 t4 秒内小数部分对齐，见上方注释
+
+	if err := s.InsertActivity(ctx, []ActivityRow{
+		{AccountID: accID, BindingID: &b.ID, Kind: ActivityEvent, EventType: "live_start", OccurredAt: t1},
+		{AccountID: accID, BindingID: &b.ID, Kind: ActivityEvent, EventType: "live_start", OccurredAt: t2},
+		{AccountID: accID, BindingID: &b.ID, Kind: ActivityEvent, EventType: "live_start", OccurredAt: t3},
+		{AccountID: accID, BindingID: &b.ID, Kind: ActivityEvent, EventType: "live_start", OccurredAt: t4},
+		// day 视图只给"窗口内有业务事件的那些天"生成 bucket（QueryStatsByDay
+		// 里的注释），这里补一条弹幕让 2026-08-04 这天有 bucket 可以累加。
+		{AccountID: accID, BindingID: &b.ID, Kind: ActivityEvent, EventType: "danmaku", OccurredAt: t1.Add(time.Minute)},
+	}); err != nil {
+		t.Fatalf("写入报错: %v", err)
+	}
+
+	got, err := s.QueryStatsByDay(ctx, StatsQuery{AccountID: accID, BindingID: b.ID, Since: day, Until: until})
+	if err != nil {
+		t.Fatalf("按天聚合报错: %v", err)
+	}
+	bucket := statsBucketFor(t, got, "2026-08-04")
+
+	windowSeconds := int64(until.Sub(day) / time.Second)
+	if bucket.LiveSeconds > windowSeconds {
+		t.Fatalf("LiveSeconds = %d 超过了查询窗口长度 %d（一天最多 24 小时，这正是真机 35 小时 bug 的复现）",
+			bucket.LiveSeconds, windowSeconds)
+	}
+
+	wantSeconds := int64(until.Sub(t1) / time.Second)
+	if bucket.LiveSeconds != wantSeconds {
+		t.Errorf("LiveSeconds = %d, 期望等于「第一条 live_start 到窗口结束」的 %d", bucket.LiveSeconds, wantSeconds)
+	}
+}
+
+// TestQueryStatsByDayTwoCompletePairsSumCorrectly 是上面那条修复的对称
+// 测试：真的开播两次、每次都正常配对（Start/End 都在），中间没有连续
+// live_start 这种残缺情况，两段时长要老老实实相加——不能因为"连续
+// live_start 用下一条 live_start 兜底 End"这条新规则而被误伤，这条新
+// 规则只应该在"连续两个 live_start 之间没有 live_stop"时触发。
+func TestQueryStatsByDayTwoCompletePairsSumCorrectly(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	accID := mustAccount(t, s, "小号")
+	b, err := s.UpsertBinding(ctx, accID, "1")
+	if err != nil {
+		t.Fatalf("创建绑定报错: %v", err)
+	}
+
+	day := time.Date(2026, 8, 4, 0, 0, 0, 0, time.UTC)
+	s1start := day.Add(2 * time.Hour)
+	s1stop := s1start.Add(30 * time.Minute)
+	s2start := s1stop.Add(time.Hour)
+	s2stop := s2start.Add(45 * time.Minute)
+
+	if err := s.InsertActivity(ctx, []ActivityRow{
+		{AccountID: accID, BindingID: &b.ID, Kind: ActivityEvent, EventType: "live_start", OccurredAt: s1start},
+		{AccountID: accID, BindingID: &b.ID, Kind: ActivityEvent, EventType: "live_stop", OccurredAt: s1stop},
+		{AccountID: accID, BindingID: &b.ID, Kind: ActivityEvent, EventType: "live_start", OccurredAt: s2start},
+		{AccountID: accID, BindingID: &b.ID, Kind: ActivityEvent, EventType: "live_stop", OccurredAt: s2stop},
+		{AccountID: accID, BindingID: &b.ID, Kind: ActivityEvent, EventType: "danmaku", OccurredAt: s1start.Add(time.Minute)},
+	}); err != nil {
+		t.Fatalf("写入报错: %v", err)
+	}
+
+	got, err := s.QueryStatsByDay(ctx, StatsQuery{AccountID: accID, BindingID: b.ID})
+	if err != nil {
+		t.Fatalf("按天聚合报错: %v", err)
+	}
+	bucket := statsBucketFor(t, got, "2026-08-04")
+
+	want := int64(30*time.Minute/time.Second) + int64(45*time.Minute/time.Second)
+	if bucket.LiveSeconds != want {
+		t.Errorf("LiveSeconds = %d, 期望两段时长相加 %d", bucket.LiveSeconds, want)
+	}
+}
