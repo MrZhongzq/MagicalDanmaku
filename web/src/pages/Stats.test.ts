@@ -85,6 +85,17 @@ function statsBucket(overrides: Partial<Record<string, unknown>> = {}) {
     guardCount: 0,
     liveSeconds: 0,
     blindBoxProfit: 0,
+    giftCoins: 0,
+    ...overrides,
+  }
+}
+
+/** 一行 GiftBreakdownRow 的默认值，测试按需覆盖字段。 */
+function giftRow(overrides: Partial<Record<string, unknown>> = {}) {
+  return {
+    giftName: '辣条',
+    count: 1,
+    coins: 0,
     ...overrides,
   }
 }
@@ -101,14 +112,29 @@ function stubFetch(
     activity?: unknown[]
     statsByDay?: unknown[]
     statsBySession?: unknown[]
+    /** 「今日电池到账」卡片用的 GET .../stats?by=day&since=...&until=... */
+    statsToday?: unknown[]
+    /** 「礼物」明细列表用的 GET .../gifts?since=...&until=... */
+    giftsToday?: unknown[]
   } = {},
 ) {
   const activity = opts.activity ?? []
   const statsByDay = opts.statsByDay ?? []
   const statsBySession = opts.statsBySession ?? []
+  const statsToday = opts.statsToday ?? []
+  const giftsToday = opts.giftsToday ?? []
   const f = vi.fn().mockImplementation((url: string) => {
+    if (url.startsWith('/api/bindings/1/gifts')) {
+      return Promise.resolve(ok(giftsToday))
+    }
     if (url.startsWith('/api/bindings/1/stats')) {
-      const by = new URL(url, 'http://localhost').searchParams.get('by')
+      const parsed = new URL(url, 'http://localhost')
+      // 「今日」这两个请求带 since，维度切换那份不带——用这个区分，
+      // 而不是另起一个 URL 前缀，因为后端接口本来就是同一个。
+      if (parsed.searchParams.has('since')) {
+        return Promise.resolve(ok(statsToday))
+      }
+      const by = parsed.searchParams.get('by')
       return Promise.resolve(ok(by === 'session' ? statsBySession : statsByDay))
     }
     if (url.startsWith('/api/bindings/1/activity')) {
@@ -326,6 +352,11 @@ describe('Stats 页', () => {
         return Promise.resolve(ok([statsBucket({ danmakuCount: 2 })]))
       if (url.startsWith('/api/bindings/1/activity')) return Promise.resolve(ok(rowsFor甲))
       if (url.startsWith('/api/bindings/2/activity')) return Promise.resolve(ok(rowsFor乙))
+      // /gifts 是 P6 任务 5 新增的礼物明细列表接口，必须显式返回数组——
+      // 落到下面 { status: 'ok' } 那个兜底会把 giftBreakdown 塞进一个
+      // 非数组对象，NDataTable 拿着它算内部 treemate 结构会直接抛错。
+      if (url.startsWith('/api/bindings/1/gifts')) return Promise.resolve(ok([]))
+      if (url.startsWith('/api/bindings/2/gifts')) return Promise.resolve(ok([]))
       return Promise.resolve(ok({ status: 'ok' }))
     })
     vi.stubGlobal('fetch', f)
@@ -365,8 +396,10 @@ describe('Stats 页', () => {
     await flushPromises()
 
     const values = wrapper.findAllComponents(NStatistic).map((c) => c.props('value'))
-    // 7 张卡片：6 张真实数字 + 1 张一直悬空的盲盒盈亏，全部应为占位符
-    expect(values).toEqual(['—', '—', '—', '—', '—', '—', '—'])
+    // 8 张卡片：6 张原有真实数字 + 1 张一直悬空的盲盒盈亏 + P6 任务 5
+    // 新增的「今日电池到账」，全部应为占位符——今日范围的 stats 请求
+    // 默认也返回空数组（stubFetch 的 statsToday 未传时默认 []）。
+    expect(values).toEqual(['—', '—', '—', '—', '—', '—', '—', '—'])
   })
 
   it(
@@ -438,6 +471,111 @@ describe('Stats 页', () => {
     // 卡片数字与明细表都要变成「按场次」的数据
     expect(wrapper.find('.stats-grid').text()).toContain('20')
     expect(wrapper.find('.bucket-card').text()).toContain('session-1')
+  })
+})
+
+// ---- P6 任务 5：今日电池到账 + 礼物明细列表 ----
+describe('Stats 页：今日电池到账 + 礼物明细列表', () => {
+  it('选中直播间后，除了维度统计接口，还会额外请求今日范围的 stats 与 gifts 接口', async () => {
+    setupStore()
+    const f = stubFetch({ statsByDay: [statsBucket({ danmakuCount: 1 })] })
+    mount(Stats)
+    await flushPromises()
+
+    const todayStatsCall = f.mock.calls.find((call) => {
+      const url = String(call[0])
+      return url.startsWith('/api/bindings/1/stats') && url.includes('since=')
+    })
+    expect(todayStatsCall, '应该发出带 since 的今日 stats 请求').toBeTruthy()
+
+    const giftsCall = f.mock.calls.find((call) => String(call[0]).startsWith('/api/bindings/1/gifts'))
+    expect(giftsCall, '应该发出 /gifts 请求').toBeTruthy()
+    expect(String(giftsCall![0])).toContain('since=')
+  })
+
+  it('「今日电池到账」卡片显示 giftCoins 换算后的电池数（除以 100，不换算成元）', async () => {
+    setupStore()
+    // 50000（1/100 电池）= 500 电池——注意这是"电池"不是"元"，不要
+    // 跟盲盒盈亏卡片的 /1000（元）换算搞混。
+    stubFetch({ statsToday: [statsBucket({ giftCoins: 50000 })] })
+    const wrapper = mount(Stats)
+    await flushPromises()
+
+    expect(wrapper.find('.stats-grid').text()).toContain('500.00 电池')
+  })
+
+  it('今日没有任何数据时「今日电池到账」显示占位符，不是 0', async () => {
+    setupStore()
+    stubFetch({ statsToday: [] })
+    const wrapper = mount(Stats)
+    await flushPromises()
+
+    const card = wrapper
+      .findAll('.stat-card')
+      .find((c) => c.text().includes('今日电池到账'))
+    expect(card, '应该有「今日电池到账」这张卡片').toBeTruthy()
+    expect(card!.text()).toContain('—')
+  })
+
+  it('「礼物」明细列表按礼物名分组显示数量与电池数（免费礼物电池数为 0）', async () => {
+    setupStore()
+    stubFetch({
+      giftsToday: [
+        giftRow({ giftName: '辣条', count: 3, coins: 150000 }),
+        giftRow({ giftName: '小心心', count: 5, coins: 0 }),
+      ],
+    })
+    const wrapper = mount(Stats)
+    await flushPromises()
+
+    const list = wrapper.find('.gift-breakdown-card')
+    expect(list.exists(), '应该有标题为「礼物」的明细列表卡片').toBe(true)
+    expect(list.text()).toContain('辣条')
+    expect(list.text()).toContain('1500.00 电池') // 150000 / 100
+    expect(list.text()).toContain('小心心')
+    // 免费礼物数量照常显示，但电池数是 0——不能因为是免费礼物就连数量
+    // 也不显示。
+    expect(list.text()).toContain('5')
+    expect(list.text()).toContain('0.00 电池')
+  })
+
+  it('「礼物」明细列表为空时显示空状态提示，不是一张空表格', async () => {
+    setupStore()
+    stubFetch({ giftsToday: [] })
+    const wrapper = mount(Stats)
+    await flushPromises()
+
+    const list = wrapper.find('.gift-breakdown-card')
+    expect(list.exists()).toBe(true)
+    expect(list.text()).toContain('没有数据')
+  })
+
+  it('切换绑定后重新请求今日电池到账与礼物明细', async () => {
+    setActivePinia(createPinia())
+    const bindings = useBindingsStore()
+    const 绑定乙 = { ...绑定, id: 2, roomId: '456' }
+    bindings.list = [绑定, 绑定乙]
+    bindings.select(1)
+
+    const f = vi.fn().mockImplementation((url: string) => {
+      if (url.startsWith('/api/bindings/1/gifts')) {
+        return Promise.resolve(ok([giftRow({ giftName: '甲房间礼物' })]))
+      }
+      if (url.startsWith('/api/bindings/2/gifts')) {
+        return Promise.resolve(ok([giftRow({ giftName: '乙房间礼物' })]))
+      }
+      return Promise.resolve(ok([]))
+    })
+    vi.stubGlobal('fetch', f)
+
+    const wrapper = mount(Stats)
+    await flushPromises()
+    expect(wrapper.find('.gift-breakdown-card').text()).toContain('甲房间礼物')
+
+    bindings.select(2)
+    await flushPromises()
+    expect(wrapper.find('.gift-breakdown-card').text()).not.toContain('甲房间礼物')
+    expect(wrapper.find('.gift-breakdown-card').text()).toContain('乙房间礼物')
   })
 })
 

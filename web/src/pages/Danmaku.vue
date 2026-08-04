@@ -267,8 +267,8 @@ export function defaultEnterDraft(): EnterDraft {
     windowSeconds: 180,
     minCount: 2,
     pickMode: 'random',
-    singleTemplates: ['欢迎 {{.user.username}} 来到直播间~'],
-    multiTemplates: ['欢迎 {{join .users "、"}} 等 {{.count}} 位朋友来到直播间~'],
+    singleTemplates: ['欢迎{{.user.username}}来到直播间~'],
+    multiTemplates: ['欢迎{{join .users "、"}}等{{.count}}位朋友来到直播间~'],
   }
 }
 
@@ -414,7 +414,7 @@ export function defaultGiftDraft(): GiftDraft {
     windowSeconds: 20,
     minCount: 2,
     pickMode: 'random',
-    templates: ['感谢 {{join .users "、"}} 的 {{join .gifts "、"}}，您的支持就是对主播最大的鼓励'],
+    templates: ['感谢{{join .users "、"}}的{{join .gifts "、"}}，您的支持就是对主播最大的鼓励'],
     blindBoxSeparate: true,
     blindBoxProfitTracking: false,
   }
@@ -490,11 +490,21 @@ const BLINDBOX_ON = 'gift'
  * 亏损分支读 `profitAbsYuan`（不带负号）而不是 `profitYuan`（自带负号）
  * ——旧版本两者搭配「亏了」用会拼出「亏了 -11 元」这种双重否定，这是
  * 这条规则真实播报过的错误文案，终审实跑复现过。
+ *
+ * **P6 任务 2**：变量与中文之间不留空格（用户原话「变量和文字之间不要
+ * 加空格」）——`{{simplifyName .user.username}}` 这类模板语法内部的
+ * 空格是语法的一部分（函数名与参数之间必须有空格，Go text/template
+ * 的语法要求），不能动；改的只是"中文"与"{{"/"}}"边界处那个纯展示性的
+ * 空格。`x{{.blindBox.count}}` 前面那个空格同理不动——"x" 是英文字母，
+ * 不是中文，不在这次改动范围内。改完在
+ * `server/internal/rules/config/example_render_test.go` 补了渲染测试，
+ * 不再是只改字符串就交差（P4-4 时期这两条模板从来没被任何测试渲染过，
+ * 结果长期输出"亏了 -11 元"这种双重否定，直到终审才发现）。
  */
 const BLIND_BOX_TEMPLATE_WITH_PROFIT =
-  '感谢 {{simplifyName .user.username}} 的 {{.blindBox.name}} x{{.blindBox.count}}，{{if gt (int .blindBox.profit) 0}}赚了 {{.blindBox.profitYuan}} 元！{{else if lt (int .blindBox.profit) 0}}亏了 {{.blindBox.profitAbsYuan}} 元！{{else}}不赚不亏！{{end}}'
+  '感谢{{simplifyName .user.username}}的{{.blindBox.name}} x{{.blindBox.count}}，{{if gt (int .blindBox.profit) 0}}赚了{{.blindBox.profitYuan}}元！{{else if lt (int .blindBox.profit) 0}}亏了{{.blindBox.profitAbsYuan}}元！{{else}}不赚不亏！{{end}}'
 const BLIND_BOX_TEMPLATE_WITHOUT_PROFIT =
-  '感谢 {{simplifyName .user.username}} 开出了 {{.blindBox.count}} 次 {{.blindBox.name}}！'
+  '感谢{{simplifyName .user.username}}开出了{{.blindBox.count}}次{{.blindBox.name}}！'
 
 /**
  * buildBlindBoxRule 组装盲盒答谢规则，语义照抄 `config.example.yaml`
@@ -714,7 +724,7 @@ const FOLLOW_ON = 'user_follow'
 
 /** event.UserFollow 只有一个 User 字段（server/internal/event/payload.go 第 66-67 行），模板只需要 user.username。 */
 export function defaultFollowDraft(): SimpleThanksDraft {
-  return defaultSimpleThanksDraft(['感谢 {{.user.username}} 的关注，欢迎常来玩~'])
+  return defaultSimpleThanksDraft(['感谢{{.user.username}}的关注，欢迎常来玩~'])
 }
 export function buildFollowRule(draft: SimpleThanksDraft): Rule {
   return buildSimpleThanksRule(FOLLOW_RULE_NAME, FOLLOW_ON, draft)
@@ -728,7 +738,7 @@ const SHARE_ON = 'user_share'
 
 /** event.UserShare 同样只有一个 User 字段。 */
 export function defaultShareDraft(): SimpleThanksDraft {
-  return defaultSimpleThanksDraft(['感谢 {{.user.username}} 分享了直播间，谢谢支持~'])
+  return defaultSimpleThanksDraft(['感谢{{.user.username}}分享了直播间，谢谢支持~'])
 }
 export function buildShareRule(draft: SimpleThanksDraft): Rule {
   return buildSimpleThanksRule(SHARE_RULE_NAME, SHARE_ON, draft)
@@ -748,8 +758,8 @@ const GUARD_ON = 'guard_buy'
  */
 export function defaultGuardDraft(): SimpleThanksDraft {
   return defaultSimpleThanksDraft([
-    '感谢 {{.user.username}} {{if .guard.isRenew}}续费{{else}}开通{{end}} ' +
-      '{{.guard.count}} 个月{{.guard.name}}，感谢老板的支持！',
+    '感谢{{.user.username}}{{if .guard.isRenew}}续费{{else}}开通{{end}}' +
+      '{{.guard.count}}个月{{.guard.name}}，感谢老板的支持！',
   ])
 }
 export function buildGuardRule(draft: SimpleThanksDraft): Rule {

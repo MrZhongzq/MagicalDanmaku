@@ -98,7 +98,9 @@ func TestExampleConfigBlindBoxProfitTemplateRenders(t *testing.T) {
 			// 数值对齐用户真实样本（幸运盲盒 profit=+5400，见
 			// aggregate_test.go TestAggregateByBlindBoxSeparatesProfitByName）。
 			vars: blindBoxVars("幸运盲盒", 1, 5400, "5.4", "5.4", true),
-			want: "感谢 张三 的 幸运盲盒 x1，赚了 5.4 元！",
+			// P6 任务 2：变量与中文之间不留空格（"x1" 前那个空格是英文
+			// 字母边界，不属于这次改动范围，原样保留）。
+			want: "感谢张三的幸运盲盒 x1，赚了5.4元！",
 		},
 		{
 			name: "亏损",
@@ -106,12 +108,12 @@ func TestExampleConfigBlindBoxProfitTemplateRenders(t *testing.T) {
 			// profitYuan 自带负号（"-11"），但模板的亏损分支应该读
 			// profitAbsYuan（"11"，不带负号），不该拼出"亏了 -11 元"。
 			vars: blindBoxVars("心动盲盒", 1, -11000, "-11", "11", true),
-			want: "感谢 张三 的 心动盲盒 x1，亏了 11 元！",
+			want: "感谢张三的心动盲盒 x1，亏了11元！",
 		},
 		{
 			name: "打平",
 			vars: blindBoxVars("幸运盲盒", 1, 0, "0", "0", true),
-			want: "感谢 张三 的 幸运盲盒 x1，不赚不亏！",
+			want: "感谢张三的幸运盲盒 x1，不赚不亏！",
 		},
 	}
 

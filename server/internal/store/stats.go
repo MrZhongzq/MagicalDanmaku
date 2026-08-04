@@ -57,6 +57,20 @@ type StatsBucket struct {
 	GuardCount     int64
 	LiveSeconds    int64
 	BlindBoxProfit int64
+
+	// GiftCoins 是这个分桶内全部**非盲盒、金瓜子**礼物的 TotalCoin 之和，
+	// 单位 1/100 电池，供 WebUI 统计页「今日电池到账」卡片使用。
+	//
+	// 两条过滤缺一不可：
+	//   - 不含盲盒——与 GiftCount/GiftKinds 一致，P4-4 的硬性要求（盲盒
+	//     单独算，见 BlindBoxProfit），不能让盲盒的花费重复计进常规
+	//     礼物的电池到账。
+	//   - 只算 coin_type=gold（金瓜子）——免费礼物（小花花、人气票等）
+	//     是 silver，不产生真实电池，即便它的 TotalCoin 字段本身是正数
+	//     （可能承载着人气值一类的展示用数字），也绝不能计进电池到账。
+	//     用 `TotalCoin > 0` 之类的近似判据在这类礼物上会判错，必须
+	//     老老实实读 CoinType 字段。
+	GiftCoins int64
 }
 
 // statsWhere 拼公共的 WHERE 片段：kind='event' 恒定（业务事件而非机器人
@@ -92,6 +106,11 @@ func statsWhere(accountID, bindingID int64) ([]string, []any) {
 // 手写测试 JSON 里干脆不写这个键）都能正确处理。
 const isBlindBoxGiftSQL = `detail->>'BlindBox' IS NOT NULL`
 
+// isGoldCoinGiftSQL 判断一条 gift 行是不是用金瓜子付的——`->>`（取文本）
+// 与 isBlindBoxGiftSQL 是同一个理由：银瓜子免费礼物、老数据没有这个键
+// 两种情况都要能正确落到「不是金瓜子」这一侧，不能只处理其中一种。
+const isGoldCoinGiftSQL = `detail->>'CoinType' = 'gold'`
+
 // countExprs 是六个业务计数的 SQL 表达式，QueryStatsByDay（GROUP BY）与
 // aggregateEventCounts（单行）共用，避免两处口径漂移。
 //
@@ -116,7 +135,12 @@ const countExprs = `COUNT(*) FILTER (WHERE event_type = 'danmaku') AS danmaku_co
 		CASE WHEN event_type = 'gift' AND ` + isBlindBoxGiftSQL + `
 			THEN (detail->>'Price')::bigint * (detail->>'Count')::bigint - (detail->>'TotalCoin')::bigint
 			ELSE 0 END
-	), 0) AS blind_box_profit`
+	), 0) AS blind_box_profit,
+	COALESCE(SUM(
+		CASE WHEN event_type = 'gift' AND NOT (` + isBlindBoxGiftSQL + `) AND ` + isGoldCoinGiftSQL + `
+			THEN (detail->>'TotalCoin')::bigint
+			ELSE 0 END
+	), 0) AS gift_coins`
 
 // QueryStatsByDay 按 UTC 自然天聚合业务事件计数。
 //
@@ -160,7 +184,7 @@ func (s *Store) QueryStatsByDay(ctx context.Context, q StatsQuery) ([]StatsBucke
 		var bucket time.Time
 		var b StatsBucket
 		if err := rows.Scan(&bucket, &b.DanmakuCount, &b.EnterCount,
-			&b.GiftCount, &b.GiftKinds, &b.GuardCount, &b.BlindBoxProfit); err != nil {
+			&b.GiftCount, &b.GiftKinds, &b.GuardCount, &b.BlindBoxProfit, &b.GiftCoins); err != nil {
 			return nil, fmt.Errorf("store: 读取按天统计失败: %w", err)
 		}
 		b.Bucket = bucket.UTC().Format("2006-01-02")
@@ -218,7 +242,7 @@ func (s *Store) QueryStatsBySession(ctx context.Context, q StatsQuery) ([]StatsB
 			continue // 保险：正常配对不会出现，但顺序反了记 0 时长没有意义
 		}
 
-		danmaku, enter, gift, giftKinds, guard, blindBoxProfit, err := s.aggregateEventCounts(
+		danmaku, enter, gift, giftKinds, guard, blindBoxProfit, giftCoins, err := s.aggregateEventCounts(
 			ctx, q.AccountID, q.BindingID, start, end)
 		if err != nil {
 			return nil, err
@@ -233,6 +257,7 @@ func (s *Store) QueryStatsBySession(ctx context.Context, q StatsQuery) ([]StatsB
 			GuardCount:     guard,
 			LiveSeconds:    int64(end.Sub(start).Seconds()),
 			BlindBoxProfit: blindBoxProfit,
+			GiftCoins:      giftCoins,
 		})
 	}
 	return out, nil
@@ -240,7 +265,7 @@ func (s *Store) QueryStatsBySession(ctx context.Context, q StatsQuery) ([]StatsB
 
 // aggregateEventCounts 在 [since, until] 闭区间上做一次单行 SQL 聚合。
 func (s *Store) aggregateEventCounts(ctx context.Context, accountID, bindingID int64, since, until time.Time) (
-	danmaku, enter, gift, giftKinds, guard, blindBoxProfit int64, err error) {
+	danmaku, enter, gift, giftKinds, guard, blindBoxProfit, giftCoins int64, err error) {
 	where, args := statsWhere(accountID, bindingID)
 	args = append(args, since)
 	where = append(where, fmt.Sprintf("occurred_at >= $%d", len(args)))
@@ -249,7 +274,7 @@ func (s *Store) aggregateEventCounts(ctx context.Context, accountID, bindingID i
 
 	sql := `SELECT ` + countExprs + ` FROM activity_logs WHERE ` + strings.Join(where, " AND ")
 	err = s.pool.QueryRow(ctx, sql, args...).
-		Scan(&danmaku, &enter, &gift, &giftKinds, &guard, &blindBoxProfit)
+		Scan(&danmaku, &enter, &gift, &giftKinds, &guard, &blindBoxProfit, &giftCoins)
 	if err != nil {
 		err = fmt.Errorf("store: 聚合区间统计失败: %w", err)
 	}
@@ -388,4 +413,61 @@ func sessionOverlaps(start, end, since, until time.Time) bool {
 		return false
 	}
 	return true
+}
+
+// GiftBreakdownRow 是「礼物」明细列表的一行：礼物名 + 数量 + 电池数
+// 加和，供 WebUI 统计页的礼物明细表使用。
+type GiftBreakdownRow struct {
+	GiftName string
+	// Count 是这个礼物名下全部送礼事件的 Count 字段之和（送礼数量本身，
+	// 不是行数——一行可能一次性送出多个，比如 num=10）。
+	Count int64
+	// Coins 只累加 coin_type=gold（金瓜子）那部分 TotalCoin，单位
+	// 1/100 电池——免费礼物（coin_type=silver）的数量照常统计进
+	// Count，但不产生电池，Coins 里那部分贡献恒为 0。
+	Coins int64
+}
+
+// QueryGiftBreakdown 按礼物名分组统计 bindingID 名下的礼物明细，
+// since/until 为零值表示不限制该侧。
+//
+// 与 GiftCount/GiftKinds/GiftCoins 一致地排除盲盒（P4-4 硬性要求：
+// 盲盒继续单独算，不混进常规礼物统计）——盲盒爆出的礼物名不该出现在
+// 这张明细表里。
+func (s *Store) QueryGiftBreakdown(ctx context.Context, bindingID int64, since, until time.Time) ([]GiftBreakdownRow, error) {
+	where := []string{"kind = 'event'", "event_type = 'gift'", "binding_id = $1", "NOT (" + isBlindBoxGiftSQL + ")"}
+	args := []any{bindingID}
+	if !since.IsZero() {
+		args = append(args, since)
+		where = append(where, fmt.Sprintf("occurred_at >= $%d", len(args)))
+	}
+	if !until.IsZero() {
+		args = append(args, until)
+		where = append(where, fmt.Sprintf("occurred_at <= $%d", len(args)))
+	}
+
+	sql := `SELECT detail->>'GiftName' AS gift_name,
+		COALESCE(SUM((detail->>'Count')::bigint), 0) AS count,
+		COALESCE(SUM(CASE WHEN ` + isGoldCoinGiftSQL + ` THEN (detail->>'TotalCoin')::bigint ELSE 0 END), 0) AS coins
+		FROM activity_logs WHERE ` + strings.Join(where, " AND ") + `
+		GROUP BY gift_name ORDER BY coins DESC, gift_name`
+
+	rows, err := s.pool.Query(ctx, sql, args...)
+	if err != nil {
+		return nil, fmt.Errorf("store: 查询礼物明细失败: %w", err)
+	}
+	defer rows.Close()
+
+	var out []GiftBreakdownRow
+	for rows.Next() {
+		var r GiftBreakdownRow
+		if err := rows.Scan(&r.GiftName, &r.Count, &r.Coins); err != nil {
+			return nil, fmt.Errorf("store: 读取礼物明细失败: %w", err)
+		}
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: 查询礼物明细失败: %w", err)
+	}
+	return out, nil
 }

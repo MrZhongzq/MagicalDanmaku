@@ -49,7 +49,13 @@ func (p *accountLoginProbe) ProbeNow(ctx context.Context, accountName string) {
 type bindingRoomStatusProbe struct {
 	st    *store.Store
 	check roomStatusChecker
-	log   *slog.Logger
+	// notify 把探测结果同步给运行时的事件分发循环（P6 任务 4），与心跳
+	// 循环（roomStatusCheckOnce）共用同一份 liveStatusNotifier 实现——
+	// 两处都要能在探测完成后让"未开播时不处理高能榜/进房事件"这件事
+	// 立即生效，不必等下一轮 60 秒心跳。可能为 nil：测试通常不关心
+	// 这一步。
+	notify liveStatusNotifier
+	log    *slog.Logger
 }
 
 var _ httpapi.RoomStatusProbe = (*bindingRoomStatusProbe)(nil)
@@ -79,4 +85,5 @@ func (p *bindingRoomStatusProbe) ProbeNow(ctx context.Context, bindingID int64) 
 	if uerr := p.st.UpdateBindingRoomStatus(ctx, bindingID, state, uid, name); uerr != nil {
 		p.log.Error("写入直播间状态失败", "binding", b.Label(), "err", uerr)
 	}
+	notifyLiveStatus(p.notify, bindingID, state)
 }

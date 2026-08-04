@@ -270,7 +270,7 @@ export interface CustomActionDraft {
 export function defaultActionDraft(type = 'danmaku'): CustomActionDraft {
   return {
     type,
-    templates: ['{{.user.username}} 触发了这条自定义规则'],
+    templates: ['{{.user.username}}触发了这条自定义规则'],
     hours: 1,
     script: '',
   }

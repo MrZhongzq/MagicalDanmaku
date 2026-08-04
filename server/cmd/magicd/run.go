@@ -131,6 +131,21 @@ type accountRuntime struct {
 type roomRuntime struct {
 	engine atomic.Pointer[rules.Engine] // 唯一会被热替换的东西
 
+	// liveOffline 记录"这个绑定最近一次探测是否确认未开播"，供事件
+	// 分发循环（runtime_manager.go 的 adoptLocked）判断要不要跳过高能
+	// 榜/进房事件（P6 任务 4）。
+	//
+	// **零值 false 是刻意的默认**：roomRuntime 刚建好、还没被心跳/立即
+	// 探测同步过状态时，必须落在"允许处理"这一侧——"还没探测过"与
+	// "探测失败"在这条红线上是同一件事：拿不到状态不等于没开播，绝不能
+	// 因为默认值恰好是"未知"就顺势把事件掐了。
+	//
+	// atomic.Bool 而不是加锁：事件分发循环是每条事件都要读一次的热
+	// 路径，写入只发生在探测完成时（60 秒心跳，或立即探测），读远多于
+	// 写，原子操作比互斥锁更合适，也不需要跟 engine 那样的复合替换
+	// 语义。
+	liveOffline atomic.Bool
+
 	// reloadMu 串行化整个 Reload。
 	//
 	// engine 的 Swap 是原子的，Scheduler 内部也有自己的锁，但
@@ -159,6 +174,13 @@ var _ httpapi.BindingRuntime = (*roomRuntime)(nil)
 // Engine 取当前引擎。事件扇出的 goroutine 每条事件都要调一次，
 // 不能把返回值缓存起来——那就等于又把引擎捕获死了。
 func (rt *roomRuntime) Engine() *rules.Engine { return rt.engine.Load() }
+
+// SetLiveOffline 记录最近一次探测到的开播状态是不是"确认未开播"。
+// runtimeManager.UpdateLiveStatus 是唯一调用方。
+func (rt *roomRuntime) SetLiveOffline(v bool) { rt.liveOffline.Store(v) }
+
+// LiveOffline 供事件分发循环判断要不要跳过高能榜/进房事件。
+func (rt *roomRuntime) LiveOffline() bool { return rt.liveOffline.Load() }
 
 func (rt *roomRuntime) SendDanmaku(ctx context.Context, text string) error {
 	err := rt.binding.SendDanmaku(ctx, text)
@@ -653,10 +675,16 @@ func runRun(args []string) error {
 	rm := newRuntimeManager(ctx, st, sched, activity, apiSink, log, &wg, accounts)
 	if api != nil {
 		api.SetBindingLifecycle(rm)
+		// 账号参数（发送间隔/字数上限）保存后热传播给运行中的绑定
+		// （P6 任务 3），复用同一个 rm——它已经是账号运行时/绑定运行时
+		// 的唯一权威注册表，没有理由为这一件事再另建一个。
+		api.SetAccountRuntimeUpdater(rm)
 		// 扫码成功后立即探测一次登录态、新增绑定后立即探测一次直播间
 		// 状态（P5-2 任务 2）：两者都不依赖 runtimeManager，独立注入。
 		api.SetLoginProbe(&accountLoginProbe{st: st, check: newAPILoginChecker(), log: log})
-		api.SetRoomStatusProbe(&bindingRoomStatusProbe{st: st, check: newAPIRoomStatusChecker(), log: log})
+		api.SetRoomStatusProbe(&bindingRoomStatusProbe{
+			st: st, check: newAPIRoomStatusChecker(), notify: rm, log: log,
+		})
 	}
 
 	// 清理放在 defer 里，而不是只写在正常关停路径的末尾。
@@ -722,7 +750,7 @@ func runRun(args []string) error {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		roomStatusCheckLoop(ctx, st, newAPIRoomStatusChecker(), log)
+		roomStatusCheckLoop(ctx, st, newAPIRoomStatusChecker(), rm, log)
 	}()
 
 	if api != nil {

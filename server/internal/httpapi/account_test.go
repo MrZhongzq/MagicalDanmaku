@@ -535,6 +535,75 @@ func TestPatchAccountByOwner(t *testing.T) {
 	}
 }
 
+// fakeAccountRuntimeUpdater 记录被通知过的账号名，验证 handler 保存成功
+// 之后有没有把"运行时该跟着变"这件事交给注入的实现——真正的热传播逻辑
+// （改限流器、改字数上限）是 cmd/magicd 的 runtimeManager 自己的测试
+// 范围（runtime_manager_test.go），这里只关心 handler 有没有在正确的
+// 时机、用正确的账号名调用它。
+type fakeAccountRuntimeUpdater struct {
+	mu       sync.Mutex
+	notified []string
+}
+
+func (f *fakeAccountRuntimeUpdater) UpdateAccountRuntime(_ context.Context, accountName string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.notified = append(f.notified, accountName)
+}
+
+func (f *fakeAccountRuntimeUpdater) snapshot() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string{}, f.notified...)
+}
+
+// TestPatchAccountNotifiesRuntimeUpdater 是 P6 任务 3 的修复：账号的
+// 发送间隔/字数上限改了不会热传播到运行中的绑定（SetMaxLength 只在
+// 装配时调一次，要重启才生效）。handlePatchAccount 保存成功后必须调用
+// 注入的 AccountRuntimeUpdater，把"这个账号的运行参数变了"这件事通知
+// 出去——具体怎么把新值落到运行中的限流器/Actions 上是 runtimeManager
+// 的职责，httpapi 这一层只负责在正确的时机触发。
+func TestPatchAccountNotifiesRuntimeUpdater(t *testing.T) {
+	srv, st, api := newTestServerWithAPI(t)
+	updater := &fakeAccountRuntimeUpdater{}
+	api.SetAccountRuntimeUpdater(updater)
+	c := loginAs(t, srv, st, "张三", false)
+	mustBindingFor(t, st, "张三", "小号", "123")
+
+	resp := jsonRequest(t, c, "PATCH", srv.URL+"/api/accounts/小号",
+		`{"rateLimitMs":2500,"maxLength":30}`)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("状态码 = %d", resp.StatusCode)
+	}
+
+	got := updater.snapshot()
+	if len(got) != 1 || got[0] != "小号" {
+		t.Errorf("UpdateAccountRuntime 调用记录 = %v, 期望恰好 [\"小号\"]", got)
+	}
+}
+
+// TestPatchAccountFailureDoesNotNotifyRuntimeUpdater 是上一条的反面：
+// 校验失败（没有真的改动数据库）不该触发运行时同步——不然会白白让
+// runtimeManager 去重新读一份跟改之前完全一样的配置。
+func TestPatchAccountFailureDoesNotNotifyRuntimeUpdater(t *testing.T) {
+	srv, st, api := newTestServerWithAPI(t)
+	updater := &fakeAccountRuntimeUpdater{}
+	api.SetAccountRuntimeUpdater(updater)
+	c := loginAs(t, srv, st, "张三", false)
+	mustBindingFor(t, st, "张三", "小号", "123")
+
+	resp := jsonRequest(t, c, "PATCH", srv.URL+"/api/accounts/小号", `{"maxLength":999}`)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnprocessableEntity {
+		t.Fatalf("状态码 = %d, 期望 422", resp.StatusCode)
+	}
+
+	if got := updater.snapshot(); len(got) != 0 {
+		t.Errorf("校验失败时不该通知运行时同步，实际调用记录 = %v", got)
+	}
+}
+
 func TestDeleteAccountByOwner(t *testing.T) {
 	srv, st := newTestServer(t)
 	c := loginAs(t, srv, st, "张三", false)

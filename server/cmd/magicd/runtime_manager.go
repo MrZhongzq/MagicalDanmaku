@@ -126,6 +126,8 @@ func newRuntimeManager(
 }
 
 var _ httpapi.BindingLifecycle = (*runtimeManager)(nil)
+var _ httpapi.AccountRuntimeUpdater = (*runtimeManager)(nil)
+var _ liveStatusNotifier = (*runtimeManager)(nil)
 
 // ensureAccountRuntime 取或建 c.AccountName 对应的账号运行时。
 //
@@ -273,6 +275,12 @@ func (rm *runtimeManager) adoptLocked(ctx context.Context, asm roomAssembly) {
 		// 实时事件流（P4-4 Task 7）——用法与直接消费 c.Events() 时完全
 		// 一致，只是多了 PK 期间合成的快照事件与串门信号事件。
 		for ev := range bilibili.NewPKPipeline(c).Run(bindCtx) {
+			// 未开播时不处理高能榜/进房事件（P6 任务 4）。rt.LiveOffline()
+			// 每次都要重新读，理由与下面 rt.Engine() 的注释一致：状态会被
+			// 心跳/立即探测异步更新，缓存一次就等于把某一刻的快照捕获死。
+			if shouldSkipOfflineEvent(rt.LiveOffline(), ev.Type) {
+				continue
+			}
 			// rt.Engine() 每次都要重新取：热重载会把 rt.engine 换成
 			// 新引擎，若在循环外缓存一次就等于把旧引擎闭包捕获死了，
 			// 重载之后事件会继续打在已经 Close 掉的旧引擎上。
@@ -364,6 +372,115 @@ func (rm *runtimeManager) teardownLocked(lb *liveBinding) {
 
 	if rm.api != nil {
 		rm.api.RemoveRuntime(lb.room.bindingID)
+	}
+}
+
+// maxLengthSetter 是「按连接器设置单条弹幕字数上限」的可选能力，只有
+// bilibili.Actions 实现它——字数上限是 B 站特有的协议限制，不写进
+// connector.Actions 这个跨平台接口，未来接入的其他连接器不必被迫实现
+// 一个对它们没有意义的方法。UpdateAccountRuntime 用类型断言取用这个
+// 能力，取不到就跳过（虽然目前只有 bilibili 一种连接器，这条分支
+// 理论上不会走到）。
+type maxLengthSetter interface {
+	SetMaxLength(n int)
+}
+
+// UpdateAccountRuntime 把 accountName 在数据库里的最新参数（发送间隔、
+// 单条弹幕字数上限）同步给该账号当前正在跑的全部绑定，不需要重启进程
+// 就能生效。
+//
+// 实现 httpapi.AccountRuntimeUpdater：handlePatchAccount 保存成功后调用
+// 这个方法，把"运行时该跟着变"这件事交出去——修的是 P5-1 报告记录的
+// 已知局限（SetMaxLength 只在 buildRoomRuntime 装配那一刻调用一次），
+// 现在有了实际后果（用户把上限从 20 改成 40 保存后，运行中的绑定仍按
+// 20 切，要重启才生效，界面上也没有任何提示）。
+//
+// 只改**已经在跑**的绑定，不碰数据库；下次绑定启动/重新启用时，
+// buildRoomRuntime 装配这一步本来就会读到数据库里的最新值，两条路径
+// 不冲突、不重复。
+func (rm *runtimeManager) UpdateAccountRuntime(ctx context.Context, accountName string) {
+	rm.mu.Lock()
+	defer rm.mu.Unlock()
+
+	acctRT, ok := rm.accounts[accountName]
+	if !ok {
+		// 这个账号眼下没有被任何运行时持有——从未启用过绑定，或者
+		// 唯一的绑定已经停用。没有可同步的目标，不是错误。
+		return
+	}
+
+	acc, err := rm.st.GetAccountByName(ctx, accountName)
+	if err != nil {
+		rm.log.Warn("同步账号运行参数失败：查账号出错", "account", accountName, "err", err)
+		return
+	}
+
+	// 限流器必须原地改间隔，不能换成一份新的——它被这个账号名下全部
+	// 绑定共享，换掉的话新旧两份各算各的，其余绑定的 accountRuntime
+	// 指针还指着旧的那份，共享限流的语义就破了（与 ensureAccountRuntime
+	// 重建账号运行时时"限流器必须是原来那一份"是同一个道理）。
+	acctRT.acc.Limiter.SetInterval(acc.RateLimit)
+
+	// 字数上限逐个绑定地改：每个绑定的 bilibili.Actions 是各自独立的
+	// 实例（buildRoomRuntime 里 bilibili.NewActions 一个绑定建一份），
+	// 不像限流器那样整个账号共享一份，必须遍历 rm.live 找到这个账号名下
+	// 全部还在跑的绑定逐一设置。
+	for _, lb := range rm.live {
+		if lb.room.binding.Account != acctRT.acc {
+			continue
+		}
+		if setter, ok := lb.room.binding.Actions.(maxLengthSetter); ok {
+			setter.SetMaxLength(acc.MaxLength)
+		}
+	}
+}
+
+// UpdateLiveStatus 把探测到的直播间开播状态同步给该绑定当前运行时的
+// 事件分发循环，供其决定要不要处理高能榜/进房事件（P6 任务 4）。
+//
+// 实现 cmd/magicd 内部的 liveStatusNotifier（roomstatus.go）：心跳循环
+// （roomStatusCheckOnce，每 60 秒）与立即探测（bindingRoomStatusProbe.
+// ProbeNow，新增绑定时）都会调用它，两处对同一个绑定的判断保证一致。
+//
+// **这里是唯一一处把"探测状态"翻译成"要不要掐事件"的地方**：只有
+// state 恰好是 store.RoomLiveOffline（明确探测到未开播）才置位；
+// RoomLiveLiving 与 RoomLiveUnknown 都会清掉这个标记——探测失败必须
+// 退回"允许处理"这一侧，绝不能把"拿不到状态"当成"确认未开播"，那会让
+// 一次网络抖动变成机器人对高能榜/进房事件整个哑掉，这条红线本项目
+// 反复强调过。开播后自动恢复也是同一行代码的自然结果：下一轮心跳测到
+// living，标记被清掉，不需要重启。
+//
+// 绑定当前不在跑（未启用，或探测发生在装配完成之前的极短窗口）时什么
+// 都不做，不是错误——roomRuntime 新建时 liveOffline 的零值就是 false
+// （允许），下一轮心跳很快会把真实状态同步过来。
+func (rm *runtimeManager) UpdateLiveStatus(bindingID int64, state string) {
+	rm.mu.Lock()
+	lb, ok := rm.live[bindingID]
+	rm.mu.Unlock()
+	if !ok {
+		return
+	}
+	lb.room.SetLiveOffline(state == store.RoomLiveOffline)
+}
+
+// shouldSkipOfflineEvent 判断一条事件在"确认未开播"时该不该被跳过。
+//
+// 只掐高能榜（TypeOnlineRankUpdate）与进房（TypeUserEnter）这两类——
+// 用户原话只提到这两类，弹幕/礼物/上舰等其余事件即便主播下播了也可能
+// 仍有意义（比如观众在下播后的互动区继续聊天、答谢仍要触发），不该
+// 顺手一起掐掉。offline 为 false（未确认未开播，含"拿不到状态"与
+// "确认在播"两种情况）时无条件不跳过——这条判断本身不重复"拿不到状态
+// 不算没开播"这条红线，那条红线已经在 UpdateLiveStatus 里通过状态映射
+// 实现，这里只管"确认未开播"之后该不该处理某一类事件。
+func shouldSkipOfflineEvent(offline bool, evType event.Type) bool {
+	if !offline {
+		return false
+	}
+	switch evType {
+	case event.TypeOnlineRankUpdate, event.TypeUserEnter:
+		return true
+	default:
+		return false
 	}
 }
 

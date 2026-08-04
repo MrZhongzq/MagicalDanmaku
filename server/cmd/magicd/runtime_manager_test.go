@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -142,6 +143,32 @@ func newFakeBilibiliInfoServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost {
+			w.Write([]byte(`{"code":0,"message":"0","data":{}}`))
+			return
+		}
+		if roomID := r.URL.Query().Get("room_id"); roomID != "" {
+			fmt.Fprintf(w, `{"code":0,"data":{"room_id":%s,"uid":1,"title":"标题","live_status":0}}`, roomID)
+			return
+		}
+		w.Write([]byte(`{"code":0,"data":{"wbi_img":{
+			"img_url":"https://i0.hdslb.com/bfs/wbi/0123456789abcdef0123456789abcdef.png",
+			"sub_url":"https://i0.hdslb.com/bfs/wbi/fedcba9876543210fedcba9876543210.png"
+		}}}`))
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// newCountingFakeBilibiliInfoServer 与 newFakeBilibiliInfoServer 完全
+// 一样，额外用 postCount 记录 POST（sendMsg）请求次数——TestUpdateAccount
+// RuntimePropagatesMaxLengthToLiveBindings 需要靠"发出了几条 HTTP 请求"
+// 反推一条弹幕被 SplitLongText 切成了几段，不能直接读 bilibili.Actions
+// 的私有字段。
+func newCountingFakeBilibiliInfoServer(t *testing.T, postCount *int32) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			atomic.AddInt32(postCount, 1)
 			w.Write([]byte(`{"code":0,"message":"0","data":{}}`))
 			return
 		}
@@ -709,5 +736,308 @@ func TestStartBindingRebuildsAccountRuntimeWhenCookieChanges(t *testing.T) {
 	if got.acc.Limiter != oldLimiter {
 		t.Error("重建账号运行时后限流器不是原来那个实例——" +
 			"限流是按账号累计节奏算的，重建不该把跨绑定共享的这一份换掉")
+	}
+}
+
+// ---- P6 任务 3：账号参数（发送间隔/字数上限）改了要热传播到运行中的
+// 绑定，不需要重启进程 ----
+//
+// 此前 SetMaxLength 只在 buildRoomRuntime 装配那一刻调用一次（run.go:368
+// 附近），账号保存新参数之后运行中的绑定原样按旧值继续切/继续等，要
+// 重启才生效，界面上也没有任何提示——这正是用户真机反馈第 3 条顺着
+// "超长弹幕切分已经实现"这件事查出来的真问题。下面两条测试都先真正
+// 启动一个绑定（复用 P5-1 已有的装配路径），再改账号参数，验证不重启
+// 就能看到新值生效。
+
+// TestUpdateAccountRuntimePropagatesRateLimitToLiveBindings 验证发送
+// 间隔热传播：账号最初的发送间隔是 2 秒，首次发送后限流器已经按这个
+// 间隔排定了下一次放行时刻；保存改成 50ms 之后，第二次发送必须马上按
+// 新间隔放行，不能傻等满旧的 2 秒。
+func TestUpdateAccountRuntimePropagatesRateLimitToLiveBindings(t *testing.T) {
+	st := newRuntimeManagerTestStore(t)
+	infoSrv := newFakeBilibiliInfoServer(t)
+	ctx := context.Background()
+
+	bindingID, _ := runtimeManagerTestBinding(t, st, "张三", "小号", "123", nil)
+	acc, err := st.GetAccountByName(ctx, "小号")
+	if err != nil {
+		t.Fatalf("查账号报错: %v", err)
+	}
+	// runtimeManagerTestBinding 固定给 1 秒发送间隔，这里先改成更长的
+	// 2 秒，方便后面观察"改小之后立刻生效"这个方向的变化。
+	if _, err := st.UpsertAccount(ctx, store.AccountInput{
+		Name: acc.Name, UID: acc.UID, Cookie: acc.Cookie,
+		RateLimit: 2 * time.Second, MaxLength: acc.MaxLength, OwnerID: acc.OwnerID,
+	}); err != nil {
+		t.Fatalf("初始化账号参数报错: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	rm := newTestRuntimeManager(t, ctx, st, &wg, nil)
+	cfgs, err := st.LoadRunConfig(ctx)
+	if err != nil {
+		t.Fatalf("读取配置报错: %v", err)
+	}
+	seedFakeAccount(t, rm, cfgs[0], infoSrv)
+
+	if err := rm.StartBinding(ctx, bindingID); err != nil {
+		t.Fatalf("StartBinding 报错: %v", err)
+	}
+	t.Cleanup(func() { rm.StopBinding(ctx, bindingID) })
+
+	lb := rm.live[bindingID]
+	// 首次发送立即放行，顺带把限流器的"下一次放行时刻"按旧的 2 秒排定。
+	if err := lb.bot.SendDanmaku("第一条"); err != nil {
+		t.Fatalf("首次 SendDanmaku 报错: %v", err)
+	}
+
+	// 用户在 WebUI 把发送间隔改成 50ms 并保存。
+	if _, err := st.UpsertAccount(ctx, store.AccountInput{
+		Name: acc.Name, UID: acc.UID, Cookie: acc.Cookie,
+		RateLimit: 50 * time.Millisecond, MaxLength: acc.MaxLength, OwnerID: acc.OwnerID,
+	}); err != nil {
+		t.Fatalf("更新账号参数报错: %v", err)
+	}
+	rm.UpdateAccountRuntime(ctx, "小号")
+
+	start := time.Now()
+	if err := lb.bot.SendDanmaku("第二条"); err != nil {
+		t.Fatalf("第二次 SendDanmaku 报错: %v", err)
+	}
+	if d := time.Since(start); d > 500*time.Millisecond {
+		t.Errorf("第二次发送耗时 %v，期望约 50ms——说明改小的发送间隔没有热传播到"+
+			"运行中的绑定，还在按旧的 2 秒等待，要重启才会生效", d)
+	}
+}
+
+// TestUpdateAccountRuntimePropagatesMaxLengthToLiveBindings 验证字数
+// 上限热传播：账号最初上限是 20，5 字弹幕不会被切；保存改成 3 之后，
+// 同一条弹幕必须从"不切"变成"切成 2 段"，不需要重启——SplitLongText
+// 本身早就实现了（action.go），缺的只是账号改参数之后把新上限传给运行
+// 中的 bilibili.Actions。
+func TestUpdateAccountRuntimePropagatesMaxLengthToLiveBindings(t *testing.T) {
+	st := newRuntimeManagerTestStore(t)
+	var postCount int32
+	infoSrv := newCountingFakeBilibiliInfoServer(t, &postCount)
+	ctx := context.Background()
+
+	bindingID, _ := runtimeManagerTestBinding(t, st, "张三", "小号", "123", nil)
+	acc, err := st.GetAccountByName(ctx, "小号")
+	if err != nil {
+		t.Fatalf("查账号报错: %v", err)
+	}
+	// 发送间隔调到接近 0，避免测试因为账号级限流被拖慢——本测试只关心
+	// 字数上限这一个参数。
+	if _, err := st.UpsertAccount(ctx, store.AccountInput{
+		Name: acc.Name, UID: acc.UID, Cookie: acc.Cookie,
+		RateLimit: time.Millisecond, MaxLength: 20, OwnerID: acc.OwnerID,
+	}); err != nil {
+		t.Fatalf("初始化账号参数报错: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	rm := newTestRuntimeManager(t, ctx, st, &wg, nil)
+	cfgs, err := st.LoadRunConfig(ctx)
+	if err != nil {
+		t.Fatalf("读取配置报错: %v", err)
+	}
+	seedFakeAccount(t, rm, cfgs[0], infoSrv)
+
+	if err := rm.StartBinding(ctx, bindingID); err != nil {
+		t.Fatalf("StartBinding 报错: %v", err)
+	}
+	t.Cleanup(func() { rm.StopBinding(ctx, bindingID) })
+
+	lb := rm.live[bindingID]
+	const msg = "一二三四五" // 5 个字符，上限 20 时不会切
+	if err := lb.bot.SendDanmaku(msg); err != nil {
+		t.Fatalf("首次 SendDanmaku 报错: %v", err)
+	}
+	if got := atomic.LoadInt32(&postCount); got != 1 {
+		t.Fatalf("上限 20 时 5 字弹幕不该被切分，实际发出 %d 条 HTTP 请求", got)
+	}
+
+	// 用户在 WebUI 把字数上限改成 3 并保存。
+	if _, err := st.UpsertAccount(ctx, store.AccountInput{
+		Name: acc.Name, UID: acc.UID, Cookie: acc.Cookie,
+		RateLimit: time.Millisecond, MaxLength: 3, OwnerID: acc.OwnerID,
+	}); err != nil {
+		t.Fatalf("更新账号参数报错: %v", err)
+	}
+	rm.UpdateAccountRuntime(ctx, "小号")
+
+	if err := lb.bot.SendDanmaku(msg); err != nil {
+		t.Fatalf("第二次 SendDanmaku 报错: %v", err)
+	}
+	// ceil(5/3) = 2 段，累计应该是 1（首次）+ 2 = 3 条请求。
+	if got := atomic.LoadInt32(&postCount); got != 3 {
+		t.Errorf("上限改成 3 之后 5 字弹幕应切成 2 段（累计 3 条请求），实际累计 %d 条——"+
+			"说明改小的字数上限没有热传播到运行中的绑定，还在按旧的 20 发送，要重启才会生效", got)
+	}
+}
+
+// TestUpdateAccountRuntimeOnAccountWithoutLiveBindingsIsNoop 覆盖账号
+// 眼下没有任何绑定在跑（从未启用过，或唯一的绑定已停用）的情况：不该
+// panic，也不该报错——下次绑定启动时装配自然会读到数据库里的新值。
+func TestUpdateAccountRuntimeOnAccountWithoutLiveBindingsIsNoop(t *testing.T) {
+	st := newRuntimeManagerTestStore(t)
+	ctx := context.Background()
+
+	var wg sync.WaitGroup
+	rm := newTestRuntimeManager(t, ctx, st, &wg, nil)
+
+	rm.UpdateAccountRuntime(ctx, "不存在的账号")
+}
+
+// ---- P6 任务 4：主播没开播时不该继续处理高能榜/进房事件 ----
+//
+// 用户原话："如果主播下播了或者没有开播，不应该再读取高能榜和进房"。
+// 红线（本项目反复强调过）：**"拿不到开播状态" != "没开播"**——探测
+// 失败时绝不能当成没开播把事件掐掉，那会让一次网络抖动变成"机器人
+// 整个哑掉"。下面这组测试覆盖：状态同步的写入（UpdateLiveStatus）、
+// 判断该不该跳过的纯逻辑（shouldSkipOfflineEvent），以及"只掐这两类
+// 事件，其余照常处理"这条边界。
+
+// TestUpdateLiveStatusMarksLiveBindingOffline 验证"确认未开播"这一态
+// 会被正确记到运行中的 roomRuntime 上。
+func TestUpdateLiveStatusMarksLiveBindingOffline(t *testing.T) {
+	st := newRuntimeManagerTestStore(t)
+	infoSrv := newFakeBilibiliInfoServer(t)
+	ctx := context.Background()
+
+	bindingID, _ := runtimeManagerTestBinding(t, st, "张三", "小号", "123", nil)
+
+	var wg sync.WaitGroup
+	rm := newTestRuntimeManager(t, ctx, st, &wg, nil)
+	cfgs, err := st.LoadRunConfig(ctx)
+	if err != nil {
+		t.Fatalf("读取配置报错: %v", err)
+	}
+	seedFakeAccount(t, rm, cfgs[0], infoSrv)
+
+	if err := rm.StartBinding(ctx, bindingID); err != nil {
+		t.Fatalf("StartBinding 报错: %v", err)
+	}
+	t.Cleanup(func() { rm.StopBinding(ctx, bindingID) })
+
+	lb := rm.live[bindingID]
+	if lb.room.LiveOffline() {
+		t.Fatal("刚启动、还没被探测过的绑定不该是「已确认未开播」——" +
+			"零值必须是允许处理，不能默认就把事件掐了")
+	}
+
+	rm.UpdateLiveStatus(bindingID, store.RoomLiveOffline)
+	if !lb.room.LiveOffline() {
+		t.Error("UpdateLiveStatus(RoomLiveOffline) 之后 LiveOffline() 应该是 true")
+	}
+}
+
+// TestUpdateLiveStatusUnknownDoesNotMarkOffline 是这组测试里最核心的
+// 一条：**红线本身**。探测失败（unknown）绝不能被当成"确认未开播"，
+// 即便这个绑定此前已经被标记为 offline——一次探测抖动（比如账号级
+// 登录态短暂异常、B 站接口超时）不该让机器人对高能榜/进房事件"整个
+// 哑掉"，必须先退回"允许处理"这一侧。
+func TestUpdateLiveStatusUnknownDoesNotMarkOffline(t *testing.T) {
+	st := newRuntimeManagerTestStore(t)
+	infoSrv := newFakeBilibiliInfoServer(t)
+	ctx := context.Background()
+
+	bindingID, _ := runtimeManagerTestBinding(t, st, "张三", "小号", "123", nil)
+
+	var wg sync.WaitGroup
+	rm := newTestRuntimeManager(t, ctx, st, &wg, nil)
+	cfgs, err := st.LoadRunConfig(ctx)
+	if err != nil {
+		t.Fatalf("读取配置报错: %v", err)
+	}
+	seedFakeAccount(t, rm, cfgs[0], infoSrv)
+
+	if err := rm.StartBinding(ctx, bindingID); err != nil {
+		t.Fatalf("StartBinding 报错: %v", err)
+	}
+	t.Cleanup(func() { rm.StopBinding(ctx, bindingID) })
+
+	lb := rm.live[bindingID]
+	rm.UpdateLiveStatus(bindingID, store.RoomLiveOffline)
+	if !lb.room.LiveOffline() {
+		t.Fatal("前置条件不成立：先确认已经被标记为 offline")
+	}
+
+	rm.UpdateLiveStatus(bindingID, store.RoomLiveUnknown)
+	if lb.room.LiveOffline() {
+		t.Error("探测失败（unknown）之后 LiveOffline() 仍是 true——" +
+			"这是把「拿不到状态」当成了「确认未开播」，一次网络抖动会让机器人" +
+			"对高能榜/进房事件整个哑掉，这是本任务的红线")
+	}
+}
+
+// TestUpdateLiveStatusLivingClearsOffline 验证开播后能自动恢复——不需要
+// 重启，下一次探测确认在播就该把 offline 标记摘掉。
+func TestUpdateLiveStatusLivingClearsOffline(t *testing.T) {
+	st := newRuntimeManagerTestStore(t)
+	infoSrv := newFakeBilibiliInfoServer(t)
+	ctx := context.Background()
+
+	bindingID, _ := runtimeManagerTestBinding(t, st, "张三", "小号", "123", nil)
+
+	var wg sync.WaitGroup
+	rm := newTestRuntimeManager(t, ctx, st, &wg, nil)
+	cfgs, err := st.LoadRunConfig(ctx)
+	if err != nil {
+		t.Fatalf("读取配置报错: %v", err)
+	}
+	seedFakeAccount(t, rm, cfgs[0], infoSrv)
+
+	if err := rm.StartBinding(ctx, bindingID); err != nil {
+		t.Fatalf("StartBinding 报错: %v", err)
+	}
+	t.Cleanup(func() { rm.StopBinding(ctx, bindingID) })
+
+	lb := rm.live[bindingID]
+	rm.UpdateLiveStatus(bindingID, store.RoomLiveOffline)
+	rm.UpdateLiveStatus(bindingID, store.RoomLiveLiving)
+	if lb.room.LiveOffline() {
+		t.Error("开播后 LiveOffline() 应该恢复为 false，不需要重启进程")
+	}
+}
+
+// TestUpdateLiveStatusOnBindingNotLiveIsNoop 覆盖绑定当前不在跑（未启用，
+// 或探测发生在装配完成之前的极短窗口）：不该 panic。
+func TestUpdateLiveStatusOnBindingNotLiveIsNoop(t *testing.T) {
+	st := newRuntimeManagerTestStore(t)
+	ctx := context.Background()
+
+	var wg sync.WaitGroup
+	rm := newTestRuntimeManager(t, ctx, st, &wg, nil)
+
+	rm.UpdateLiveStatus(999999, store.RoomLiveOffline)
+}
+
+// TestShouldSkipOfflineEvent 是事件分发循环里那一行 if 判断的纯逻辑
+// 单元测试：只在"确认未开播"时跳过高能榜/进房这两类事件，其余任何
+// 组合都不该跳过——尤其是 offline=false（未确认未开播，含"拿不到状态"
+// 与"确认在播"两种情况）时，任何事件类型都不能被跳过。
+func TestShouldSkipOfflineEvent(t *testing.T) {
+	cases := []struct {
+		name    string
+		offline bool
+		evType  event.Type
+		want    bool
+	}{
+		{"未开播时跳过高能榜", true, event.TypeOnlineRankUpdate, true},
+		{"未开播时跳过进房", true, event.TypeUserEnter, true},
+		{"未开播时不跳过弹幕", true, event.TypeDanmaku, false},
+		{"未开播时不跳过礼物", true, event.TypeGift, false},
+		{"未开播时不跳过上舰", true, event.TypeGuardBuy, false},
+		{"未开播时不跳过关注", true, event.TypeUserFollow, false},
+		{"不确定/在播时不跳过高能榜", false, event.TypeOnlineRankUpdate, false},
+		{"不确定/在播时不跳过进房", false, event.TypeUserEnter, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := shouldSkipOfflineEvent(c.offline, c.evType); got != c.want {
+				t.Errorf("shouldSkipOfflineEvent(%v, %q) = %v, 期望 %v", c.offline, c.evType, got, c.want)
+			}
+		})
 	}
 }

@@ -40,6 +40,21 @@ func newAPIRoomStatusChecker() roomStatusChecker {
 	}
 }
 
+// liveStatusNotifier 是探测完成后把开播状态同步给该绑定当前运行时的
+// 事件分发循环的能力，cmd/magicd 的 runtimeManager 实现它（见
+// runtime_manager.go 的 UpdateLiveStatus）。
+//
+// 抽成接口而不是直接依赖 *runtimeManager，理由与 loginChecker/
+// roomStatusChecker 抽成函数类型完全一致：roomStatusCheckOnce/
+// bindingRoomStatusProbe 的测试不必依赖一整套账号运行时、调度器的装配
+// 就能验证"探测完成后有没有通知"，只关心通知本身，不关心通知之后
+// runtimeManager 内部怎么处理。
+type liveStatusNotifier interface {
+	// UpdateLiveStatus 把 bindingID 的最新探测状态（RoomLiveLiving/
+	// Offline/Unknown 之一）同步给运行时。
+	UpdateLiveStatus(bindingID int64, state string)
+}
+
 // resolveRoomState 把一次探测结果映射成 store 的三态之一。
 //
 // **这是本任务最需要守住的一条判断，只在这一处实现**：err != nil
@@ -73,7 +88,16 @@ func resolveRoomState(status *api.RoomStatus, err error) (state, anchorUID, anch
 // 同账号的多个绑定共享同一次账号查询结果，避免同一个 Cookie 被
 // GetAccountByName 重复查询——绑定规模是"账号数 × 房间数"，重复查询
 // 的代价在这个规模下可忽略，但顺手做了就不必之后再补。
-func roomStatusCheckOnce(ctx context.Context, st *store.Store, check roomStatusChecker, log *slog.Logger) {
+// notifyLiveStatus 是 notify 判空后调用的唯一入口——notify 允许为
+// nil（测试通常不关心这一步，run.go 生产环境总会注入一个真正的
+// runtimeManager），调用方不必每处都重复判空。
+func notifyLiveStatus(notify liveStatusNotifier, bindingID int64, state string) {
+	if notify != nil {
+		notify.UpdateLiveStatus(bindingID, state)
+	}
+}
+
+func roomStatusCheckOnce(ctx context.Context, st *store.Store, check roomStatusChecker, notify liveStatusNotifier, log *slog.Logger) {
 	bindings, err := st.ListBindings(ctx)
 	if err != nil {
 		log.Error("直播间状态检测: 列出绑定失败", "err", err)
@@ -98,6 +122,7 @@ func roomStatusCheckOnce(ctx context.Context, st *store.Store, check roomStatusC
 				if uerr := st.UpdateBindingRoomStatus(ctx, b.ID, store.RoomLiveUnknown, "", ""); uerr != nil {
 					log.Error("写入直播间状态失败", "binding", b.Label(), "err", uerr)
 				}
+				notifyLiveStatus(notify, b.ID, store.RoomLiveUnknown)
 				continue
 			}
 			acc = a
@@ -112,17 +137,21 @@ func roomStatusCheckOnce(ctx context.Context, st *store.Store, check roomStatusC
 		if uerr := st.UpdateBindingRoomStatus(ctx, b.ID, state, uid, name); uerr != nil {
 			log.Error("写入直播间状态失败", "binding", b.Label(), "err", uerr)
 		}
+		// 同步给运行时的事件分发循环（P6 任务 4）：写库只是让界面显示
+		// 对，未开播时不该继续处理高能榜/进房事件这件事发生在事件分发
+		// 的热路径上，不会每条事件都去查一次数据库，得有这份内存态。
+		notifyLiveStatus(notify, b.ID, state)
 	}
 }
 
 // roomStatusCheckLoop 定期对全部绑定做直播间状态探测，模式与
 // loginCheckLoop/purgeLoop 一致：一个 goroutine + ticker + ctx 取消，
 // 启动时立刻检测一次，不等第一个 tick。
-func roomStatusCheckLoop(ctx context.Context, st *store.Store, check roomStatusChecker, log *slog.Logger) {
+func roomStatusCheckLoop(ctx context.Context, st *store.Store, check roomStatusChecker, notify liveStatusNotifier, log *slog.Logger) {
 	ticker := time.NewTicker(roomStatusCheckInterval)
 	defer ticker.Stop()
 
-	run := func() { roomStatusCheckOnce(ctx, st, check, log) }
+	run := func() { roomStatusCheckOnce(ctx, st, check, notify, log) }
 
 	run()
 	for {

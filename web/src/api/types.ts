@@ -191,4 +191,28 @@ export interface StatsBucket {
    * 见 `server/internal/store/stats.go` 的 `StatsBucket.BlindBoxProfit`。
    */
   blindBoxProfit: number
+  /**
+   * 本分桶内全部**非盲盒、金瓜子**礼物的电池到账总量，单位 1/100 电池。
+   * 免费礼物（`coin_type` 是 `silver` 的小花花、人气票等）不计入，即便
+   * 它的原始 `total_coin` 字段本身是正数——后端已经按 `coin_type`
+   * 过滤过，前端不需要（也不能）再猜。「元」的换算只在展示层做，同
+   * `blindBoxProfit` 一样除以 1000。
+   */
+  giftCoins: number
+}
+
+/**
+ * `GET /api/bindings/{id}/gifts` 返回的一行礼物明细，按礼物名分组。
+ *
+ * 字段名照抄后端 `httpapi.giftBreakdownView`（`stats_handler.go`）。
+ */
+export interface GiftBreakdownRow {
+  giftName: string
+  /** 这个礼物名下的送礼数量之和（礼物本身的数量，不是事件行数）。 */
+  count: number
+  /**
+   * 只累加金瓜子部分的电池，单位 1/100 电池——免费礼物这一项恒为 0，
+   * 数量仍然照常统计在 `count` 里，两者不是同一回事。
+   */
+  coins: number
 }

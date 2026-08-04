@@ -80,6 +80,30 @@ type LoginProbe interface {
 // SetLoginProbe 注入登录态立即检测能力。run 在装配完成后调用一次。
 func (s *Server) SetLoginProbe(p LoginProbe) { s.loginProbe = p }
 
+// AccountRuntimeUpdater 是账号参数（发送间隔、单条弹幕字数上限）保存后，
+// 把改动同步给该账号当前正在跑的全部绑定的能力。
+//
+// 与 BindingLifecycle 管的不是同一件事：BindingLifecycle 决定"一个绑定
+// 在不在跑"，这里管的是"账号级参数变了，已经在跑的绑定要不要跟着变"。
+// 此前的已知局限（P5-1 报告记录过）是账号的字数上限/发送间隔只在绑定
+// 装配那一刻（cmd/magicd/run.go 的 buildRoomRuntime）读一次，改了不
+// 重启不生效，界面上也没有任何提示——用户会以为保存失败或者软件有
+// bug。httpapi 自己不知道
+// 怎么把新参数落到运行中的限流器/Actions 上，具体实现留在 cmd/magicd
+// 的 runtimeManager，通过 SetAccountRuntimeUpdater 注入，与 LoginProbe/
+// RoomStatusProbe 是同一种解耦方式：可能为 nil（测试环境通常不关心这
+// 一步），处理器判空后跳过。
+type AccountRuntimeUpdater interface {
+	// UpdateAccountRuntime 把 accountName 当前保存在数据库里的最新参数
+	// 同步给该账号名下全部正在跑的绑定。这个账号眼下没有任何绑定在跑
+	// 不是错误——下次绑定启动时装配自然会读到数据库里的新值。
+	UpdateAccountRuntime(ctx context.Context, accountName string)
+}
+
+// SetAccountRuntimeUpdater 注入账号运行参数热传播能力。run 在装配完成
+// 后调用一次。
+func (s *Server) SetAccountRuntimeUpdater(u AccountRuntimeUpdater) { s.accountRuntimeUpdater = u }
+
 func (s *Server) handleListAccounts(w http.ResponseWriter, r *http.Request) {
 	u := userFrom(r.Context())
 
@@ -295,6 +319,13 @@ func (s *Server) handlePatchAccount(w http.ResponseWriter, r *http.Request) {
 		respondStoreError(w, err, "")
 		return
 	}
+
+	// 保存成功才通知——校验失败的早返回路径没有真的改动数据库，通知了
+	// 也只是让 runtimeManager 白读一份跟改之前完全一样的配置。
+	if s.accountRuntimeUpdater != nil {
+		s.accountRuntimeUpdater.UpdateAccountRuntime(r.Context(), updated.Name)
+	}
+
 	respondJSON(w, http.StatusOK, toAccountView(updated, u.ID))
 }
 

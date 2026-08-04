@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"os"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -14,6 +15,32 @@ import (
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/connector/bilibili/api"
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/store"
 )
+
+// fakeLiveStatusNotifier 记录被通知过的 (bindingID, state) 组合，验证
+// 探测完成（心跳循环或立即检测）之后有没有把结果同步给运行时的事件
+// 分发循环——不依赖真正的 runtimeManager（那需要账号运行时、调度器等
+// 一整套装配），理由与本文件其余假实现一致。
+type fakeLiveStatusNotifier struct {
+	mu       sync.Mutex
+	notified []liveStatusNotification
+}
+
+type liveStatusNotification struct {
+	bindingID int64
+	state     string
+}
+
+func (f *fakeLiveStatusNotifier) UpdateLiveStatus(bindingID int64, state string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.notified = append(f.notified, liveStatusNotification{bindingID, state})
+}
+
+func (f *fakeLiveStatusNotifier) snapshot() []liveStatusNotification {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]liveStatusNotification{}, f.notified...)
+}
 
 // ---- resolveRoomState：探测结果 -> 三态的映射（P5-2 任务 1b） ----
 
@@ -150,7 +177,7 @@ func TestRoomStatusCheckOnceWritesCheckerResults(t *testing.T) {
 		return &api.RoomStatus{LiveStatus: api.LiveStatusOffline, AnchorUID: "9002", AnchorName: "下播主播"}, nil
 	}
 
-	roomStatusCheckOnce(ctx, st, check, slog.Default())
+	roomStatusCheckOnce(ctx, st, check, nil, slog.Default())
 
 	got1, err := st.GetBindingByID(ctx, living.ID)
 	if err != nil {
@@ -197,7 +224,7 @@ func TestRoomStatusCheckOnceProbeFailureIsUnknownNotOffline(t *testing.T) {
 		return &api.RoomStatus{LiveStatus: api.LiveStatusLiving}, nil
 	}
 
-	roomStatusCheckOnce(ctx, st, check, slog.Default())
+	roomStatusCheckOnce(ctx, st, check, nil, slog.Default())
 
 	gotBad, err := st.GetBindingByID(ctx, bad.ID)
 	if err != nil {
@@ -245,7 +272,7 @@ func TestRoomStatusCheckOnceReturnsEarlyWhenContextCancelled(t *testing.T) {
 		return &api.RoomStatus{LiveStatus: api.LiveStatusLiving}, nil
 	}
 
-	roomStatusCheckOnce(runCtx, st, check, slog.Default())
+	roomStatusCheckOnce(runCtx, st, check, nil, slog.Default())
 
 	if got := atomic.LoadInt32(&calls); got != 1 {
 		t.Errorf("check 被调用了 %d 次，期望恰好 1 次", got)
@@ -274,7 +301,7 @@ func TestRoomStatusCheckLoopRunsImmediatelyAndRespectsCancellation(t *testing.T)
 	runCtx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
-		roomStatusCheckLoop(runCtx, st, check, slog.Default())
+		roomStatusCheckLoop(runCtx, st, check, nil, slog.Default())
 		close(done)
 	}()
 
@@ -291,5 +318,83 @@ func TestRoomStatusCheckLoopRunsImmediatelyAndRespectsCancellation(t *testing.T)
 	case <-done:
 	case <-time.After(3 * time.Second):
 		t.Fatal("ctx 取消后 roomStatusCheckLoop 应尽快退出，而不是继续等下一个 tick")
+	}
+}
+
+// ---- P6 任务 4：探测完成后要通知运行时的事件分发循环 ----
+//
+// 光把状态写进数据库不够：未开播时不该继续处理高能榜/进房事件这件事
+// 发生在事件分发的热路径上（cmd/magicd/runtime_manager.go 的 adoptLocked
+// 循环），不会每条事件都去查一次数据库，得有一个内存态的"最近一次探测
+// 结果"同步过去。roomStatusCheckOnce/roomStatusCheckLoop 是这份内存态
+// 唯二两个写入来源之一（另一个是 bindingRoomStatusProbe.ProbeNow 立即
+// 探测），必须真的调用 notify。
+
+// TestRoomStatusCheckOnceNotifiesLiveStatusOfEachBinding 验证心跳循环把
+// 每个绑定的探测结果都同步给了 notify，且 bindingID/state 与写库的结果
+// 一一对应，不会张冠李戴。
+func TestRoomStatusCheckOnceNotifiesLiveStatusOfEachBinding(t *testing.T) {
+	st := newRoomStatusCheckTestStore(t)
+	ctx := context.Background()
+
+	owner, err := st.CreateUser(ctx, "张三", "密码123456", false)
+	if err != nil {
+		t.Fatalf("建用户报错: %v", err)
+	}
+	living := mustRoomStatusAccountAndBinding(t, st, owner.ID, "开播号", "111")
+	offline := mustRoomStatusAccountAndBinding(t, st, owner.ID, "下播号", "222")
+
+	check := func(_ context.Context, _ string, roomID string) (*api.RoomStatus, error) {
+		if roomID == "111" {
+			return &api.RoomStatus{LiveStatus: api.LiveStatusLiving}, nil
+		}
+		return &api.RoomStatus{LiveStatus: api.LiveStatusOffline}, nil
+	}
+
+	notify := &fakeLiveStatusNotifier{}
+	roomStatusCheckOnce(ctx, st, check, notify, slog.Default())
+
+	got := map[int64]string{}
+	for _, n := range notify.snapshot() {
+		got[n.bindingID] = n.state
+	}
+	if got[living.ID] != store.RoomLiveLiving {
+		t.Errorf("开播号的通知状态 = %q, 期望 %q", got[living.ID], store.RoomLiveLiving)
+	}
+	if got[offline.ID] != store.RoomLiveOffline {
+		t.Errorf("下播号的通知状态 = %q, 期望 %q", got[offline.ID], store.RoomLiveOffline)
+	}
+}
+
+// TestRoomStatusCheckOnceNotifiesUnknownOnProbeFailure 是自检项 (a) 在
+// 通知路径上的落点：探测失败必须通知 unknown，不能通知 offline——
+// 不然写库那边是对的（unknown），内存态那边却错误地把事件分发循环
+// 掐死了，两边不一致，而错误的那一边正是真正影响机器人行为的那一边。
+func TestRoomStatusCheckOnceNotifiesUnknownOnProbeFailure(t *testing.T) {
+	st := newRoomStatusCheckTestStore(t)
+	ctx := context.Background()
+
+	owner, err := st.CreateUser(ctx, "张三", "密码123456", false)
+	if err != nil {
+		t.Fatalf("建用户报错: %v", err)
+	}
+	bad := mustRoomStatusAccountAndBinding(t, st, owner.ID, "坏号", "111")
+
+	check := func(context.Context, string, string) (*api.RoomStatus, error) {
+		return nil, errors.New("api: 风控校验失败")
+	}
+
+	notify := &fakeLiveStatusNotifier{}
+	roomStatusCheckOnce(ctx, st, check, notify, slog.Default())
+
+	got := notify.snapshot()
+	if len(got) != 1 || got[0].bindingID != bad.ID {
+		t.Fatalf("通知记录 = %v, 期望恰好一条针对绑定 %d 的通知", got, bad.ID)
+	}
+	if got[0].state == store.RoomLiveOffline {
+		t.Error("探测失败被通知成了「未开播」——这会让一次网络抖动掐掉高能榜/进房事件")
+	}
+	if got[0].state != store.RoomLiveUnknown {
+		t.Errorf("通知状态 = %q, 期望 %q", got[0].state, store.RoomLiveUnknown)
 	}
 }

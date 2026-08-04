@@ -487,6 +487,236 @@ func TestQueryStatsBySessionMultipleSessions(t *testing.T) {
 	}
 }
 
+// ---- P6 任务 5：今日电池到账（GiftCoins）——只有金瓜子才算 ----
+//
+// B 站礼物有 coin_type（gold/silver）之分，免费礼物（小花花、人气票等）
+// 是 silver，不产生真实电池，绝不能计进"电池到账"。**不能用
+// TotalCoin > 0 这种近似判据**——某些免费礼物的 total_coin 本身就不是
+// 0（比如承载着人气值），用金额是否为正来猜测coin_type 会在这类礼物上
+// 判错，必须老老实实读 coin_type 字段。
+
+// TestQueryStatsByDaySumsGiftCoinsOnlyForGoldCoinGifts 是这条修复最核心
+// 的一条测试：金瓜子礼物计入 GiftCoins，银瓜子（免费）礼物不计入，
+// 即便它的 TotalCoin 字段本身是正数。
+func TestQueryStatsByDaySumsGiftCoinsOnlyForGoldCoinGifts(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	accID := mustAccount(t, s, "小号")
+
+	if err := s.InsertActivity(ctx, []ActivityRow{
+		// 金瓜子礼物：辣条，500 电池到账
+		{AccountID: accID, Kind: ActivityEvent, EventType: "gift",
+			Detail:     []byte(`{"GiftName":"辣条","Count":1,"CoinType":"gold","TotalCoin":50000,"BlindBox":null}`),
+			OccurredAt: statsFixedTime},
+		// 免费礼物：小心心，coin_type 是 silver，即便 TotalCoin 是正数
+		// （承载人气值，不是真实电池），也绝不能计进电池到账。
+		{AccountID: accID, Kind: ActivityEvent, EventType: "gift",
+			Detail:     []byte(`{"GiftName":"小心心","Count":1,"CoinType":"silver","TotalCoin":100,"BlindBox":null}`),
+			OccurredAt: statsFixedTime.Add(time.Minute)},
+	}); err != nil {
+		t.Fatalf("写入报错: %v", err)
+	}
+
+	got, err := s.QueryStatsByDay(ctx, StatsQuery{AccountID: accID})
+	if err != nil {
+		t.Fatalf("按天聚合报错: %v", err)
+	}
+	b := statsBucketFor(t, got, "2026-07-31")
+	if b.GiftCoins != 50000 {
+		t.Errorf("GiftCoins = %d, 期望 50000（只算金瓜子礼物，免费礼物不算，"+
+			"即便它的 TotalCoin 本身是正数）", b.GiftCoins)
+	}
+}
+
+// TestQueryStatsByDayGiftCoinsExcludesBlindBox 验证盲盒礼物不计入
+// GiftCoins——盲盒继续单独算（BlindBoxProfit），不混进常规礼物统计，
+// 这是 P4-4 的硬性要求，电池到账这个新字段也不能例外。
+func TestQueryStatsByDayGiftCoinsExcludesBlindBox(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	accID := mustAccount(t, s, "小号")
+
+	if err := s.InsertActivity(ctx, []ActivityRow{
+		{AccountID: accID, Kind: ActivityEvent, EventType: "gift",
+			Detail: []byte(`{"GiftName":"星光铃铛","Count":1,"CoinType":"gold","Price":5200,"TotalCoin":5000,` +
+				`"BlindBox":{"Name":"幸运盲盒","Price":5000,"TipPrice":5200}}`),
+			OccurredAt: statsFixedTime},
+	}); err != nil {
+		t.Fatalf("写入报错: %v", err)
+	}
+
+	got, err := s.QueryStatsByDay(ctx, StatsQuery{AccountID: accID})
+	if err != nil {
+		t.Fatalf("按天聚合报错: %v", err)
+	}
+	b := statsBucketFor(t, got, "2026-07-31")
+	if b.GiftCoins != 0 {
+		t.Errorf("GiftCoins = %d, 期望 0（盲盒礼物不计入常规电池到账，单独看盲盒盈亏）", b.GiftCoins)
+	}
+}
+
+// TestQueryStatsBySessionSumsGiftCoins 验证 by=session 走的单行聚合路径
+// （aggregateEventCounts）与 by=day 的 GROUP BY 口径一致，不是只改了一份。
+func TestQueryStatsBySessionSumsGiftCoins(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	accID := mustAccount(t, s, "小号")
+	b, err := s.UpsertBinding(ctx, accID, "123")
+	if err != nil {
+		t.Fatalf("创建绑定报错: %v", err)
+	}
+
+	start := statsFixedTime
+	stop := start.Add(time.Hour)
+	if err := s.InsertActivity(ctx, []ActivityRow{
+		{AccountID: accID, BindingID: &b.ID, Kind: ActivityEvent, EventType: "live_start", OccurredAt: start},
+		{AccountID: accID, BindingID: &b.ID, Kind: ActivityEvent, EventType: "gift",
+			Detail:     []byte(`{"GiftName":"辣条","Count":1,"CoinType":"gold","TotalCoin":50000,"BlindBox":null}`),
+			OccurredAt: start.Add(time.Minute)},
+		{AccountID: accID, BindingID: &b.ID, Kind: ActivityEvent, EventType: "gift",
+			Detail:     []byte(`{"GiftName":"小心心","Count":1,"CoinType":"silver","TotalCoin":100,"BlindBox":null}`),
+			OccurredAt: start.Add(2 * time.Minute)},
+		{AccountID: accID, BindingID: &b.ID, Kind: ActivityEvent, EventType: "live_stop", OccurredAt: stop},
+	}); err != nil {
+		t.Fatalf("写入报错: %v", err)
+	}
+
+	got, err := s.QueryStatsBySession(ctx, StatsQuery{AccountID: accID, BindingID: b.ID})
+	if err != nil {
+		t.Fatalf("按场次聚合报错: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("场次数 = %d, 期望 1: %+v", len(got), got)
+	}
+	if got[0].GiftCoins != 50000 {
+		t.Errorf("GiftCoins = %d, 期望 50000", got[0].GiftCoins)
+	}
+}
+
+// ---- P6 任务 5：礼物明细列表（按礼物名分组：数量 + 电池数加和） ----
+
+// TestQueryGiftBreakdownGroupsByName 验证按礼物名分组求和：数量是各行
+// Count 之和，电池数只累加金瓜子礼物的 TotalCoin。
+func TestQueryGiftBreakdownGroupsByName(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	accID := mustAccount(t, s, "小号")
+	bind, err := s.UpsertBinding(ctx, accID, "123")
+	if err != nil {
+		t.Fatalf("创建绑定报错: %v", err)
+	}
+
+	if err := s.InsertActivity(ctx, []ActivityRow{
+		{AccountID: accID, BindingID: &bind.ID, Kind: ActivityEvent, EventType: "gift",
+			Detail:     []byte(`{"GiftName":"辣条","Count":1,"CoinType":"gold","TotalCoin":50000,"BlindBox":null}`),
+			OccurredAt: statsFixedTime},
+		{AccountID: accID, BindingID: &bind.ID, Kind: ActivityEvent, EventType: "gift",
+			Detail:     []byte(`{"GiftName":"辣条","Count":2,"CoinType":"gold","TotalCoin":100000,"BlindBox":null}`),
+			OccurredAt: statsFixedTime.Add(time.Minute)},
+		{AccountID: accID, BindingID: &bind.ID, Kind: ActivityEvent, EventType: "gift",
+			Detail:     []byte(`{"GiftName":"小心心","Count":3,"CoinType":"silver","TotalCoin":300,"BlindBox":null}`),
+			OccurredAt: statsFixedTime.Add(2 * time.Minute)},
+	}); err != nil {
+		t.Fatalf("写入报错: %v", err)
+	}
+
+	got, err := s.QueryGiftBreakdown(ctx, bind.ID, time.Time{}, time.Time{})
+	if err != nil {
+		t.Fatalf("查询礼物明细报错: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("礼物种类数 = %d, 期望 2: %+v", len(got), got)
+	}
+
+	byName := map[string]GiftBreakdownRow{}
+	for _, r := range got {
+		byName[r.GiftName] = r
+	}
+	larou, ok := byName["辣条"]
+	if !ok {
+		t.Fatalf("没有找到「辣条」: %+v", got)
+	}
+	if larou.Count != 3 {
+		t.Errorf("辣条 Count = %d, 期望 3（两行 1+2 求和）", larou.Count)
+	}
+	if larou.Coins != 150000 {
+		t.Errorf("辣条 Coins = %d, 期望 150000（两行 50000+100000 求和）", larou.Coins)
+	}
+
+	heart, ok := byName["小心心"]
+	if !ok {
+		t.Fatalf("没有找到「小心心」: %+v", got)
+	}
+	if heart.Count != 3 {
+		t.Errorf("小心心 Count = %d, 期望 3（数量照常统计，即便是免费礼物）", heart.Count)
+	}
+	if heart.Coins != 0 {
+		t.Errorf("小心心 Coins = %d, 期望 0（银瓜子免费礼物不产生电池，即便 TotalCoin 是正数）", heart.Coins)
+	}
+}
+
+// TestQueryGiftBreakdownExcludesBlindBox 验证盲盒不混进礼物明细列表——
+// P4-4 的硬性要求：盲盒继续单独算。
+func TestQueryGiftBreakdownExcludesBlindBox(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	accID := mustAccount(t, s, "小号")
+	bind, err := s.UpsertBinding(ctx, accID, "123")
+	if err != nil {
+		t.Fatalf("创建绑定报错: %v", err)
+	}
+
+	if err := s.InsertActivity(ctx, []ActivityRow{
+		{AccountID: accID, BindingID: &bind.ID, Kind: ActivityEvent, EventType: "gift",
+			Detail: []byte(`{"GiftName":"星光铃铛","Count":1,"CoinType":"gold","Price":5200,"TotalCoin":5000,` +
+				`"BlindBox":{"Name":"幸运盲盒","Price":5000,"TipPrice":5200}}`),
+			OccurredAt: statsFixedTime},
+	}); err != nil {
+		t.Fatalf("写入报错: %v", err)
+	}
+
+	got, err := s.QueryGiftBreakdown(ctx, bind.ID, time.Time{}, time.Time{})
+	if err != nil {
+		t.Fatalf("查询礼物明细报错: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("盲盒爆出的「星光铃铛」不该出现在礼物明细列表里，实际 %+v", got)
+	}
+}
+
+// TestQueryGiftBreakdownRespectsTimeRange 验证 since/until 生效——
+// "今日电池到账"卡片下方的明细列表要能按"今天"这个窗口过滤。
+func TestQueryGiftBreakdownRespectsTimeRange(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	accID := mustAccount(t, s, "小号")
+	bind, err := s.UpsertBinding(ctx, accID, "123")
+	if err != nil {
+		t.Fatalf("创建绑定报错: %v", err)
+	}
+
+	if err := s.InsertActivity(ctx, []ActivityRow{
+		{AccountID: accID, BindingID: &bind.ID, Kind: ActivityEvent, EventType: "gift",
+			Detail:     []byte(`{"GiftName":"昨天的礼物","Count":1,"CoinType":"gold","TotalCoin":100,"BlindBox":null}`),
+			OccurredAt: statsFixedTime.Add(-24 * time.Hour)},
+		{AccountID: accID, BindingID: &bind.ID, Kind: ActivityEvent, EventType: "gift",
+			Detail:     []byte(`{"GiftName":"今天的礼物","Count":1,"CoinType":"gold","TotalCoin":200,"BlindBox":null}`),
+			OccurredAt: statsFixedTime},
+	}); err != nil {
+		t.Fatalf("写入报错: %v", err)
+	}
+
+	dayStart := time.Date(2026, 7, 31, 0, 0, 0, 0, time.UTC)
+	dayEnd := dayStart.Add(24 * time.Hour)
+	got, err := s.QueryGiftBreakdown(ctx, bind.ID, dayStart, dayEnd)
+	if err != nil {
+		t.Fatalf("查询礼物明细报错: %v", err)
+	}
+	if len(got) != 1 || got[0].GiftName != "今天的礼物" {
+		t.Errorf("按时间窗口过滤后 = %+v, 期望只有「今天的礼物」", got)
+	}
+}
+
 // 按绑定隔离：不同绑定的开播事件不能串场
 func TestQueryStatsBySessionIsolatedPerBinding(t *testing.T) {
 	s := testStore(t)

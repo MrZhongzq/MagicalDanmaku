@@ -80,6 +80,11 @@ type Server struct {
 	loginProbe      LoginProbe
 	roomStatusProbe RoomStatusProbe
 
+	// accountRuntimeUpdater 由 run 注入，供账号参数（发送间隔、字数上限）
+	// 保存后热传播给运行中的绑定使用（P6 任务 3）。可能为 nil：测试通常
+	// 不关心这一步，处理器据此判空跳过。
+	accountRuntimeUpdater AccountRuntimeUpdater
+
 	// staticHandler 服务前端产物与 SPA 回退，由 mountStatic 装配。
 	// 不挂在 mux 上，见 static.go 里的说明。
 	staticHandler http.Handler
@@ -235,6 +240,11 @@ func (s *Server) routes() {
 	// 日志一致，同走 event:read（这是查看事件统计，不是新的权限点）。
 	s.mux.HandleFunc("GET /api/bindings/{binding}/stats",
 		s.requirePerm(perm.EventRead, s.handleQueryStats))
+
+	// 礼物明细列表：按礼物名分组的数量 + 电池数加和（P6 任务 5），
+	// 权限与统计聚合同一条轴，同走 event:read。
+	s.mux.HandleFunc("GET /api/bindings/{binding}/gifts",
+		s.requirePerm(perm.EventRead, s.handleQueryGiftBreakdown))
 
 	// 实时事件流：SSE 推送，权限与业务日志一致，同走 event:read。
 	s.mux.HandleFunc("GET /api/bindings/{binding}/stream",

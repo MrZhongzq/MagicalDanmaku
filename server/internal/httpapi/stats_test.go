@@ -328,3 +328,164 @@ func TestQueryStatsByDayCountsBeyondActivityLimit(t *testing.T) {
 		t.Errorf("danmakuCount = %v, 期望恰好 %d（不是 500 或其他截断值）", got[0]["danmakuCount"], n)
 	}
 }
+
+// ---- P6 任务 5：今日电池到账（giftCoins）+ 礼物明细列表 ----
+
+// TestQueryStatsByDayGiftCoins 验证 giftCoins 字段经完整 HTTP 层下发，
+// 且只统计金瓜子礼物——免费礼物（coin_type=silver）即便 TotalCoin 是
+// 正数也不该计入。
+func TestQueryStatsByDayGiftCoins(t *testing.T) {
+	srv, st := newTestServer(t)
+	c := loginAs(t, srv, st, "张三", false)
+	bid := mustBindingFor(t, st, "张三", "小号", "123")
+	grantEventRead(t, st, "张三", "小号", "123")
+
+	seedActivity(t, st, bid,
+		store.ActivityRow{Kind: store.ActivityEvent, EventType: "gift",
+			Detail:     []byte(`{"GiftName":"辣条","Count":1,"CoinType":"gold","TotalCoin":50000,"BlindBox":null}`),
+			OccurredAt: seedTime},
+		store.ActivityRow{Kind: store.ActivityEvent, EventType: "gift",
+			Detail:     []byte(`{"GiftName":"小心心","Count":1,"CoinType":"silver","TotalCoin":100,"BlindBox":null}`),
+			OccurredAt: seedTime.Add(time.Minute)},
+	)
+
+	resp := jsonRequest(t, c, "GET", srv.URL+"/api/bindings/"+itoa(bid)+"/stats?by=day", "")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("状态码 = %d", resp.StatusCode)
+	}
+
+	var got []map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("解析报错: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("bucket 数 = %d, 期望 1: %+v", len(got), got)
+	}
+	if got[0]["giftCoins"].(float64) != 50000 {
+		t.Errorf("giftCoins = %v, 期望 50000（免费礼物不计入，即便 TotalCoin 是正数）", got[0]["giftCoins"])
+	}
+}
+
+// TestHandleGiftBreakdownGroupsByName 验证礼物明细列表接口：按礼物名
+// 分组，数量与电池数（只算金瓜子）各自求和。
+func TestHandleGiftBreakdownGroupsByName(t *testing.T) {
+	srv, st := newTestServer(t)
+	c := loginAs(t, srv, st, "张三", false)
+	bid := mustBindingFor(t, st, "张三", "小号", "123")
+	grantEventRead(t, st, "张三", "小号", "123")
+
+	seedActivity(t, st, bid,
+		store.ActivityRow{Kind: store.ActivityEvent, EventType: "gift",
+			Detail:     []byte(`{"GiftName":"辣条","Count":1,"CoinType":"gold","TotalCoin":50000,"BlindBox":null}`),
+			OccurredAt: seedTime},
+		store.ActivityRow{Kind: store.ActivityEvent, EventType: "gift",
+			Detail:     []byte(`{"GiftName":"辣条","Count":2,"CoinType":"gold","TotalCoin":100000,"BlindBox":null}`),
+			OccurredAt: seedTime.Add(time.Minute)},
+		store.ActivityRow{Kind: store.ActivityEvent, EventType: "gift",
+			Detail:     []byte(`{"GiftName":"小心心","Count":3,"CoinType":"silver","TotalCoin":300,"BlindBox":null}`),
+			OccurredAt: seedTime.Add(2 * time.Minute)},
+		// 盲盒不该出现在明细列表里——P4-4 硬性要求，盲盒单独算。
+		store.ActivityRow{Kind: store.ActivityEvent, EventType: "gift",
+			Detail: []byte(`{"GiftName":"星光铃铛","Count":1,"CoinType":"gold","Price":5200,"TotalCoin":5000,` +
+				`"BlindBox":{"Name":"幸运盲盒","Price":5000,"TipPrice":5200}}`),
+			OccurredAt: seedTime.Add(3 * time.Minute)},
+	)
+
+	resp := jsonRequest(t, c, "GET", srv.URL+"/api/bindings/"+itoa(bid)+"/gifts", "")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("状态码 = %d", resp.StatusCode)
+	}
+
+	var got []map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("解析报错: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("礼物种类数 = %d, 期望 2（盲盒不该出现在明细列表里）: %+v", len(got), got)
+	}
+
+	byName := map[string]map[string]any{}
+	for _, row := range got {
+		byName[row["giftName"].(string)] = row
+	}
+	larou, ok := byName["辣条"]
+	if !ok {
+		t.Fatalf("没有找到「辣条」: %+v", got)
+	}
+	if larou["count"].(float64) != 3 {
+		t.Errorf("辣条 count = %v, 期望 3", larou["count"])
+	}
+	if larou["coins"].(float64) != 150000 {
+		t.Errorf("辣条 coins = %v, 期望 150000", larou["coins"])
+	}
+
+	heart, ok := byName["小心心"]
+	if !ok {
+		t.Fatalf("没有找到「小心心」: %+v", got)
+	}
+	if heart["count"].(float64) != 3 {
+		t.Errorf("小心心 count = %v, 期望 3", heart["count"])
+	}
+	if heart["coins"].(float64) != 0 {
+		t.Errorf("小心心 coins = %v, 期望 0（免费礼物不产生电池）", heart["coins"])
+	}
+}
+
+// TestHandleGiftBreakdownRespectsTimeRange 验证 since/until 生效，与
+// /stats 接口共用同一份时间范围解析（parseActivityTimeRange）。
+func TestHandleGiftBreakdownRespectsTimeRange(t *testing.T) {
+	srv, st := newTestServer(t)
+	c := loginAs(t, srv, st, "张三", false)
+	bid := mustBindingFor(t, st, "张三", "小号", "123")
+	grantEventRead(t, st, "张三", "小号", "123")
+
+	seedActivity(t, st, bid,
+		store.ActivityRow{Kind: store.ActivityEvent, EventType: "gift",
+			Detail:     []byte(`{"GiftName":"昨天的礼物","Count":1,"CoinType":"gold","TotalCoin":100,"BlindBox":null}`),
+			OccurredAt: seedTime.Add(-24 * time.Hour)},
+		store.ActivityRow{Kind: store.ActivityEvent, EventType: "gift",
+			Detail:     []byte(`{"GiftName":"今天的礼物","Count":1,"CoinType":"gold","TotalCoin":200,"BlindBox":null}`),
+			OccurredAt: seedTime},
+	)
+
+	since := seedTime.Add(-time.Hour).UTC().Format(time.RFC3339)
+	until := seedTime.Add(time.Hour).UTC().Format(time.RFC3339)
+	resp := jsonRequest(t, c, "GET",
+		srv.URL+"/api/bindings/"+itoa(bid)+"/gifts?since="+since+"&until="+until, "")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("状态码 = %d", resp.StatusCode)
+	}
+
+	var got []map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("解析报错: %v", err)
+	}
+	if len(got) != 1 || got[0]["giftName"] != "今天的礼物" {
+		t.Errorf("按时间窗口过滤后 = %+v, 期望只有「今天的礼物」", got)
+	}
+}
+
+// TestHandleGiftBreakdownRequiresEventRead 验证权限守卫与 /stats 一致，
+// 走 event:read——手法与 TestQueryStatsRequiresEventRead 完全一致：
+// 授予一个不相干的权限点（rule:write），证明"有别的权限"不等于
+// "有 event:read"。
+func TestHandleGiftBreakdownRequiresEventRead(t *testing.T) {
+	srv, st := newTestServer(t)
+	loginAs(t, srv, st, "张三", false)
+	bid := mustBindingFor(t, st, "张三", "小号", "123")
+
+	li := loginAs(t, srv, st, "李四", false)
+	if err := st.Grant(context.Background(), "李四", "小号", "123",
+		[]perm.Permission{perm.RuleWrite}); err != nil {
+		t.Fatalf("授权报错: %v", err)
+	}
+
+	resp := jsonRequest(t, li, "GET", srv.URL+"/api/bindings/"+itoa(bid)+"/gifts", "")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("状态码 = %d, 期望 403", resp.StatusCode)
+	}
+}

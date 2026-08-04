@@ -15,6 +15,14 @@
  * **只是提示，不影响选项能不能选、更不会把整个选择器锁死**——用户在 P4
  * 就明确要求过「面板不应该全是灰的锁死」，`PermissionWarning.vue` 已经在
  * 负责选中绑定之后的权限提示，这里不重复造一套锁死逻辑，也不跟它抢戏。
+ *
+ * **P6 任务 1**：候选项文案在房间号后面追加主播昵称（`· 昵称`），用户
+ * 原话「记房间号有点困难」。数据是现成的——P5-2 已经把主播 UID/昵称
+ * 取回来存进 `Binding.anchorName`（账号与直播间页显示的「主播 UID xxx
+ * · 桃酥Su--」用的就是这一份），这里直接读，不再调接口。昵称拿不到时
+ * （探测失败、或这个绑定还没被心跳探测过）`anchorName` 是空串，此时
+ * 整个 `· 昵称` 片段都不拼，仍然只显示房间号——不能显示成空或「未知」
+ * 把房间号挤掉，房间号才是用户唯一确定能找到自己直播间的线索。
  */
 import { computed } from 'vue'
 import { NAlert, NButton, NSelect, NSpin } from 'naive-ui'
@@ -31,7 +39,8 @@ const bindings = useBindingsStore()
 
 const options = computed(() =>
   bindings.list.map((b) => {
-    const base = `${b.accountName} @ ${b.roomId}${b.enabled ? '' : '（已停用）'}`
+    const nickname = b.anchorName ? ` · ${b.anchorName}` : ''
+    const base = `${b.accountName} @ ${b.roomId}${nickname}${b.enabled ? '' : '（已停用）'}`
     const lacksPerm = props.requiredPerm !== undefined && !auth.hasPerm(b, props.requiredPerm)
     return {
       label: lacksPerm ? `${base}（无 ${props.requiredPerm} 权限）` : base,

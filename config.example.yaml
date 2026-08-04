@@ -99,8 +99,8 @@ accounts:
             do:
               - type: danmaku
                 template:
-                  - '欢迎 {{join .users "、"}} 回家~'
-                  - '{{join .users "、"}} 来啦！'
+                  - '欢迎{{join .users "、"}}回家~'
+                  - '{{join .users "、"}}来啦！'
 
           - name: 礼物答谢
             on: [gift]
@@ -122,7 +122,7 @@ accounts:
             do:
               - type: danmaku
                 template:
-                  - '感谢 {{simplifyName .user.username}} 的 {{.gift.name}} x{{.gift.count}}！'
+                  - '感谢{{simplifyName .user.username}}的{{.gift.name}} x{{.gift.count}}！'
 
           - name: 盲盒答谢
             on: [gift]
@@ -154,14 +154,14 @@ accounts:
                   # 亏损分支用 profitAbsYuan（不带负号）而不是 profitYuan
                   # （自带负号）：旧版本两者搭配「亏了」用会拼出「亏了 -11
                   # 元」这种双重否定，这是本条规则真实播过的错。
-                  - '感谢 {{simplifyName .user.username}} 的 {{.blindBox.name}} x{{.blindBox.count}}，{{if gt (int .blindBox.profit) 0}}赚了 {{.blindBox.profitYuan}} 元！{{else if lt (int .blindBox.profit) 0}}亏了 {{.blindBox.profitAbsYuan}} 元！{{else}}不赚不亏！{{end}}'
+                  - '感谢{{simplifyName .user.username}}的{{.blindBox.name}} x{{.blindBox.count}}，{{if gt (int .blindBox.profit) 0}}赚了{{.blindBox.profitYuan}}元！{{else if lt (int .blindBox.profit) 0}}亏了{{.blindBox.profitAbsYuan}}元！{{else}}不赚不亏！{{end}}'
 
           - name: 上舰答谢
             on: [guard_buy]
             do:
               - type: danmaku
                 template:
-                  - '感谢 {{simplifyName .user.username}} 开通{{.guard.name}}！'
+                  - '感谢{{simplifyName .user.username}}开通{{.guard.name}}！'
 
           - name: 关键词回复
             on: [danmaku]

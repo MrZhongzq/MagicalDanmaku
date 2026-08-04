@@ -42,6 +42,22 @@
  * 统计卡片/明细表展示的是聚合数字，两者用途不同（“最近发生了什么”
  * vs “这段时间总共发生了多少”），不是同一份信息的两种画法，见文件
  * 末尾该区块自己的注释。
+ *
+ * **P6 任务 5：「今日电池到账」卡片 + 「礼物」明细列表**——用户真机反馈：
+ * 「礼物数量」卡片后面要能看到今天到账了多少电池，下方要有按礼物分组
+ * 的明细（礼物名/数量/电池数）。
+ *
+ * 这两块数据**独立于上面的维度切换（按日/按场次）**，固定按"今天"
+ * （UTC 自然天，与 `store.QueryStatsByDay` 的分桶口径一致）请求，不随
+ * `dimension` 变化——用户要看的是"今天"这个固定概念，不是"当前维度选中
+ * 的那一桶"，切到按场次时也不该让这两块数据消失或变成别的意思。
+ *
+ * 电池数**只统计金瓜子礼物**（`GiftCoins`/`coins` 字段后端已经按
+ * `coin_type` 过滤过，前端不需要也不能再猜——小花花、人气票这类免费
+ * 礼物不产生电池，即便它们的原始金额字段本身是正数）。展示单位是
+ * 「电池」而不是「元」，换算系数是 **除以 100**（原始值是 1/100 电池），
+ * 不要跟盲盒盈亏卡片的 /1000（换算成「元」）搞混，那是两个不同的展示
+ * 单位。
  */
 import { computed, ref, watch } from 'vue'
 import {
@@ -57,7 +73,7 @@ import {
 } from 'naive-ui'
 import type { DataTableColumns } from 'naive-ui'
 import { ApiError, request } from '@/api'
-import type { Activity, StatsBucket, StatsDimension } from '@/api'
+import type { Activity, GiftBreakdownRow, StatsBucket, StatsDimension } from '@/api'
 import { useBindingsStore } from '@/stores/bindings'
 import BindingSelector from '@/components/BindingSelector.vue'
 
@@ -83,6 +99,17 @@ function formatBlindBoxProfit(profitCentiBattery: number): string {
   const yuan = profitCentiBattery / 1000
   const sign = yuan > 0 ? '+' : ''
   return `${sign}${yuan.toFixed(2)} 元`
+}
+
+/**
+ * formatBattery 把 1/100 电池的原始整数换算成「电池」展示。
+ *
+ * **除数是 100，不是 1000**——这里展示的单位是「电池」，不是
+ * formatBlindBoxProfit 那样的「元」（1 电池 = 0.1 元，元的换算要多除
+ * 一次 10）。两个函数换算系数不同是刻意的，不是疏漏，别把它们对齐。
+ */
+function formatBattery(centiBattery: number): string {
+  return `${(centiBattery / 100).toFixed(2)} 电池`
 }
 
 // ---- 维度切换：按场次 / 按日，现在真的会重新请求聚合接口 ----
@@ -128,6 +155,79 @@ watch(
   () => void loadStats(),
   { immediate: true },
 )
+
+// ---- 今日电池到账 + 礼物明细列表：固定按"今天"，不随维度切换变化 ----
+
+/**
+ * todayRangeUTC 算出"今天"的 [since, until)：UTC 自然天的零点到当前
+ * 时刻。与 `store.QueryStatsByDay` 的 `date_trunc('day', occurred_at)`
+ * 用的是同一个口径（UTC 自然天），不按浏览器本地时区切——否则「今天」
+ * 这个词在后端与前端会指两个不同的时间窗口，跨时区部署时尤其容易错。
+ */
+function todayRangeUTC(): { since: string; until: string } {
+  const now = new Date()
+  const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()))
+  return { since: start.toISOString(), until: now.toISOString() }
+}
+
+const todayGiftCoins = ref<number | null>(null) // null 表示"算不出来"（未选绑定/加载失败），不能显示成 0
+const giftBreakdown = ref<GiftBreakdownRow[]>([])
+const loadingToday = ref(false)
+const todayError = ref<string | null>(null)
+
+async function loadToday() {
+  const b = bindings.current
+  if (!b) {
+    todayGiftCoins.value = null
+    giftBreakdown.value = []
+    return
+  }
+  loadingToday.value = true
+  todayError.value = null
+  try {
+    const { since, until } = todayRangeUTC()
+    const qs = `since=${encodeURIComponent(since)}&until=${encodeURIComponent(until)}`
+    // 两个接口各自独立失败也不该互相拖累——用 allSettled 而不是 all，
+    // 电池到账查不到不该连带把已经查到的礼物明细也清空，反之亦然。
+    const [statsResult, giftsResult] = await Promise.allSettled([
+      request<StatsBucket[]>('GET', `/api/bindings/${b.id}/stats?by=day&${qs}`),
+      request<GiftBreakdownRow[]>('GET', `/api/bindings/${b.id}/gifts?${qs}`),
+    ])
+
+    if (statsResult.status === 'fulfilled') {
+      // 空数组不能求和成 0——那会把"今天压根没有可用的分桶数据"显示成
+      // "今天电池到账确实是 0"，与本页其余卡片的 hasBuckets/PLACEHOLDER
+      // 处理原则一致（见 noBucketsHint 的注释）。
+      //
+      // by=day&since=今天零点&until=现在 至多只会返回今天这一个分桶，
+      // 但仍然用 reduce 求和而不是直接取第一个——万一后端跨天分桶的
+      // 简化规则（见 QueryStatsByDay 的说明）在某个边界返回了不止一桶，
+      // 求和永远是安全的，取第一个则可能悄悄漏掉一部分。
+      todayGiftCoins.value =
+        statsResult.value.length > 0
+          ? statsResult.value.reduce((sum, bkt) => sum + bkt.giftCoins, 0)
+          : null
+    } else {
+      todayGiftCoins.value = null
+      todayError.value =
+        statsResult.reason instanceof ApiError ? statsResult.reason.message : '加载今日电池到账失败'
+    }
+
+    if (giftsResult.status === 'fulfilled') {
+      giftBreakdown.value = giftsResult.value
+    } else {
+      giftBreakdown.value = []
+      todayError.value =
+        giftsResult.reason instanceof ApiError ? giftsResult.reason.message : '加载礼物明细失败'
+    }
+  } finally {
+    loadingToday.value = false
+  }
+}
+
+// 只随绑定变化重新拉取，不随 dimension——"今天"是一个固定概念，不该
+// 因为用户切到「按场次」维度就跟着变成别的意思或者消失。
+watch(() => bindings.currentId, () => void loadToday(), { immediate: true })
 
 /**
  * totals 把分桶数组汇总成总览卡片用的数字。
@@ -234,6 +334,18 @@ const STAT_CARDS = computed<StatCardDef[]>(() => [
       : noBucketsHint.value,
   },
   {
+    key: 'todayGiftCoins',
+    label: '今日电池到账',
+    // 独立于上面的维度切换，固定按"今天"（UTC 自然天）请求——见文件头
+    // P6 任务 5 的说明。null 表示还没选绑定或加载失败，不能显示成 0：
+    // 那会被误读成"今天真的一分电池都没到账"。
+    value: todayGiftCoins.value !== null ? formatBattery(todayGiftCoins.value) : PLACEHOLDER,
+    hint:
+      todayGiftCoins.value !== null
+        ? '今天（UTC 自然天）收到的电池总量，只统计金瓜子礼物——小花花、人气票等免费礼物不产生电池，不计入这里；不含盲盒，盲盒单独看「盲盒盈亏」卡片'
+        : (todayError.value ?? '今天暂无可用数据'),
+  },
+  {
     key: 'guardCount',
     label: '上舰数',
     value: hasBuckets.value ? String(totals.value.guardCount) : PLACEHOLDER,
@@ -256,6 +368,17 @@ const STAT_CARDS = computed<StatCardDef[]>(() => [
       : noBucketsHint.value,
   },
 ])
+
+// ---- 礼物明细列表：按礼物名分组，独立于维度切换，固定看"今天" ----
+const giftBreakdownColumns: DataTableColumns<GiftBreakdownRow> = [
+  { title: '礼物名', key: 'giftName' },
+  { title: '数量', key: 'count' },
+  {
+    title: '电池数',
+    key: 'coins',
+    render: (row) => formatBattery(row.coins),
+  },
+]
 
 // ---- 分桶明细表：维度切换真实效果的直接证据 ----
 //
@@ -424,6 +547,22 @@ const previewColumns: DataTableColumns<PreviewRow> = [
         </NCard>
       </NSpin>
 
+      <!-- 礼物明细列表：独立于上面的维度切换，固定按"今天"请求，
+           见脚本头部 P6 任务 5 的说明。 -->
+      <NSpin :show="loadingToday">
+        <p v-if="todayError" class="stats-error">{{ todayError }}</p>
+        <NCard title="礼物" class="gift-breakdown-card" size="small">
+          <NDataTable
+            :columns="giftBreakdownColumns"
+            :data="giftBreakdown"
+            :row-key="(row: GiftBreakdownRow) => row.giftName"
+            :bordered="false"
+            size="small"
+          />
+          <NEmpty v-if="giftBreakdown.length === 0" description="没有数据" size="small" />
+        </NCard>
+      </NSpin>
+
       <NCard title="最近活动预览（可选，辅助功能）" class="preview-card" size="small">
         <template #header-extra>
           <NButton size="small" @click="togglePreview">
@@ -503,6 +642,9 @@ const previewColumns: DataTableColumns<PreviewRow> = [
   margin-bottom: 12px;
 }
 .bucket-card {
+  margin-bottom: 16px;
+}
+.gift-breakdown-card {
   margin-bottom: 16px;
 }
 .preview-card {

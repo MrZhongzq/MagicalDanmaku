@@ -57,6 +57,50 @@ describe('BindingSelector 展示与切换', () => {
     ])
   })
 
+  // P6 任务 1：用户原话「记房间号有点困难」——主播 UID/昵称在 P5-2
+  // 已经取回来了（账号/直播间页显示的「主播 UID xxx · 桃酥Su--」用的
+  // 就是同一份数据），选择器直接复用 binding.anchorName，不再调接口。
+  it('主播昵称存在时，候选项文案在房间号后面追加「· 昵称」', () => {
+    const { bindings } = setup()
+    const 绑定含昵称: Binding = { ...绑定A, anchorName: '桃酥Su--' }
+    bindings.list = [绑定含昵称]
+    bindings.select(1)
+    const wrapper = mount(BindingSelector)
+
+    const select = wrapper.findComponent(NSelect)
+    const options = select.props('options') as { label: string; value: number }[]
+    expect(options[0].label).toBe('小号 @ 123 · 桃酥Su--')
+  })
+
+  // 降级要求：昵称拿不到时（探测失败、尚未探测过）仍要显示房间号，
+  // 不能显示成空或「未知」把房间号挤掉——这是用户能找到自己直播间的
+  // 唯一线索，昵称只是锦上添花。
+  it('主播昵称拿不到时，仍然只显示「账号 @ 房间号」，不显示成空或「未知」', () => {
+    const { bindings } = setup()
+    bindings.list = [绑定A] // anchorName 是空串（尚未探测过/探测失败）
+    bindings.select(1)
+    const wrapper = mount(BindingSelector)
+
+    const select = wrapper.findComponent(NSelect)
+    const options = select.props('options') as { label: string; value: number }[]
+    expect(options[0].label).toBe('小号 @ 123')
+    expect(options[0].label).not.toContain('未知')
+  })
+
+  it('昵称 + 已停用 + 缺权限三者同时出现时，顺序是「账号 @ 房间号 · 昵称（已停用）（无权限）」', () => {
+    const { bindings } = setup()
+    // 绑定A 本来就没有 rule:write（permissions 只有 rule:read），
+    // 这里再叠加已停用与昵称，凑齐三种后缀同时出现的情况。
+    const 绑定丙: Binding = { ...绑定A, enabled: false, anchorName: '花花' }
+    bindings.list = [绑定丙]
+    bindings.select(1)
+    const wrapper = mount(BindingSelector, { props: { requiredPerm: 'rule:write' } })
+
+    const select = wrapper.findComponent(NSelect)
+    const options = select.props('options') as { label: string; value: number }[]
+    expect(options[0].label).toBe('小号 @ 123 · 花花（已停用）（无 rule:write 权限）')
+  })
+
   it('选中值反映当前绑定，切换时调用 bindings.select', async () => {
     const { bindings } = setup()
     bindings.list = [绑定A, 绑定B]

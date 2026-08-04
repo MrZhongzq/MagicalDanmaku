@@ -236,13 +236,13 @@ export function defaultPkDraft(): PkDraft {
     announceGuardOnline: false,
     matchPickMode: 'random',
     matchTemplates: [
-      '对面主播是 {{.pk.opponent.uname}}，直播间 {{.pk.opponent.online}} 人在线，' +
-        '大航海 {{.pk.opponent.guardTotal}} 位，一起加油！',
+      '对面主播是{{.pk.opponent.uname}}，直播间{{.pk.opponent.online}}人在线，' +
+        '大航海{{.pk.opponent.guardTotal}}位，一起加油！',
     ],
     visitGreetingEnabled: false,
     visitFilter: defaultPkVisitFilter(),
     visitPickMode: 'random',
-    visitTemplates: ['欢迎对面直播间的朋友 {{.user.username}} 来串门认识一下~'],
+    visitTemplates: ['欢迎对面直播间的朋友{{.user.username}}来串门认识一下~'],
   }
 }
 
