@@ -147,6 +147,7 @@ function statsBucket(overrides: Partial<Record<string, unknown>> = {}) {
 function giftRow(overrides: Partial<Record<string, unknown>> = {}) {
   return {
     giftName: '辣条',
+    blindBox: false,
     count: 1,
     coins: 0,
     ...overrides,
@@ -632,6 +633,37 @@ describe('Stats 页：当日电池到账 + 礼物明细列表', () => {
     // 也不显示。
     expect(list.text()).toContain('5')
     expect(list.text()).toContain('0.00 电池')
+  })
+
+  // P8 真机反馈：明细此前完全排除盲盒，而「当日电池到账」含盲盒——423
+  // 电池只能逐行加出 103，差额没有出处。现在盲盒进明细并单独标「来源」。
+  it('「礼物」明细列表列出盲盒爆出的礼物并标注来源，同名礼物的两种来源各占一行', async () => {
+    setupStore()
+    stubFetch({
+      giftsForDay: [
+        giftRow({ giftName: '爱心抱枕', blindBox: true, count: 2, coins: 32000 }),
+        giftRow({ giftName: '爱心抱枕', blindBox: false, count: 1, coins: 16000 }),
+      ],
+    })
+    const wrapper = mount(Stats)
+    await flushPromises()
+
+    const list = wrapper.find('.gift-breakdown-card')
+    expect(list.text()).toContain('来源')
+    expect(list.text()).toContain('盲盒')
+    expect(list.text()).toContain('常规')
+    expect(list.text()).toContain('320.00 电池') // 32000 / 100
+    expect(list.text()).toContain('160.00 电池') // 16000 / 100
+
+    // 同名礼物的两种来源必须各占一行，不能被合并显示。
+    //
+    // **这条断言守住的是「两行都被列出来」，不是「行键唯一」**——实测过：
+    // 把 row-key 改回只用 giftName（重复键）后本测试仍然通过，naive-ui
+    // 在这里既不告警也不吞行。行键带上来源仍然是对的（Vue 要求 key 唯一，
+    // 重复键会在数据更新时错配行内容），但那条约束在这一层测不出来，
+    // 不要因为这条测试是绿的就以为它把行键也钉住了。
+    const bodyRows = list.findAll('tbody tr')
+    expect(bodyRows.length, '同一个礼物名的盲盒行与常规行必须各占一行').toBe(2)
   })
 
   it('「礼物」明细列表为空时显示空状态提示，不是一张空表格', async () => {

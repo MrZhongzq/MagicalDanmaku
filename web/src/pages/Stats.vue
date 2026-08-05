@@ -53,9 +53,9 @@
  * 不是"是不是金瓜子礼物"——`giftCoins`/`coins` 字段后端已经按这条判据
  * 算好（排除法：只排除银瓜子，见 `web/src/api/types.ts` 里
  * `StatsBucket.giftCoins` 的注释），前端不需要也不能再猜。「当日电池
- * 到账」含盲盒爆出的礼物（主播的真实收入不该被排除），但下方「礼物」
- * 明细列表不含盲盒（P4-4 硬性要求，盲盒不是稳定的价值锚点），两个数字
- * 因此不必相等，不是 bug。展示单位是「电池」而不是「元」，换算系数是
+ * 到账」含盲盒爆出的礼物（主播的真实收入不该被排除），下方「礼物」明细
+ * 列表**同样含盲盒**、只是单独标出「来源」列——见文件末尾 P8 段落，这条
+ * 是被真机反馈推翻并改掉的旧行为。展示单位是「电池」而不是「元」，换算系数是
  * **除以 100**（原始值是 1/100 电池），不要跟盲盒盈亏卡片的 /1000
  * （换算成「元」）搞混，那是两个不同的展示单位。
  *
@@ -94,6 +94,28 @@
  * 选中值决定"一天"从哪到哪，也就是传给后端的 `since`/`until`。日志本身
  * 保持 UTC 不变——这次只改统计这一层的日界计算，不动 `logging/sink.go`
  * 或任何写库路径。
+ *
+ * **P8：真机反馈第三轮——三个数字对不上账**。用户在真实直播中看这一页，
+ * 一眼看出三处不对，三处都确认是真缺陷（不是显示问题）：
+ *
+ *   1. **「礼物」明细列表看不到盲盒**：明细此前用 `NOT (BlindBox IS NOT
+ *      NULL)` 整个排除盲盒，而「当日电池到账」含盲盒——界面上写着 423
+ *      电池，下面的表逐行加起来只有 103，差的 320（当天开出的两个爱心
+ *      抱枕）在整个页面上没有任何出处。现在明细含盲盒并多一列「来源」
+ *      标出「常规 / 盲盒」，两个数字能对上账了。P4-4「盲盒类单独计算」
+ *      没有被放弃，只是落在这一列上：「礼物数量/种类」两张卡片仍然不含
+ *      盲盒，「盲盒盈亏」仍然只含盲盒。
+ *   2. **「礼物数量」数的是行数不是件数**：后端 `gift_count` 当时是
+ *      `COUNT(*)`，而一行 SEND_GIFT 可以一次送出多件（真机上人气票有
+ *      `Count:10` 的行）。卡片显示 65，紧挨着的明细表「数量」列加起来
+ *      是 80。卡片自己的说明文字写的就是「总件数」，所以是后端口径错了
+ *      不是文案错了，已改成 `SUM(Count)`。
+ *   3. **「直播时长」把还没播的时间也算了**：后端
+ *      `effectiveSessionBounds` 对「还在播」的场次用查询窗口的 `until`
+ *      当结束时刻，而本页日期选择器给「今天」算出的 `until` 是**未来**
+ *      （所选时区当天的最后一刻）。真机上 01:13Z 开播、03:37Z 还在播，
+ *      算出「10 小时 49 分钟」——那是一路算到了 11:59:59Z。已改成
+ *      min(until, now)。
  *
  * 这不会破坏跟后端的对齐：`since`/`until` 仍然只是传给后端的两个时间点
  * （闭区间过滤），后端拿到之后仍然按它自己的 UTC 自然天分桶、GROUP BY
@@ -556,7 +578,8 @@ const STAT_CARDS = computed<StatCardDef[]>(() => [
     label: '礼物数量',
     value: hasBuckets.value ? String(totals.value.giftCount) : PLACEHOLDER,
     hint: hasBuckets.value
-      ? '本维度内送出的礼物总件数，不含盲盒——盲盒单独看下面「盲盒盈亏」卡片'
+      ? '本维度内送出的礼物总件数（一次送出多件按多件算，不是送礼次数），' +
+        '不含盲盒——盲盒单独看下面「盲盒盈亏」卡片'
       : noBucketsHint.value,
   },
   {
@@ -571,7 +594,14 @@ const STAT_CARDS = computed<StatCardDef[]>(() => [
         ? // 把选中的时区名写进提示里——这正是「默认值要可见」的要求：
           // 不能只在选择器上显示，卡片本身也要能让用户确认"我现在看的
           // 是哪个时区口径下的这一天"，不必去翻选择器才知道。
-          `${selectedDateLabel.value}（${timezone.value} 时区）收到的电池总量，含盲盒爆出的礼物——只统计真正产生了电池的礼物，不产生电池的免费礼物（如小花花、人气票）不计入这里`
+          // 不再举「小花花、人气票」当免费礼物的例子——真机数据里这两个
+          // 都是 coin_type=gold、有电池价值、确实计入了这张卡片，也确实
+          // 出现在下面的明细表里。拿它们当「不计入」的例子会让用户拿着
+          // 明细去对账时直接对不上。真正不计入的判据只有一条：电池价值
+          // 是不是 0（银瓜子结算），见 store 层 isSilverCoinGiftSQL。
+          `${selectedDateLabel.value}（${timezone.value} 时区）收到的电池总量，含盲盒爆出的礼物；` +
+          `只统计真正产生电池的礼物，电池价值为 0 的（银瓜子结算）不计入。` +
+          `这个数等于下面「礼物」明细表逐行电池数之和，可以直接对账`
         : (dayExtrasError.value ?? `${selectedDateLabel.value} 暂无可用数据`),
   },
   {
@@ -598,9 +628,19 @@ const STAT_CARDS = computed<StatCardDef[]>(() => [
   },
 ])
 
-// ---- 礼物明细列表：按礼物名分组，跟随选中日期，固定用 by=day ----
+// ---- 礼物明细列表：按礼物名 + 来源分组，跟随选中日期，固定用 by=day ----
+//
+// 「来源」列（常规 / 盲盒）是 P8 真机反馈加的：明细此前完全排除盲盒，
+// 而「当日电池到账」含盲盒，界面上 423 电池只能逐行加出 103，差的 320
+// 没有任何出处。现在两者能对上账了，代价是同一个礼物名可能占两行——
+// 这正是行键要带上 blindBox 的原因。
 const giftBreakdownColumns: DataTableColumns<GiftBreakdownRow> = [
   { title: '礼物名', key: 'giftName' },
+  {
+    title: '来源',
+    key: 'blindBox',
+    render: (row) => (row.blindBox ? '盲盒' : '常规'),
+  },
   { title: '数量', key: 'count' },
   {
     title: '电池数',
@@ -608,6 +648,21 @@ const giftBreakdownColumns: DataTableColumns<GiftBreakdownRow> = [
     render: (row) => formatBattery(row.coins),
   },
 ]
+
+/**
+ * 行键必须把来源也算进去：后端按「礼物名 + 是否盲盒」分组，同一个礼物名
+ * 可以既有常规投喂行、又有盲盒爆出行，只用 giftName 会让两行撞成同一个
+ * key。Vue 要求同级 key 唯一，重复键在数据更新（换日期重新拉取）时会让
+ * patch 把行内容错配到另一行上。
+ *
+ * **没有测试守得住这一条**——试过了：把 row-key 改回只用 giftName，
+ * Stats.test.ts 里那条「同名两行各占一行」的测试照样通过，naive-ui 在
+ * 首次渲染时既不告警也不吞行。所以这里靠的是注释而不是测试，改动前请
+ * 先想清楚，别指望 CI 会拦住。
+ */
+function giftRowKey(row: GiftBreakdownRow): string {
+  return `${row.blindBox ? 'blind' : 'normal'}:${row.giftName}`
+}
 
 // ---- 可选的「最近活动预览」：明确标注为采样，不是统计 ----
 //
@@ -774,7 +829,7 @@ const previewColumns: DataTableColumns<PreviewRow> = [
           <NDataTable
             :columns="giftBreakdownColumns"
             :data="giftBreakdown"
-            :row-key="(row: GiftBreakdownRow) => row.giftName"
+            :row-key="giftRowKey"
             :bordered="false"
             size="small"
           />

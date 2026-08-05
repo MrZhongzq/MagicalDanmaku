@@ -31,7 +31,7 @@ func TestQueryStatsByDayCountsBusinessEvents(t *testing.T) {
 		{AccountID: accID, Kind: ActivityEvent, EventType: "user_enter", OccurredAt: statsFixedTime},
 		{AccountID: accID, Kind: ActivityEvent, EventType: "guard_buy", OccurredAt: statsFixedTime},
 		{AccountID: accID, Kind: ActivityEvent, EventType: "gift",
-			Detail: []byte(`{"GiftName":"小心心"}`), OccurredAt: statsFixedTime},
+			Detail: []byte(`{"GiftName":"小心心","Count":1}`), OccurredAt: statsFixedTime},
 	}); err != nil {
 		t.Fatalf("写入报错: %v", err)
 	}
@@ -60,11 +60,11 @@ func TestQueryStatsByDayGiftKindsIsDistinct(t *testing.T) {
 
 	if err := s.InsertActivity(ctx, []ActivityRow{
 		{AccountID: accID, Kind: ActivityEvent, EventType: "gift",
-			Detail: []byte(`{"GiftName":"小心心"}`), OccurredAt: statsFixedTime},
+			Detail: []byte(`{"GiftName":"小心心","Count":1}`), OccurredAt: statsFixedTime},
 		{AccountID: accID, Kind: ActivityEvent, EventType: "gift",
-			Detail: []byte(`{"GiftName":"小心心"}`), OccurredAt: statsFixedTime.Add(time.Minute)},
+			Detail: []byte(`{"GiftName":"小心心","Count":1}`), OccurredAt: statsFixedTime.Add(time.Minute)},
 		{AccountID: accID, Kind: ActivityEvent, EventType: "gift",
-			Detail: []byte(`{"GiftName":"辣条"}`), OccurredAt: statsFixedTime.Add(2 * time.Minute)},
+			Detail: []byte(`{"GiftName":"辣条","Count":1}`), OccurredAt: statsFixedTime.Add(2 * time.Minute)},
 	}); err != nil {
 		t.Fatalf("写入报错: %v", err)
 	}
@@ -92,9 +92,9 @@ func TestQueryStatsByDayExcludesGiftCombo(t *testing.T) {
 
 	if err := s.InsertActivity(ctx, []ActivityRow{
 		{AccountID: accID, Kind: ActivityEvent, EventType: "gift",
-			Detail: []byte(`{"GiftName":"辣条"}`), OccurredAt: statsFixedTime},
+			Detail: []byte(`{"GiftName":"辣条","Count":1}`), OccurredAt: statsFixedTime},
 		{AccountID: accID, Kind: ActivityEvent, EventType: "gift_combo",
-			Detail: []byte(`{"GiftName":"辣条"}`), OccurredAt: statsFixedTime.Add(time.Second)},
+			Detail: []byte(`{"GiftName":"辣条","Count":1}`), OccurredAt: statsFixedTime.Add(time.Second)},
 	}); err != nil {
 		t.Fatalf("写入报错: %v", err)
 	}
@@ -167,8 +167,11 @@ func TestQueryStatsByDaySumsBlindBoxProfitByBattery(t *testing.T) {
 	// 计算」）。3 条 gift 行里 2 条是盲盒，只有普通礼物那 1 条应该计入
 	// GiftCount/GiftKinds；盲盒爆出的「星光铃铛」「棒棒糖」两个礼物名
 	// 不该污染 GiftKinds。
-	if b.GiftCount != 1 {
-		t.Errorf("GiftCount = %d, 期望 1（3 条 gift 里 2 条是盲盒，礼物件数不含盲盒）", b.GiftCount)
+	// 期望 100 而不是 1：GiftCount 数的是件数（SUM(Count)），普通礼物那一行
+	// 的 fixture 就是 `"Count":100`。两条盲盒行的 Count（各 1）不计入。
+	if b.GiftCount != 100 {
+		t.Errorf("GiftCount = %d, 期望 100（3 条 gift 里 2 条是盲盒；普通礼物那行 Count=100，"+
+			"礼物件数不含盲盒）", b.GiftCount)
 	}
 	if b.GiftKinds != 1 {
 		t.Errorf("GiftKinds = %d, 期望 1（盲盒爆出的礼物名不该进礼物种类统计）", b.GiftKinds)
@@ -738,9 +741,18 @@ func TestQueryGiftBreakdownGroupsByName(t *testing.T) {
 	}
 }
 
-// TestQueryGiftBreakdownExcludesBlindBox 验证盲盒不混进礼物明细列表——
-// P4-4 的硬性要求：盲盒继续单独算。
-func TestQueryGiftBreakdownExcludesBlindBox(t *testing.T) {
+// TestQueryGiftBreakdownFlagsBlindBoxSeparately 验证盲盒爆出的礼物**出现在**
+// 明细列表里、并且被 BlindBox 标记出来，同名的常规礼物与盲盒礼物拆成两行。
+//
+// 这条测试取代了此前的 TestQueryGiftBreakdownExcludesBlindBox（那条钉的是
+// 「盲盒完全不出现」）——真机反馈推翻了那个行为：「当日电池到账」含盲盒
+// （主播的真实收入），明细表不含盲盒，用户看到 423 电池却只能对上 103，
+// 剩下的 320 没有任何出处。现在两者能对上账了。
+//
+// **拆成两行不是可有可无的**：同一个礼物名在「常规投喂」与「盲盒爆出」
+// 两种语境下代表的不是一回事（盲盒场景下这个名字只是开奖结果，不是送礼人
+// 选择送出的东西），合成一行会让「盲盒盈亏」与明细无法互相印证。
+func TestQueryGiftBreakdownFlagsBlindBoxSeparately(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
 	accID := mustAccount(t, s, "小号")
@@ -754,6 +766,10 @@ func TestQueryGiftBreakdownExcludesBlindBox(t *testing.T) {
 			Detail: []byte(`{"GiftName":"星光铃铛","Count":1,"CoinType":"gold","Price":5200,"TotalCoin":5000,` +
 				`"BlindBox":{"Name":"幸运盲盒","Price":5000,"TipPrice":5200}}`),
 			OccurredAt: statsFixedTime},
+		// 同名礼物的常规投喂：必须与上面那行分开，不能合并成一行。
+		{AccountID: accID, BindingID: &bind.ID, Kind: ActivityEvent, EventType: "gift",
+			Detail:     []byte(`{"GiftName":"星光铃铛","Count":2,"CoinType":"gold","Price":5200,"TotalCoin":10400,"BlindBox":null}`),
+			OccurredAt: statsFixedTime.Add(time.Minute)},
 	}); err != nil {
 		t.Fatalf("写入报错: %v", err)
 	}
@@ -762,8 +778,106 @@ func TestQueryGiftBreakdownExcludesBlindBox(t *testing.T) {
 	if err != nil {
 		t.Fatalf("查询礼物明细报错: %v", err)
 	}
-	if len(got) != 0 {
-		t.Errorf("盲盒爆出的「星光铃铛」不该出现在礼物明细列表里，实际 %+v", got)
+	if len(got) != 2 {
+		t.Fatalf("行数 = %d, 期望 2（同名礼物的盲盒来源与常规来源各一行）: %+v", len(got), got)
+	}
+
+	var blind, normal *GiftBreakdownRow
+	for i := range got {
+		if got[i].BlindBox {
+			blind = &got[i]
+		} else {
+			normal = &got[i]
+		}
+	}
+	if blind == nil || normal == nil {
+		t.Fatalf("期望一行 BlindBox=true、一行 BlindBox=false，实际 %+v", got)
+	}
+	if blind.GiftName != "星光铃铛" || blind.Count != 1 || blind.Coins != 5200 {
+		t.Errorf("盲盒行 = %+v, 期望 {星光铃铛 1 5200}（电池数同样是 Price*Count，"+
+			"不是盲盒售价 TotalCoin）", *blind)
+	}
+	if normal.GiftName != "星光铃铛" || normal.Count != 2 || normal.Coins != 10400 {
+		t.Errorf("常规行 = %+v, 期望 {星光铃铛 2 10400}", *normal)
+	}
+}
+
+// TestQueryStatsByDayGiftCountSumsCountNotRows 验证「礼物数量」数的是
+// **件数**（各行 Count 之和），不是送礼事件的行数。
+//
+// 真机反馈：卡片写着「送出的礼物总件数」显示 65，紧挨着的明细表「数量」
+// 列加起来却是 80——因为人气票有一行 `Count:10`（一次送出 10 件）被当成
+// 1 计。同一张页面上两个数字口径不同，卡片的说明文字本身就是错的。
+func TestQueryStatsByDayGiftCountSumsCountNotRows(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	accID := mustAccount(t, s, "小号")
+
+	if err := s.InsertActivity(ctx, []ActivityRow{
+		{AccountID: accID, Kind: ActivityEvent, EventType: "gift",
+			Detail:     []byte(`{"GiftName":"人气票","Count":10,"CoinType":"gold","Price":100,"TotalCoin":1000,"BlindBox":null}`),
+			OccurredAt: statsFixedTime},
+		{AccountID: accID, Kind: ActivityEvent, EventType: "gift",
+			Detail:     []byte(`{"GiftName":"人气票","Count":7,"CoinType":"gold","Price":100,"TotalCoin":700,"BlindBox":null}`),
+			OccurredAt: statsFixedTime.Add(time.Minute)},
+		// 盲盒仍然不计入件数（P4-4 硬性要求没有变），哪怕它的 Count 是 4。
+		{AccountID: accID, Kind: ActivityEvent, EventType: "gift",
+			Detail: []byte(`{"GiftName":"星光铃铛","Count":4,"CoinType":"gold","Price":5200,"TotalCoin":20000,` +
+				`"BlindBox":{"Name":"幸运盲盒","Price":5000,"TipPrice":5200}}`),
+			OccurredAt: statsFixedTime.Add(2 * time.Minute)},
+	}); err != nil {
+		t.Fatalf("写入报错: %v", err)
+	}
+
+	got, err := s.QueryStatsByDay(ctx, StatsQuery{AccountID: accID})
+	if err != nil {
+		t.Fatalf("按天聚合报错: %v", err)
+	}
+	b := statsBucketFor(t, got, "2026-07-31")
+	if b.GiftCount != 17 {
+		t.Errorf("GiftCount = %d, 期望 17（10+7 件；不是 2 行，也不含盲盒那 4 件）", b.GiftCount)
+	}
+}
+
+// TestQueryStatsBySessionOngoingClampsFutureUntilToNow 验证还在播的场次
+// 时长要钳到「现在」，不能一路算到查询窗口的终点。
+//
+// 真机故障：统计页的日期选择器选「今天」，`until` 是所选那天在所选时区下
+// 的最后一刻（Auckland 的 23:59:59.999 = 11:59:59.999Z）——对一场上午刚
+// 开、此刻还在播的直播来说那是**未来时刻**。effectiveSessionBounds 当时
+// 只在 `until` 为零值时才退回 `now`，于是算出「已经播了 10 小时 49 分」，
+// 而实际只播了 2 小时 27 分。正确口径是 min(until, now)。
+func TestQueryStatsBySessionOngoingClampsFutureUntilToNow(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	accID := mustAccount(t, s, "小号")
+	b, err := s.UpsertBinding(ctx, accID, "123")
+	if err != nil {
+		t.Fatalf("创建绑定报错: %v", err)
+	}
+
+	now := time.Now().UTC()
+	start := now.Add(-2 * time.Hour)
+	until := now.Add(10 * time.Hour) // 未来：所选那天还没过完
+	if err := s.InsertActivity(ctx, []ActivityRow{
+		{AccountID: accID, BindingID: &b.ID, Kind: ActivityEvent, EventType: "live_start", OccurredAt: start},
+	}); err != nil {
+		t.Fatalf("写入报错: %v", err)
+	}
+
+	got, err := s.QueryStatsBySession(ctx, StatsQuery{
+		AccountID: accID, BindingID: b.ID, Since: now.Add(-14 * time.Hour), Until: until})
+	if err != nil {
+		t.Fatalf("按场次聚合报错: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("场次数 = %d, 期望 1: %+v", len(got), got)
+	}
+	// 断言用容差：start/now 都取自真实时钟，测试自身执行也要花掉几十毫秒。
+	const want = int64(2 * 60 * 60)
+	if diff := got[0].LiveSeconds - want; diff < -60 || diff > 60 {
+		t.Errorf("LiveSeconds = %d, 期望 ≈%d（钳到「现在」；未钳制会是 %d）",
+			got[0].LiveSeconds, want, int64(12*60*60))
 	}
 }
 

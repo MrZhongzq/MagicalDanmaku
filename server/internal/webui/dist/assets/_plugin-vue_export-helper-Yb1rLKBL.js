@@ -1,1 +1,0 @@
-import{w as t,n as a}from"./index-BSH3c93C.js";function c(r,e){return t(r,u=>{u!==void 0&&(e.value=u)}),a(()=>r.value===void 0?e.value:r.value)}const f=(r,e)=>{const u=r.__vccOpts||r;for(const[n,s]of e)u[n]=s;return u};export{f as _,c as u};

@@ -222,6 +222,17 @@ export interface StatsBucket {
  */
 export interface GiftBreakdownRow {
   giftName: string
+  /**
+   * 为真表示这一行是**盲盒爆出的**礼物，不是观众直接投喂的。
+   *
+   * 同一个礼物名在两种来源下是**两行**（后端按 giftName + 是否盲盒分组），
+   * 所以表格的行键必须是 `giftName + blindBox`，只用 giftName 会撞键。
+   *
+   * 盲盒行为什么要出现在这张表里：「当日电池到账」卡片含盲盒爆出的礼物
+   * （那是主播的真实收入），明细如果排除盲盒，用户看到的两个数字就永远
+   * 对不上（真机上是 423 电池 vs 只能加出 103）。
+   */
+  blindBox: boolean
   /** 这个礼物名下的送礼数量之和（礼物本身的数量，不是事件行数）。 */
   count: number
   /**

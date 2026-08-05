@@ -27,7 +27,7 @@ func TestQueryStatsByDay(t *testing.T) {
 		// bug 长期没被测出来的根因，这里顺手改成生产真实形状，不留同一
 		// 类隐患。
 		store.ActivityRow{Kind: store.ActivityEvent, EventType: "gift",
-			Detail: []byte(`{"GiftName":"辣条","BlindBox":null}`), OccurredAt: seedTime},
+			Detail: []byte(`{"GiftName":"辣条","Count":1,"BlindBox":null}`), OccurredAt: seedTime},
 		store.ActivityRow{Kind: store.ActivityEvent, EventType: "user_enter", OccurredAt: seedTime},
 		store.ActivityRow{Kind: store.ActivityEvent, EventType: "guard_buy", OccurredAt: seedTime},
 	)
@@ -388,9 +388,11 @@ func TestHandleGiftBreakdownGroupsByName(t *testing.T) {
 		store.ActivityRow{Kind: store.ActivityEvent, EventType: "gift",
 			Detail:     []byte(`{"GiftName":"小心心","Count":3,"CoinType":"silver","Price":100,"TotalCoin":300,"BlindBox":null}`),
 			OccurredAt: seedTime.Add(2 * time.Minute)},
-		// 盲盒不该出现在明细列表里——P4-4 硬性要求，盲盒单独算（这条约束
-		// 只管这张按名字分组的列表，不管「今日电池到账」聚合数字，后者
-		// 盲盒要计入，见 store 层测试）。
+		// 盲盒**要**出现在明细列表里，并且带 blindBox:true 标记——真机反馈
+		// 推翻了此前「明细完全排除盲盒」的行为：「当日电池到账」含盲盒，
+		// 明细不含，界面上 423 电池只能加出 103，差额没有出处。P4-4 的
+		// 「盲盒单独算」现在落在这一位标记上（「礼物数量/种类」两张卡片
+		// 仍然不含盲盒），不再靠整行消失来实现。
 		store.ActivityRow{Kind: store.ActivityEvent, EventType: "gift",
 			Detail: []byte(`{"GiftName":"星光铃铛","Count":1,"CoinType":"gold","Price":5200,"TotalCoin":5000,` +
 				`"BlindBox":{"Name":"幸运盲盒","Price":5000,"TipPrice":5200}}`),
@@ -407,14 +409,28 @@ func TestHandleGiftBreakdownGroupsByName(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
 		t.Fatalf("解析报错: %v", err)
 	}
-	if len(got) != 2 {
-		t.Fatalf("礼物种类数 = %d, 期望 2（盲盒不该出现在明细列表里）: %+v", len(got), got)
+	if len(got) != 3 {
+		t.Fatalf("明细行数 = %d, 期望 3（辣条/小心心/盲盒爆出的星光铃铛）: %+v", len(got), got)
 	}
 
 	byName := map[string]map[string]any{}
 	for _, row := range got {
 		byName[row["giftName"].(string)] = row
 	}
+
+	// 盲盒行必须带 blindBox:true 经完整 HTTP 层下发——前端靠这一位画「来源」
+	// 列并组行键，字段一旦漏掉，同名礼物的两行会撞 row-key。
+	bell, ok := byName["星光铃铛"]
+	if !ok {
+		t.Fatalf("盲盒爆出的「星光铃铛」没有出现在明细里: %+v", got)
+	}
+	if bell["blindBox"] != true {
+		t.Errorf("星光铃铛 blindBox = %v, 期望 true", bell["blindBox"])
+	}
+	if bell["coins"].(float64) != 5200 {
+		t.Errorf("星光铃铛 coins = %v, 期望 5200（Price*Count，不是盲盒售价 5000）", bell["coins"])
+	}
+
 	larou, ok := byName["辣条"]
 	if !ok {
 		t.Fatalf("没有找到「辣条」: %+v", got)
@@ -435,6 +451,10 @@ func TestHandleGiftBreakdownGroupsByName(t *testing.T) {
 	}
 	if heart["coins"].(float64) != 0 {
 		t.Errorf("小心心 coins = %v, 期望 0（免费礼物不产生电池）", heart["coins"])
+	}
+	if larou["blindBox"] != false || heart["blindBox"] != false {
+		t.Errorf("常规礼物的 blindBox 应为 false: 辣条=%v 小心心=%v",
+			larou["blindBox"], heart["blindBox"])
 	}
 }
 

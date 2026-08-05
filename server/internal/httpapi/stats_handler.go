@@ -21,10 +21,13 @@ type statsView struct {
 	// BlindBoxProfit 单位 1/100 电池，可为负——「元」的换算只在前端做，
 	// 后端一律吐原始整数（见 store.StatsBucket.BlindBoxProfit 的注释）。
 	BlindBoxProfit int64 `json:"blindBoxProfit"`
-	// GiftCoins 是这个分桶内全部非盲盒礼物的"电池价值"之和，单位
-	// 1/100 电池——判据是"电池价值是不是 0"（排除法，只排除银瓜子），
+	// GiftCoins 是这个分桶内全部礼物（**含盲盒爆出的**）的"电池价值"之和，
+	// 单位 1/100 电池——判据是"电池价值是不是 0"（排除法，只排除银瓜子），
 	// 不是"是不是金瓜子"，见 store.StatsBucket.GiftCoins 的注释。同样
 	// 只吐原始整数，换算只在前端做。
+	//
+	// 这个数与 /gifts 明细表逐行 coins 之和相等（同窗口同绑定），用户要能
+	// 在明细里把卡片数字加回来——正是这条对齐让明细必须列出盲盒行。
 	GiftCoins int64 `json:"giftCoins"`
 }
 
@@ -46,7 +49,11 @@ func toStatsView(b store.StatsBucket) statsView {
 // store.GiftBreakdownRow 一一对应，换成 camelCase 与其余 *View 保持一致。
 type giftBreakdownView struct {
 	GiftName string `json:"giftName"`
-	Count    int64  `json:"count"`
+	// BlindBox 为真表示这一行是盲盒爆出的礼物。同一个礼物名在两种来源下
+	// 是两行，前端要把 giftName+blindBox 一起当行键，见
+	// store.GiftBreakdownRow.BlindBox 的注释。
+	BlindBox bool  `json:"blindBox"`
+	Count    int64 `json:"count"`
 	// Coins 单位 1/100 电池，判据是"电池价值是不是 0"（排除法，只排除
 	// 银瓜子）；不产生电池价值的礼物这一项恒为 0，见
 	// store.GiftBreakdownRow.Coins 的注释。换算只在前端做。
@@ -54,7 +61,7 @@ type giftBreakdownView struct {
 }
 
 func toGiftBreakdownView(r store.GiftBreakdownRow) giftBreakdownView {
-	return giftBreakdownView{GiftName: r.GiftName, Count: r.Count, Coins: r.Coins}
+	return giftBreakdownView{GiftName: r.GiftName, BlindBox: r.BlindBox, Count: r.Count, Coins: r.Coins}
 }
 
 // handleQueryGiftBreakdown 按礼物名分组返回礼物明细（数量 + 电池数

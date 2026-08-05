@@ -157,6 +157,18 @@ const isSilverCoinGiftSQL = `detail->>'CoinType' = 'silver'`
 // 的是收入总额而不是件数/种类，盲盒爆出的礼物同样是主播的真实收入，
 // 见 StatsBucket.GiftCoins 的注释，两条约束管的不是同一件事。
 //
+// **gift_count 是 SUM(Count)，不是 COUNT(*)**——一行 SEND_GIFT 可以一次
+// 送出多件（`{"GiftName":"人气票","Count":10}` 是 10 件不是 1 件），数行数
+// 会把它算成 1。真机反馈抓到的就是这个：卡片写着「送出的礼物总件数」显示
+// 65（行数），紧挨着的礼物明细表「数量」列（一直就是 SUM(Count)）加起来
+// 是 80，同一页两个数字对不上。
+//
+// `SUM` 会跳过 SQL NULL，所以某一行 detail 缺 `Count` 键只让那一行不计入，
+// 不会把整个和变成 NULL；全部行都缺时 SUM 是 NULL，由 COALESCE 兜成 0。
+// 缺 `Count` 在生产不可能发生——`event.Gift.Count` 是 `int64` 且没有
+// `omitempty`，`json.Marshal` 一定会输出这个键；真出现了说明这一行 detail
+// 已经损坏，宁可少算也不替它编一个「大概是 1 件」出来。
+//
 // blind_box_profit 只对是盲盒的 gift 行求和，三个数字字段都用 ->> 取成
 // 文本再转 bigint：detail 是 event.Gift 整个结构体的原样 JSON，
 // Price/Count/TotalCoin 键名与 Go 字段名相同（没有 json tag）。COALESCE
@@ -173,7 +185,8 @@ const isSilverCoinGiftSQL = `detail->>'CoinType' = 'silver'`
 // 同一套字段含义，这里保持一致，不是另一套理解。
 const countExprs = `COUNT(*) FILTER (WHERE event_type = 'danmaku') AS danmaku_count,
 	COUNT(*) FILTER (WHERE event_type = 'user_enter') AS enter_count,
-	COUNT(*) FILTER (WHERE event_type = 'gift' AND NOT (` + isBlindBoxGiftSQL + `)) AS gift_count,
+	COALESCE(SUM((detail->>'Count')::bigint) FILTER (
+		WHERE event_type = 'gift' AND NOT (` + isBlindBoxGiftSQL + `)), 0) AS gift_count,
 	COUNT(DISTINCT detail->>'GiftName') FILTER (WHERE event_type = 'gift' AND NOT (` + isBlindBoxGiftSQL + `)) AS gift_kinds,
 	COUNT(*) FILTER (WHERE event_type = 'guard_buy') AS guard_count,
 	COALESCE(SUM(
@@ -433,9 +446,21 @@ func (s *Store) rawLiveSessions(ctx context.Context, accountID, bindingID int64)
 //     有任何依据能推断开播时刻，退化为用 End 本身兜底（时长记 0，但
 //     这场依然会被返回，不静默丢弃——否则用户会看到「那天没直播」而
 //     实际直播过）。
-//   - End 已知：直接用。
-//   - End 未知（只有 live_start，还在播或漏了下播）：用 until 兜底
-//     当作「查到这里为止」；until 没给就用 now 兜底，当作「播到现在」。
+//   - End 已知：直接用（真实的 live_stop 是权威的，不受 now 影响）。
+//   - End 未知（只有 live_start，还在播或漏了下播）：结束时刻取
+//     **min(until, now)**——「查到这里为止」与「最多只能播到现在」两个
+//     上界同时成立，取更早的那个。
+//
+// **`now` 这条钳制不是可有可无的**：真机故障就出在这里。统计页的日期
+// 选择器选「今天」时，`until` 是所选那天在所选时区下的最后一刻（+12 区的
+// 23:59:59.999 换算成 UTC 是当天 11:59:59.999Z）——对一场上午刚开、此刻
+// 还在播的直播来说那是**未来时刻**。当时这里只在 `until` 为零值时才退回
+// `now`，于是把「播到今天结束」当成了既成事实，界面上显示「直播时长
+// 10 小时 49 分钟」，而实际才播了 2 小时 27 分。
+//
+// 这与「连续 live_start 用下一次 live_start 收尾」是同一类约束的两个方向：
+// 一场还没结束的直播，它的时长上界只能来自已经发生的事实，不能来自查询
+// 窗口画到哪儿。
 func effectiveSessionBounds(sess liveSession, since, until, now time.Time) (start, end time.Time) {
 	switch {
 	case sess.Start != nil:
@@ -449,7 +474,7 @@ func effectiveSessionBounds(sess liveSession, since, until, now time.Time) (star
 	switch {
 	case sess.End != nil:
 		end = *sess.End
-	case !until.IsZero():
+	case !until.IsZero() && until.Before(now):
 		end = until
 	default:
 		end = now
@@ -469,10 +494,18 @@ func sessionOverlaps(start, end, since, until time.Time) bool {
 	return true
 }
 
-// GiftBreakdownRow 是「礼物」明细列表的一行：礼物名 + 数量 + 电池数
-// 加和，供 WebUI 统计页的礼物明细表使用。
+// GiftBreakdownRow 是「礼物」明细列表的一行：礼物名 + 来源 + 数量 +
+// 电池数加和，供 WebUI 统计页的礼物明细表使用。
 type GiftBreakdownRow struct {
 	GiftName string
+	// BlindBox 为真表示这一行是**盲盒爆出的**礼物，不是观众直接投喂的。
+	//
+	// 分组键包含这一位，所以同一个礼物名在两种来源下会拆成两行——这不是
+	// 冗余：盲盒场景下礼物名只是开奖结果，不是送礼人选择送出的东西，把
+	// 「有人送了 2 个爱心抱枕」与「有人开盲盒开出 2 个爱心抱枕」合成一行，
+	// 会让这张表既对不上「礼物数量」卡片（不含盲盒），也对不上「盲盒盈亏」
+	// 卡片（只含盲盒）。
+	BlindBox bool
 	// Count 是这个礼物名下全部送礼事件的 Count 字段之和（送礼数量本身，
 	// 不是行数——一行可能一次性送出多个，比如 num=10）。
 	Count int64
@@ -487,18 +520,21 @@ type GiftBreakdownRow struct {
 // QueryGiftBreakdown 按礼物名分组统计 bindingID 名下的礼物明细，
 // since/until 为零值表示不限制该侧。
 //
-// 与 GiftCount/GiftKinds 一致地排除盲盒（P4-4 硬性要求：盲盒继续单独算，
-// 不混进常规礼物明细）——盲盒爆出的礼物名不该出现在这张明细表里，
-// 那些名字（星光铃铛/棒棒糖/…）不是稳定的价值锚点，混进"礼物"列表会
-// 让同一个名字在盲盒场景与非盲盒场景下代表完全不同的东西。
+// **盲盒爆出的礼物包含在内，但按 BlindBox 标记单独成行**——这是真机反馈
+// 推翻的一条旧行为：这张表此前用 `NOT (isBlindBoxGiftSQL)` 把盲盒整个排除，
+// 于是「当日电池到账」显示 423 电池、明细表却只加得出 103，剩下的 320
+// 在界面上没有任何出处，用户无从核对。收入总额既然含盲盒，明细就必须
+// 也能把这部分列出来。
 //
-// **这张明细表的 Coins 之和不等于 StatsBucket.GiftCoins**——是刻意的：
-// GiftCoins 统计的是收入总额，含盲盒爆出的礼物；这张表统计的是"哪些
-// 礼物贡献了多少"，盲盒被排除在外。两个数字对不上不是 bug，是两条不同
-// 约束（件数/种类 vs 收入总额）分别生效的结果，见
-// StatsBucket.GiftCoins 注释里"盲盒不受这条约束"那一段。
+// P4-4「盲盒类单独计算」的硬性要求没有被放弃，只是落在了 BlindBox 这一位
+// 上而不是靠整行消失来实现：分组键包含它，同名礼物的两种来源各占一行，
+// 「礼物数量/种类」两张卡片仍然不含盲盒，「盲盒盈亏」仍然只含盲盒。
+//
+// **这张明细表的 Coins 之和现在等于 StatsBucket.GiftCoins**（同一窗口、
+// 同一绑定下）——两者都是 `Price*Count`、都排除银瓜子、都含盲盒。这是
+// 刻意对齐的：用户要能把卡片上的数字在下面这张表里逐行加回来。
 func (s *Store) QueryGiftBreakdown(ctx context.Context, bindingID int64, since, until time.Time) ([]GiftBreakdownRow, error) {
-	where := []string{"kind = 'event'", "event_type = 'gift'", "binding_id = $1", "NOT (" + isBlindBoxGiftSQL + ")"}
+	where := []string{"kind = 'event'", "event_type = 'gift'", "binding_id = $1"}
 	args := []any{bindingID}
 	if !since.IsZero() {
 		args = append(args, since)
@@ -509,13 +545,18 @@ func (s *Store) QueryGiftBreakdown(ctx context.Context, bindingID int64, since, 
 		where = append(where, fmt.Sprintf("occurred_at <= $%d", len(args)))
 	}
 
+	// 分组键里的 `is_blind_box` 用的是同一个 isBlindBoxGiftSQL 判据（`->>`
+	// 而不是 `->`，理由见那个常量自己的注释）。ORDER BY 把盲盒行排在同
+	// 电池数的常规行之前，让「这些是开出来的」在表格顶部就能看到。
 	sql := `SELECT detail->>'GiftName' AS gift_name,
+		(` + isBlindBoxGiftSQL + `) AS is_blind_box,
 		COALESCE(SUM((detail->>'Count')::bigint), 0) AS count,
 		COALESCE(SUM(CASE WHEN NOT (` + isSilverCoinGiftSQL + `)
 			THEN (detail->>'Price')::bigint * (detail->>'Count')::bigint
 			ELSE 0 END), 0) AS coins
 		FROM activity_logs WHERE ` + strings.Join(where, " AND ") + `
-		GROUP BY gift_name ORDER BY coins DESC, gift_name`
+		GROUP BY gift_name, is_blind_box
+		ORDER BY coins DESC, is_blind_box DESC, gift_name`
 
 	rows, err := s.pool.Query(ctx, sql, args...)
 	if err != nil {
@@ -526,7 +567,7 @@ func (s *Store) QueryGiftBreakdown(ctx context.Context, bindingID int64, since, 
 	var out []GiftBreakdownRow
 	for rows.Next() {
 		var r GiftBreakdownRow
-		if err := rows.Scan(&r.GiftName, &r.Count, &r.Coins); err != nil {
+		if err := rows.Scan(&r.GiftName, &r.BlindBox, &r.Count, &r.Coins); err != nil {
 			return nil, fmt.Errorf("store: 读取礼物明细失败: %w", err)
 		}
 		out = append(out, r)
