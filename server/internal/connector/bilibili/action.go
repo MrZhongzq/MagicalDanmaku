@@ -69,28 +69,31 @@ func (a *Actions) SetMaxLength(n int) {
 	a.mu.Unlock()
 }
 
-// SendDanmaku 发送弹幕，超长文本自动切分为多条依次发送。
-func (a *Actions) SendDanmaku(ctx context.Context, req connector.SendDanmakuRequest) error {
+// SendDanmaku 发送弹幕，超长文本自动切分为多条依次发送，返回实际发出
+// 的每一段。中途失败时返回已经发出去的那几段与错误。
+func (a *Actions) SendDanmaku(ctx context.Context, req connector.SendDanmakuRequest) ([]string, error) {
 	if req.Text == "" {
-		return errors.New("bilibili: 弹幕内容不能为空")
+		return nil, errors.New("bilibili: 弹幕内容不能为空")
 	}
 	if req.RoomID == "" {
-		return errors.New("bilibili: 未指定直播间号")
+		return nil, errors.New("bilibili: 未指定直播间号")
 	}
 
 	a.mu.RLock()
 	maxLen := a.maxLength
 	a.mu.RUnlock()
 
+	var sent []string
 	for i, part := range SplitLongText(req.Text, maxLen) {
 		if err := a.limiter.Wait(ctx); err != nil {
-			return err
+			return sent, err
 		}
 		if err := a.sendOne(ctx, req.RoomID, part, req.ReplyToUID); err != nil {
-			return fmt.Errorf("发送第 %d 段弹幕失败: %w", i+1, err)
+			return sent, fmt.Errorf("发送第 %d 段弹幕失败: %w", i+1, err)
 		}
+		sent = append(sent, part)
 	}
-	return nil
+	return sent, nil
 }
 
 // sendOne 发送单条弹幕。

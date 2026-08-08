@@ -8,7 +8,11 @@ import (
 	"sync"
 
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/connector/bilibili"
+	"time"
+
+	"github.com/MrZhongzq/MagicalDanmaku/server/internal/connector"
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/event"
+	"github.com/MrZhongzq/MagicalDanmaku/server/internal/ghost"
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/httpapi"
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/logging"
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/scheduler"
@@ -84,6 +88,10 @@ type runtimeManager struct {
 	accounts map[string]*accountRuntime // 跨绑定共享限流器；由 runRun 用 buildAccounts 建好的那份接手，不重建
 	live     map[int64]*liveBinding
 
+	// ghost 是进程级的幽灵弹幕检测器，全部绑定共用一个：Sweep 由单条
+	// 定时循环统一驱动，没必要按绑定各建一个。可能为 nil（检测关闭）。
+	ghost *ghost.Detector
+
 	// buildAccount 装配单个账号运行时，默认是 buildAccountRuntime（含一次
 	// 真实的 RefreshNav 网络请求）。抽成字段而不是直接调用包级函数，
 	// 只是为了让 ensureAccountRuntime 的"命中缓存但 Cookie 已经在数据库
@@ -107,6 +115,7 @@ func newRuntimeManager(
 	log *slog.Logger,
 	wg *sync.WaitGroup,
 	accounts map[string]*accountRuntime,
+	detector *ghost.Detector,
 ) *runtimeManager {
 	if accounts == nil {
 		accounts = make(map[string]*accountRuntime)
@@ -121,6 +130,7 @@ func newRuntimeManager(
 		wg:           wg,
 		accounts:     accounts,
 		live:         make(map[int64]*liveBinding),
+		ghost:        detector,
 		buildAccount: buildAccountRuntime,
 	}
 }
@@ -215,7 +225,7 @@ func (rm *runtimeManager) StartBinding(ctx context.Context, bindingID int64) err
 		return err
 	}
 
-	asm, err := assembleOne(ctx, *cfg, acctRT, rm.activity, rm.st, rm.sched, rm.log)
+	asm, err := assembleOne(ctx, *cfg, acctRT, rm.activity, rm.st, rm.sched, rm.ghost, rm.log)
 	if err != nil {
 		return err
 	}
@@ -278,6 +288,11 @@ func (rm *runtimeManager) adoptLocked(ctx context.Context, asm roomAssembly) {
 			// 未开播时不处理高能榜/进房事件（P6 任务 4）。rt.LiveOffline()
 			// 每次都要重新读，理由与下面 rt.Engine() 的注释一致：状态会被
 			// 心跳/立即探测异步更新，缓存一次就等于把某一刻的快照捕获死。
+			// 幽灵检测的销账要放在跳过判断**之前**：未开播时轮播规则照样
+			// 可能发言，若在这里被 continue 掉，登记就永远等不到回显，
+			// 会被判成幽灵。
+			rm.settleEcho(rt, ev)
+
 			if shouldSkipOfflineEvent(rt.LiveOffline(), ev.Type) {
 				continue
 			}
@@ -309,6 +324,32 @@ func (rm *runtimeManager) adoptLocked(ctx context.Context, asm roomAssembly) {
 	if rm.api != nil {
 		rm.api.PutRuntime(bindingID, asm.room)
 	}
+}
+
+// settleEcho 用一条收到的弹幕给幽灵检测器销账。
+//
+// 两道过滤缺一不可：
+//
+//   - 必须是本房间的事件。PK 期间 PKPipeline 会把对面房间的事件合流进
+//     同一个通道，不比房间号的话，对面房间的弹幕会跑来给本房间销账。
+//   - 必须是本绑定账号自己发的。别人的弹幕与「我发出去的有没有被广播」
+//     无关。
+func (rm *runtimeManager) settleEcho(rt *roomRuntime, ev event.Event) {
+	if rm.ghost == nil || ev.Type != event.TypeDanmaku {
+		return
+	}
+	b := rt.binding
+	if b == nil || b.Account == nil || b.Account.Session == nil {
+		return
+	}
+	if ev.RoomID != b.RoomID {
+		return
+	}
+	d, ok := ev.Payload.(event.Danmaku)
+	if !ok || d.User.UID != b.Account.Session.UID {
+		return
+	}
+	rm.ghost.Observe(b.RoomID, b.Account.Session.UID, d.Text)
 }
 
 // StopBinding 反向拆除 bindingID 的运行时：停连接、注销定时任务、结算
@@ -482,6 +523,46 @@ func shouldSkipOfflineEvent(offline bool, evType event.Type) bool {
 	default:
 		return false
 	}
+}
+
+// ghostSweepInterval 是幽灵检测的扫描间隔。判定精度只取决于等待窗口，
+// 这里扫得太密只是空转。
+const ghostSweepInterval = time.Second
+
+// runGhostSweeper 定时驱动幽灵检测器的判定，直到 ctx 取消。
+//
+// 检测器本身不起 goroutine、不看时钟（见 internal/ghost），推进它是调用
+// 方的事，这里就是那个调用方。
+func (rm *runtimeManager) runGhostSweeper(ctx context.Context) {
+	if rm.ghost == nil {
+		return
+	}
+	t := time.NewTicker(ghostSweepInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-t.C:
+			rm.ghost.Sweep(now, rm.roomIsConnected)
+		}
+	}
+}
+
+// roomIsConnected 报告 roomID 当前是否处于已连接状态。
+//
+// 断线期间收不到任何回显，此时判定全是误报，所以检测器会拿这个结果把
+// 那一批登记顺延过去。找不到房间时返回 false——绑定已经被拆掉了，同样
+// 不该判定。
+func (rm *runtimeManager) roomIsConnected(roomID string) bool {
+	rm.mu.Lock()
+	defer rm.mu.Unlock()
+	for _, lb := range rm.live {
+		if lb.room != nil && lb.room.binding != nil && lb.room.binding.RoomID == roomID {
+			return lb.client != nil && lb.client.State() == connector.StateConnected
+		}
+	}
+	return false
 }
 
 // liveRoomRuntimes 返回当前仍登记在 rm.live 里的全部 roomRuntime/roomBot

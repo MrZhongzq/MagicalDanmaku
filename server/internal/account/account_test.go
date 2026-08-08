@@ -11,6 +11,7 @@ import (
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/connector"
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/connector/bilibili/api"
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/connector/bilibili/auth"
+	"github.com/MrZhongzq/MagicalDanmaku/server/internal/ghost"
 )
 
 // stubActions 是 connector.Actions 的测试替身。
@@ -25,17 +26,23 @@ type stubActions struct {
 	attribute   int
 	nickname    string
 	err         error
+	// segments 非空时作为 SendDanmaku 的返回值，模拟超长文本被切分成
+	// 多段发出；为空则按不切分处理。
+	segments []string
 }
 
-func (s *stubActions) SendDanmaku(ctx context.Context, req connector.SendDanmakuRequest) error {
+func (s *stubActions) SendDanmaku(ctx context.Context, req connector.SendDanmakuRequest) ([]string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.err != nil {
-		return s.err
+		return nil, s.err
 	}
 	s.sent = append(s.sent, req.Text)
 	s.rooms = append(s.rooms, req.RoomID)
-	return nil
+	if len(s.segments) > 0 {
+		return s.segments, nil
+	}
+	return []string{req.Text}, nil
 }
 
 func (s *stubActions) BlockUser(ctx context.Context, req connector.BlockRequest) error {
@@ -105,6 +112,48 @@ func testSession(t *testing.T) *auth.Session {
 		t.Fatalf("ParseSession 失败: %v", err)
 	}
 	return sess
+}
+
+func TestSendDanmakuRegistersEverySegmentForGhostDetection(t *testing.T) {
+	d := ghost.New(10 * time.Second)
+	var got []ghost.Report
+	d.OnGhost = func(r ghost.Report) { got = append(got, r) }
+
+	b := &Binding{
+		Account: New("小号", testSession(t), 0),
+		RoomID:  "1781257934",
+		Actions: &stubActions{segments: []string{"前半段", "后半段"}},
+		Ghost:   d,
+	}
+
+	if err := b.SendDanmaku(context.Background(), "前半段后半段"); err != nil {
+		t.Fatalf("发送失败: %v", err)
+	}
+
+	// 一条回显都没来，两段都该被判成幽灵——报满两条就证明两段各自登记了。
+	d.Sweep(time.Now().Add(11*time.Second), func(string) bool { return true })
+
+	if len(got) != 2 {
+		t.Fatalf("两段都该登记等回显，实际报了 %d 条: %+v", len(got), got)
+	}
+	if got[0].Text != "前半段" || got[1].Text != "后半段" {
+		t.Errorf("登记的文本 = %q/%q，期望 前半段/后半段", got[0].Text, got[1].Text)
+	}
+	if got[0].RoomID != "1781257934" || got[0].UID != "42" {
+		t.Errorf("登记的房间/账号 = %q/%q，期望 1781257934/42", got[0].RoomID, got[0].UID)
+	}
+}
+
+func TestSendDanmakuWorksWithoutGhostDetector(t *testing.T) {
+	// 绝大多数调用方（含既有测试）不配检测器，这条路必须照常能发。
+	b := &Binding{
+		Account: New("小号", testSession(t), 0),
+		RoomID:  "1",
+		Actions: &stubActions{},
+	}
+	if err := b.SendDanmaku(context.Background(), "喵"); err != nil {
+		t.Fatalf("未配检测器时发送失败: %v", err)
+	}
 }
 
 func TestAccountSharesLimiterAcrossRooms(t *testing.T) {

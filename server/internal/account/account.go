@@ -13,6 +13,7 @@ import (
 
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/connector"
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/connector/bilibili/auth"
+	"github.com/MrZhongzq/MagicalDanmaku/server/internal/ghost"
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/ratelimit"
 )
 
@@ -46,6 +47,11 @@ type Binding struct {
 	Account *Account
 	RoomID  string
 	Actions connector.Actions
+
+	// Ghost 为非 nil 时，每条成功发出的弹幕都会登记等待回显，用来发现
+	// 幽灵弹幕（发送接口返回成功、房间广播里却收不到自己那条）。可以
+	// 不配，不配就是不检测。
+	Ghost *ghost.Detector
 }
 
 // Label 返回用于日志的标识，形如 "主播号@1706666491"。
@@ -65,14 +71,29 @@ func (b *Binding) SendDanmaku(ctx context.Context, text string) error {
 	if err := b.Account.Limiter.Wait(ctx); err != nil {
 		return err
 	}
-	err := b.Actions.SendDanmaku(ctx, connector.SendDanmakuRequest{
+	segs, err := b.Actions.SendDanmaku(ctx, connector.SendDanmakuRequest{
 		RoomID: b.RoomID,
 		Text:   text,
 	})
+	// 登记放在判断 err 之前：中途失败时前面几段是真的发出去了，同样要
+	// 等它们的回显。这一层只登记「已经发出去的」，发送这步就失败的
+	// （被禁言、发言过快）压根不进来——幽灵的前提是接口说成功。
+	b.registerForEcho(segs)
 	if err != nil {
 		return fmt.Errorf("%s 发送弹幕失败: %w", b.Label(), err)
 	}
 	return nil
+}
+
+// registerForEcho 把已发出的每一段登记进幽灵检测器。
+func (b *Binding) registerForEcho(segs []string) {
+	if b.Ghost == nil || b.Account == nil || b.Account.Session == nil {
+		return
+	}
+	now := time.Now()
+	for _, s := range segs {
+		b.Ghost.Sent(b.RoomID, b.Account.Session.UID, s, now)
+	}
 }
 
 // Block 以本绑定的账号身份，在本绑定的直播间禁言用户。

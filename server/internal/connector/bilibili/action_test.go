@@ -50,7 +50,7 @@ func TestSendDanmaku(t *testing.T) {
 	var forms []url.Values
 	a := newTestActions(t, `{"code":0,"data":{}}`, &forms)
 
-	err := a.SendDanmaku(context.Background(), connector.SendDanmakuRequest{
+	_, err := a.SendDanmaku(context.Background(), connector.SendDanmakuRequest{
 		RoomID: "21452505", Text: "你好世界",
 	})
 	if err != nil {
@@ -82,7 +82,7 @@ func TestSendDanmakuWithReply(t *testing.T) {
 	var forms []url.Values
 	a := newTestActions(t, `{"code":0,"data":{}}`, &forms)
 
-	err := a.SendDanmaku(context.Background(), connector.SendDanmakuRequest{
+	_, err := a.SendDanmaku(context.Background(), connector.SendDanmakuRequest{
 		RoomID: "21452505", Text: "收到", ReplyToUID: "12345",
 	})
 	if err != nil {
@@ -98,7 +98,7 @@ func TestSendDanmakuSplitsLongText(t *testing.T) {
 	a := newTestActions(t, `{"code":0,"data":{}}`, &forms)
 	a.SetMaxLength(5)
 
-	err := a.SendDanmaku(context.Background(), connector.SendDanmakuRequest{
+	_, err := a.SendDanmaku(context.Background(), connector.SendDanmakuRequest{
 		RoomID: "1", Text: "一二三四五六七八九十",
 	})
 	if err != nil {
@@ -115,9 +115,33 @@ func TestSendDanmakuSplitsLongText(t *testing.T) {
 	}
 }
 
+func TestSendDanmakuReturnsActualSegments(t *testing.T) {
+	var forms []url.Values
+	a := newTestActions(t, `{"code":0,"data":{}}`, &forms)
+	a.SetMaxLength(5)
+
+	// 幽灵弹幕检测要按**实际发出的每一段**登记等待回显；只知道整条原文
+	// 的话，切分过的弹幕永远匹配不上回显，会被全部误判成幽灵。
+	segs, err := a.SendDanmaku(context.Background(), connector.SendDanmakuRequest{
+		RoomID: "1", Text: "一二三四五六七八九十",
+	})
+	if err != nil {
+		t.Fatalf("SendDanmaku 失败: %v", err)
+	}
+	want := []string{"一二三四五", "六七八九十"}
+	if len(segs) != len(want) {
+		t.Fatalf("返回分段数 = %d，期望 %d: %v", len(segs), len(want), segs)
+	}
+	for i := range want {
+		if segs[i] != want[i] {
+			t.Errorf("第 %d 段 = %q，期望 %q", i+1, segs[i], want[i])
+		}
+	}
+}
+
 func TestSendDanmakuRejectsEmpty(t *testing.T) {
 	a := newTestActions(t, `{"code":0,"data":{}}`, nil)
-	if err := a.SendDanmaku(context.Background(), connector.SendDanmakuRequest{RoomID: "1"}); err == nil {
+	if _, err := a.SendDanmaku(context.Background(), connector.SendDanmakuRequest{RoomID: "1"}); err == nil {
 		t.Error("空文本应当报错")
 	}
 }
@@ -236,7 +260,7 @@ func TestActionsNickname(t *testing.T) {
 
 func TestSendDanmakuSurfacesAPIError(t *testing.T) {
 	a := newTestActions(t, `{"code":1003,"message":"您已被禁言"}`, nil)
-	err := a.SendDanmaku(context.Background(), connector.SendDanmakuRequest{RoomID: "1", Text: "x"})
+	_, err := a.SendDanmaku(context.Background(), connector.SendDanmakuRequest{RoomID: "1", Text: "x"})
 	if err == nil {
 		t.Fatal("应当返回错误")
 	}
@@ -308,11 +332,11 @@ func TestActionsRespectRateLimiter(t *testing.T) {
 
 	ctx := context.Background()
 	req := connector.SendDanmakuRequest{RoomID: "1", Text: "x"}
-	if err := a.SendDanmaku(ctx, req); err != nil {
+	if _, err := a.SendDanmaku(ctx, req); err != nil {
 		t.Fatalf("SendDanmaku 失败: %v", err)
 	}
 	start := time.Now()
-	if err := a.SendDanmaku(ctx, req); err != nil {
+	if _, err := a.SendDanmaku(ctx, req); err != nil {
 		t.Fatalf("SendDanmaku 失败: %v", err)
 	}
 	if d := time.Since(start); d < 40*time.Millisecond {

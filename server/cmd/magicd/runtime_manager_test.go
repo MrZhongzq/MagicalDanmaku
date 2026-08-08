@@ -234,7 +234,7 @@ func newTestRuntimeManager(t *testing.T, ctx context.Context, st *store.Store, w
 	})
 	t.Cleanup(activity.Close)
 
-	rm := newRuntimeManager(ctx, st, sched, activity, api, slog.Default(), wg, nil)
+	rm := newRuntimeManager(ctx, st, sched, activity, api, slog.Default(), wg, nil, nil)
 	return rm
 }
 

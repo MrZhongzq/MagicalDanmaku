@@ -21,8 +21,16 @@ type BlockRequest struct {
 // 与 Connector 分离是因为：事件流是房间级的，与身份无关；
 // 而写操作是账号级的，且需要支持多账号轮换发言。
 type Actions interface {
-	// SendDanmaku 发送弹幕。文本超长时会自动切分为多条依次发送。
-	SendDanmaku(ctx context.Context, req SendDanmakuRequest) error
+	// SendDanmaku 发送弹幕。文本超长时会自动切分为多条依次发送，返回
+	// **实际发出的每一段**。
+	//
+	// 返回分段而不只是 error，是因为切分是本层的实现细节、但结果不是：
+	// 幽灵弹幕检测要按实际发出的每一段去等回显（见 internal/ghost），
+	// 只拿着整条原文的话，切分过的弹幕永远匹配不上，会被全部误判。
+	//
+	// 中途失败时，已经成功发出去的那几段照样返回——它们是真的发出去了，
+	// 调用方仍然要为它们等回显。
+	SendDanmaku(ctx context.Context, req SendDanmakuRequest) ([]string, error)
 	// BlockUser 禁言用户。这是房间级操作（房管权限），与账号级的
 	// BlacklistUser 是两条不同的能力——分开是 P5-6 的明确要求，见
 	// BlacklistUser 的注释。

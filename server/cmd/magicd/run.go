@@ -19,6 +19,7 @@ import (
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/connector/bilibili/api"
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/connector/bilibili/auth"
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/event"
+	"github.com/MrZhongzq/MagicalDanmaku/server/internal/ghost"
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/httpapi"
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/logging"
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/ratelimit"
@@ -381,6 +382,7 @@ func buildRoomRuntime(
 	activity *logging.ActivityWriter,
 	st *store.Store,
 	sched *scheduler.Scheduler,
+	detector *ghost.Detector,
 	log *slog.Logger,
 ) (room *roomRuntime, bot *roomBot, engine *rules.Engine, client *bilibili.Client, err error) {
 	// 限流统一由 account.Binding 负责，这里传空限流器，
@@ -393,6 +395,7 @@ func buildRoomRuntime(
 		Account: acctRT.acc,
 		RoomID:  info.RoomID,
 		Actions: actions,
+		Ghost:   detector,
 	}
 
 	bot = newRoomBot(binding, ctx)
@@ -470,6 +473,7 @@ func assembleOne(
 	activity *logging.ActivityWriter,
 	st *store.Store,
 	sched *scheduler.Scheduler,
+	detector *ghost.Detector,
 	log *slog.Logger,
 ) (roomAssembly, error) {
 	// 解析真实房间号：配置里可能填的是短号
@@ -478,7 +482,7 @@ func assembleOne(
 		return roomAssembly{}, fmt.Errorf("账号 %q 获取直播间 %s 信息失败: %w", c.AccountName, c.RoomID, err)
 	}
 
-	room, bot, engine, client, err := buildRoomRuntime(ctx, c, acctRT, info, activity, st, sched, log)
+	room, bot, engine, client, err := buildRoomRuntime(ctx, c, acctRT, info, activity, st, sched, detector, log)
 	if err != nil {
 		return roomAssembly{}, &errInvalidRules{err}
 	}
@@ -536,13 +540,14 @@ func assembleRuntimes(
 	activity *logging.ActivityWriter,
 	st *store.Store,
 	sched *scheduler.Scheduler,
+	detector *ghost.Detector,
 	log *slog.Logger,
 ) ([]roomAssembly, error) {
 	out := make([]roomAssembly, 0, len(cfgs))
 	for _, c := range cfgs {
 		acctRT := accounts[c.AccountName]
 
-		asm, err := assembleOne(ctx, c, acctRT, activity, st, sched, log)
+		asm, err := assembleOne(ctx, c, acctRT, activity, st, sched, detector, log)
 		if err != nil {
 			var invalid *errInvalidRules
 			if errors.As(err, &invalid) {
@@ -672,7 +677,16 @@ func runRun(args []string) error {
 	if api != nil {
 		apiSink = api
 	}
-	rm := newRuntimeManager(ctx, st, sched, activity, apiSink, log, &wg, accounts)
+
+	detector := newGhostDetector(log)
+	rm := newRuntimeManager(ctx, st, sched, activity, apiSink, log, &wg, accounts, detector)
+	if detector != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			rm.runGhostSweeper(ctx)
+		}()
+	}
 	if api != nil {
 		api.SetBindingLifecycle(rm)
 		// 账号参数（发送间隔/字数上限）保存后热传播给运行中的绑定
@@ -715,7 +729,7 @@ func runRun(args []string) error {
 	// 装配：规则非法的绑定在这一步被跳过（记日志，不致命），其余的与
 	// RoomInfo/定时规则注册失败一样仍是致命的——assembleRuntimes 的注释
 	// 里写了各自的理由。
-	assemblies, err := assembleRuntimes(ctx, cfgs, accounts, activity, st, sched, log)
+	assemblies, err := assembleRuntimes(ctx, cfgs, accounts, activity, st, sched, detector, log)
 	if err != nil {
 		return err
 	}

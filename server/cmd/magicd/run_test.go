@@ -143,8 +143,8 @@ type fakeAccountActions struct {
 	nicknameErr  error
 }
 
-func (f *fakeAccountActions) SendDanmaku(context.Context, connector.SendDanmakuRequest) error {
-	return nil
+func (f *fakeAccountActions) SendDanmaku(_ context.Context, req connector.SendDanmakuRequest) ([]string, error) {
+	return []string{req.Text}, nil
 }
 func (f *fakeAccountActions) BlockUser(context.Context, connector.BlockRequest) error { return nil }
 func (f *fakeAccountActions) UnblockUser(context.Context, string, string) error       { return nil }
@@ -433,7 +433,7 @@ func TestBuildRoomRuntimeSkipsBindingWithInvalidRules(t *testing.T) {
 	}
 
 	room, bot, engine, client, err := buildRoomRuntime(
-		context.Background(), cfg, acctRT, info, activity, nil, scheduler.New(slog.Default()), slog.Default())
+		context.Background(), cfg, acctRT, info, activity, nil, scheduler.New(slog.Default()), nil, slog.Default())
 	if err == nil {
 		t.Fatal("Suppress 指向不存在的规则名，buildRoomRuntime 应当报错，实际没有")
 	}
@@ -488,7 +488,7 @@ func TestAssembleRuntimesSkipsInvalidBindingButKeepsOthers(t *testing.T) {
 	t.Cleanup(activity.Close)
 
 	assemblies, err := assembleRuntimes(
-		context.Background(), cfgs, accounts, activity, nil, scheduler.New(slog.Default()), slog.Default())
+		context.Background(), cfgs, accounts, activity, nil, scheduler.New(slog.Default()), nil, slog.Default())
 	if err != nil {
 		t.Fatalf("坏账号的规则非法不该让整体装配失败，实际报错: %v", err)
 	}
