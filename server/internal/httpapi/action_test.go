@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/connector"
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/httpapi"
@@ -32,6 +34,22 @@ type fakeRuntime struct {
 
 	reloadErr  error
 	reloadHits int
+
+	// probe/probeErr 是 GhostProbe 的固定结果，probeText 记下运行时实际
+	// 收到的探针文本。
+	probe     httpapi.GhostProbeResult
+	probeErr  error
+	probeText string
+}
+
+func (f *fakeRuntime) GhostProbe(_ context.Context, text string) (httpapi.GhostProbeResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.probeText = text
+	if f.probeErr != nil {
+		return httpapi.GhostProbeResult{}, f.probeErr
+	}
+	return f.probe, nil
 }
 
 func (f *fakeRuntime) SendDanmaku(_ context.Context, text string) error {
@@ -122,6 +140,84 @@ func (f *fakeRuntime) snapshot() ([]string, []string, []string) {
 	return append([]string{}, f.danmaku...),
 		append([]string{}, f.blocked...),
 		append([]string{}, f.unblocked...)
+}
+
+func TestGhostProbeReturnsVerdict(t *testing.T) {
+	srv, st, api := newTestServerWithAPI(t)
+	c := loginAs(t, srv, st, "张三", false)
+	bid := mustBindingFor(t, st, "张三", "小号", "123")
+	if err := st.Grant(context.Background(), "张三", "小号", "123",
+		[]perm.Permission{perm.DanmakuSend}); err != nil {
+		t.Fatalf("授权报错: %v", err)
+	}
+
+	rt := &fakeRuntime{probe: httpapi.GhostProbeResult{Result: "ghost", Waited: 10 * time.Second}}
+	api.SetRuntime(map[int64]httpapi.BindingRuntime{bid: rt})
+
+	resp := jsonRequest(t, c, "POST", srv.URL+"/api/bindings/"+itoa(bid)+"/ghost-probe", `{}`)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("状态码 = %d", resp.StatusCode)
+	}
+
+	var got map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("解析响应失败: %v", err)
+	}
+	if got["result"] != "ghost" {
+		t.Errorf("result = %v，期望 ghost", got["result"])
+	}
+	// 探针文本必须是服务端生成的、带随机后缀的自检文本，不能让调用方
+	// 指定——否则这个端点就成了绕过权限校验的任意发弹幕通道。
+	if rt.probeText == "" {
+		t.Fatal("运行时没有收到探针文本")
+	}
+	if !strings.HasPrefix(rt.probeText, "弹幕自检") {
+		t.Errorf("探针文本 = %q，应当以 %q 开头", rt.probeText, "弹幕自检")
+	}
+}
+
+func TestGhostProbeRequiresPermission(t *testing.T) {
+	srv, st, api := newTestServerWithAPI(t)
+	loginAs(t, srv, st, "张三", false)
+	bid := mustBindingFor(t, st, "张三", "小号", "123")
+	api.SetRuntime(map[int64]httpapi.BindingRuntime{bid: &fakeRuntime{}})
+
+	li := loginAs(t, srv, st, "李四", false)
+	if err := st.Grant(context.Background(), "李四", "小号", "123",
+		[]perm.Permission{perm.EventRead}); err != nil {
+		t.Fatalf("授权报错: %v", err)
+	}
+
+	resp := jsonRequest(t, li, "POST", srv.URL+"/api/bindings/"+itoa(bid)+"/ghost-probe", `{}`)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("状态码 = %d, 期望 403", resp.StatusCode)
+	}
+}
+
+func TestGhostProbeReportsSendFailure(t *testing.T) {
+	srv, st, api := newTestServerWithAPI(t)
+	c := loginAs(t, srv, st, "张三", false)
+	bid := mustBindingFor(t, st, "张三", "小号", "123")
+	if err := st.Grant(context.Background(), "张三", "小号", "123",
+		[]perm.Permission{perm.DanmakuSend}); err != nil {
+		t.Fatalf("授权报错: %v", err)
+	}
+
+	rt := &fakeRuntime{probeErr: errors.New("bilibili 接口错误 code=1003: 你已经在本房间被禁言")}
+	api.SetRuntime(map[int64]httpapi.BindingRuntime{bid: rt})
+
+	resp := jsonRequest(t, c, "POST", srv.URL+"/api/bindings/"+itoa(bid)+"/ghost-probe", `{}`)
+	defer resp.Body.Close()
+	// 发送这步就失败不是幽灵，是明确拒绝，要把 B 站的原话带回界面。
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("状态码 = %d，期望 502", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "禁言") {
+		t.Errorf("响应应当带上 B 站给的原因，实际 %s", body)
+	}
 }
 
 func TestSendDanmaku(t *testing.T) {

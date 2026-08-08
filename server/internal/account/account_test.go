@@ -144,6 +144,60 @@ func TestSendDanmakuRegistersEverySegmentForGhostDetection(t *testing.T) {
 	}
 }
 
+func TestSendDanmakuProbeReportsEchoOutcome(t *testing.T) {
+	d := ghost.New(10 * time.Second)
+	b := &Binding{
+		Account: New("小号", testSession(t), 0),
+		RoomID:  "1781257934",
+		Actions: &stubActions{},
+		Ghost:   d,
+	}
+
+	ch, err := b.SendDanmakuProbe(context.Background(), "探针")
+	if err != nil {
+		t.Fatalf("探针发送失败: %v", err)
+	}
+	d.Observe("1781257934", "42", "探针")
+
+	select {
+	case got := <-ch:
+		if got.Result != ghost.ResultOK {
+			t.Errorf("Result = %q，期望 %q", got.Result, ghost.ResultOK)
+		}
+	default:
+		t.Fatal("回显已到达，探针应当立刻拿到结果")
+	}
+}
+
+func TestSendDanmakuProbeNeedsDetector(t *testing.T) {
+	b := &Binding{
+		Account: New("小号", testSession(t), 0),
+		RoomID:  "1",
+		Actions: &stubActions{},
+	}
+	if _, err := b.SendDanmakuProbe(context.Background(), "探针"); err == nil {
+		t.Error("没有检测器时探针无从判定，应当报错而不是假装成功")
+	}
+}
+
+func TestSendDanmakuProbeSurfacesSendFailure(t *testing.T) {
+	d := ghost.New(10 * time.Second)
+	b := &Binding{
+		Account: New("小号", testSession(t), 0),
+		RoomID:  "1",
+		Actions: &stubActions{err: &api.APIError{Code: 1003, Message: "你已经在本房间被禁言"}},
+		Ghost:   d,
+	}
+
+	_, err := b.SendDanmakuProbe(context.Background(), "探针")
+	if err == nil {
+		t.Fatal("发送这步就失败时应当报错——那不是幽灵，是明确拒绝")
+	}
+	if !strings.Contains(err.Error(), "禁言") {
+		t.Errorf("错误应当带上 B 站给的原因，实际 %v", err)
+	}
+}
+
 func TestSendDanmakuWorksWithoutGhostDetector(t *testing.T) {
 	// 绝大多数调用方（含既有测试）不配检测器，这条路必须照常能发。
 	b := &Binding{

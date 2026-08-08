@@ -205,6 +205,10 @@ func (s *Server) routes() {
 	// 即时动作。全部用 POST——它们都会改变外部状态。
 	s.mux.HandleFunc("POST /api/bindings/{binding}/danmaku",
 		s.requirePerm(perm.DanmakuSend, s.handleSendDanmaku))
+	// 幽灵弹幕自检：会真的发一条弹幕出去，所以要 danmaku:send，
+	// 也必须是 POST。
+	s.mux.HandleFunc("POST /api/bindings/{binding}/ghost-probe",
+		s.requirePerm(perm.DanmakuSend, s.handleGhostProbe))
 	s.mux.HandleFunc("POST /api/bindings/{binding}/block",
 		s.requirePerm(perm.UserBlock, s.handleBlockUser))
 	s.mux.HandleFunc("POST /api/bindings/{binding}/unblock",

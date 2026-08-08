@@ -131,6 +131,67 @@ func TestEachSegmentIsJudgedIndependently(t *testing.T) {
 	}
 }
 
+func TestWindowIsReadableForCallersSettingTimeouts(t *testing.T) {
+	// 主动探针要按这个窗口设自己的超时兜底，拿不到就只能瞎猜一个数字。
+	if got := New(7 * time.Second).Window(); got != 7*time.Second {
+		t.Errorf("Window = %v，期望 7s", got)
+	}
+}
+
+func TestWatchReportsOKWhenEchoArrives(t *testing.T) {
+	d := New(10 * time.Second)
+
+	ch := d.SentWatched(room, self, "探针", t0)
+	d.Observe(room, self, "探针")
+
+	select {
+	case got := <-ch:
+		if got.Result != ResultOK {
+			t.Errorf("Result = %q，期望 %q", got.Result, ResultOK)
+		}
+	default:
+		t.Fatal("回显已到达，观察者通道应当立刻拿到结果")
+	}
+}
+
+func TestWatchReportsGhostOnTimeout(t *testing.T) {
+	d := New(10 * time.Second)
+
+	ch := d.SentWatched(room, self, "探针", t0)
+	d.Sweep(t0.Add(11*time.Second), alwaysOnline)
+
+	select {
+	case got := <-ch:
+		if got.Result != ResultGhost {
+			t.Errorf("Result = %q，期望 %q", got.Result, ResultGhost)
+		}
+		if got.Waited != 11*time.Second {
+			t.Errorf("Waited = %v，期望 11s", got.Waited)
+		}
+	default:
+		t.Fatal("超时未回显，观察者通道应当拿到幽灵结果")
+	}
+}
+
+func TestWatchReportsMismatchWithEchoText(t *testing.T) {
+	d := New(10 * time.Second)
+
+	ch := d.SentWatched(room, self, "抽奖了快来", t0)
+	d.Observe(room, self, "**了快来")
+
+	select {
+	case got := <-ch:
+		if got.Result != ResultMismatch {
+			t.Errorf("Result = %q，期望 %q", got.Result, ResultMismatch)
+		}
+		if got.Echo != "**了快来" {
+			t.Errorf("Echo = %q，期望 %q", got.Echo, "**了快来")
+		}
+	default:
+		t.Fatal("回显被改写，观察者通道应当拿到不一致结果")
+	}
+}
+
 func TestObserveSettlesOldestFirstWhenTextRepeats(t *testing.T) {
 	d := New(10 * time.Second)
 	var got []Report

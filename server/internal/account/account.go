@@ -85,6 +85,50 @@ func (b *Binding) SendDanmaku(ctx context.Context, text string) error {
 	return nil
 }
 
+// ErrNoGhostDetector 表示这个绑定没有开启幽灵弹幕检测。
+var ErrNoGhostDetector = errors.New("account: 幽灵弹幕检测未启用")
+
+// SendDanmakuProbe 发一条探针弹幕，返回等待它回显结果的通道。
+//
+// 与 SendDanmaku 的唯一区别是登记时挂了一个一次性观察者，好让调用方
+// 同步等出一个结论；发送路径、限流、错误语义都完全一样。
+//
+// 发送这一步就失败（被禁言、发言过快）时直接返回错误：那是 B 站的明确
+// 拒绝，不是幽灵，没有可等的东西。
+func (b *Binding) SendDanmakuProbe(ctx context.Context, text string) (<-chan ghost.Outcome, error) {
+	if b.Account == nil {
+		return nil, ErrNoAccount
+	}
+	if b.Ghost == nil || b.Account.Session == nil {
+		return nil, ErrNoGhostDetector
+	}
+	if err := b.Account.Limiter.Wait(ctx); err != nil {
+		return nil, err
+	}
+
+	segs, err := b.Actions.SendDanmaku(ctx, connector.SendDanmakuRequest{
+		RoomID: b.RoomID,
+		Text:   text,
+	})
+	if err != nil {
+		// 已经发出去的那几段照常登记等回显，只是没人同步等它们。
+		b.registerForEcho(segs)
+		return nil, fmt.Errorf("%s 发送弹幕失败: %w", b.Label(), err)
+	}
+	if len(segs) == 0 {
+		return nil, fmt.Errorf("%s 没有发出任何内容", b.Label())
+	}
+
+	// 只观察第一段。探针文本由服务端生成、不会触发切分，这里只是不让
+	// 边界情况变成 panic；万一真被切了，其余段按普通登记照常检测。
+	now := time.Now()
+	ch := b.Ghost.SentWatched(b.RoomID, b.Account.Session.UID, segs[0], now)
+	for _, s := range segs[1:] {
+		b.Ghost.Sent(b.RoomID, b.Account.Session.UID, s, now)
+	}
+	return ch, nil
+}
+
 // registerForEcho 把已发出的每一段登记进幽灵检测器。
 func (b *Binding) registerForEcho(segs []string) {
 	if b.Ghost == nil || b.Account == nil || b.Account.Session == nil {

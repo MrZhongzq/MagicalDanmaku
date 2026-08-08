@@ -2,9 +2,12 @@ package httpapi
 
 import (
 	"context"
+	"crypto/rand"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/connector"
 )
@@ -18,6 +21,11 @@ const defaultBlockHours = 1
 // 不必真连 B 站。
 type BindingRuntime interface {
 	SendDanmaku(ctx context.Context, text string) error
+
+	// GhostProbe 发一条自检弹幕并等它的回显结果，用来当场确认这个账号
+	// 在这个直播间是不是正在被静默吞弹幕。text 由 handler 生成，不接受
+	// 调用方指定——否则这个端点就成了绕过校验的任意发弹幕通道。
+	GhostProbe(ctx context.Context, text string) (GhostProbeResult, error)
 	Block(ctx context.Context, uid string, hours int) error
 	Unblock(ctx context.Context, uid string) error
 
@@ -154,6 +162,70 @@ func (s *Server) runtimeFor(w http.ResponseWriter, bindingID int64, label string
 		return nil, false
 	}
 	return rt, true
+}
+
+// GhostProbeResult 是一次幽灵弹幕探针的判定结果。
+type GhostProbeResult struct {
+	// Result 取 "ok" / "ghost" / "mismatch"。
+	Result string
+	// Echo 是回显回来的文本，仅 mismatch 时有意义。
+	Echo string
+	// Waited 是等待回显的时长，仅 ghost 时有意义。
+	Waited time.Duration
+}
+
+// ghostProbePrefix 是自检弹幕的固定前缀，后面跟一段随机后缀。
+//
+// 这条弹幕会真的发到直播间里被观众看到，所以要一眼能看懂是在做什么，
+// 不能是一串乱码。
+const ghostProbePrefix = "弹幕自检"
+
+// newGhostProbeText 生成一条自检弹幕。
+//
+// 必须带随机后缀：轮播消息可能正好也在发同样的内容，检测器按文本+FIFO
+// 销账，撞上了就会互相顶掉对方的登记，探针拿到的结论就不是自己的。
+func newGhostProbeText() (string, error) {
+	var b [4]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%s %x", ghostProbePrefix, b), nil
+}
+
+// handleGhostProbe 发一条自检弹幕并同步等出结论。
+//
+// 这是给「明明发得出去、别人却看不见」这类问题当场定性的工具：发送接口
+// 说成功、回显却没来，就是幽灵；发送这步直接失败，那是 B 站的明确拒绝
+// （禁言、发言过快），把原话带回界面即可，不是幽灵。
+func (s *Server) handleGhostProbe(w http.ResponseWriter, r *http.Request) {
+	b := bindingFrom(r.Context())
+
+	rt, ok := s.runtimeFor(w, b.ID, b.Label())
+	if !ok {
+		return
+	}
+
+	text, err := newGhostProbeText()
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "生成自检弹幕失败: %v", err)
+		return
+	}
+
+	res, err := rt.GhostProbe(r.Context(), text)
+	if err != nil {
+		s.log.Warn("幽灵弹幕探针失败", "binding", b.Label(), "err", err)
+		respondError(w, http.StatusBadGateway, "%v", err)
+		return
+	}
+
+	resp := map[string]any{"result": res.Result, "text": text}
+	if res.Echo != "" {
+		resp["echo"] = res.Echo
+	}
+	if res.Waited > 0 {
+		resp["waitedMs"] = res.Waited.Milliseconds()
+	}
+	respondJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleSendDanmaku(w http.ResponseWriter, r *http.Request) {

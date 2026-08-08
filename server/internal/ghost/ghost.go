@@ -29,10 +29,37 @@ type Mismatch struct {
 // key 是 pending 的分桶键：同一账号在不同房间是两回事。
 type key struct{ roomID, uid string }
 
+// 一条登记的三种归宿。
+const (
+	ResultOK       = "ok"       // 回显原样到达
+	ResultGhost    = "ghost"    // 超过窗口没等到回显
+	ResultMismatch = "mismatch" // 回显到了但文本被改写
+)
+
+// Outcome 是一条被观察的登记的最终结果，供主动探针同步等待。
+type Outcome struct {
+	Result string
+	Echo   string        // 仅 ResultMismatch 时有意义
+	Waited time.Duration // 仅 ResultGhost 时有意义
+}
+
 // item 是一条等待回显的登记。
 type item struct {
 	text   string
 	sentAt time.Time
+
+	// watch 非 nil 时，这条登记有归宿后往里投递一次结果并关闭。
+	// 只有主动探针会用到——被动检测走 OnGhost/OnMismatch 回调。
+	watch chan Outcome
+}
+
+// settle 把结果投给观察者。没有观察者时什么也不做。
+func (it item) settle(o Outcome) {
+	if it.watch == nil {
+		return
+	}
+	it.watch <- o
+	close(it.watch)
 }
 
 // Detector 是检测器。
@@ -54,12 +81,28 @@ func New(window time.Duration) *Detector {
 	return &Detector{window: window, pending: make(map[key][]item)}
 }
 
+// Window 返回等待回显的窗口，供主动探针设置自己的超时兜底。
+func (d *Detector) Window() time.Duration { return d.window }
+
 // Sent 登记一条已成功发出的弹幕。分段发送时每段各登记一条。
 func (d *Detector) Sent(roomID, uid, text string, at time.Time) {
+	d.add(item{text: text, sentAt: at}, key{roomID, uid})
+}
+
+// SentWatched 登记一条弹幕并返回一次性结果通道，供主动探针同步等待。
+//
+// 通道带缓冲：判定发生在检测器内部，不能因为没人及时接收就把
+// Observe/Sweep 卡住。调用方超时放弃时直接不再接收即可。
+func (d *Detector) SentWatched(roomID, uid, text string, at time.Time) <-chan Outcome {
+	ch := make(chan Outcome, 1)
+	d.add(item{text: text, sentAt: at, watch: ch}, key{roomID, uid})
+	return ch
+}
+
+func (d *Detector) add(it item, k key) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	k := key{roomID, uid}
-	d.pending[k] = append(d.pending[k], item{text: text, sentAt: at})
+	d.pending[k] = append(d.pending[k], it)
 }
 
 // Observe 用收到的一条自己的弹幕销账。
@@ -82,6 +125,7 @@ func (d *Detector) Observe(roomID, uid, text string) {
 		if it.text == text {
 			d.removeLocked(k, i)
 			d.mu.Unlock()
+			it.settle(Outcome{Result: ResultOK})
 			return
 		}
 	}
@@ -92,6 +136,8 @@ func (d *Detector) Observe(roomID, uid, text string) {
 	oldest := items[0]
 	d.removeLocked(k, 0)
 	d.mu.Unlock()
+
+	oldest.settle(Outcome{Result: ResultMismatch, Echo: text})
 
 	if d.OnMismatch != nil {
 		d.OnMismatch(Mismatch{
@@ -116,8 +162,16 @@ func (d *Detector) removeLocked(k key, i int) {
 
 // Sweep 判定超过窗口仍未销账的登记项。
 func (d *Detector) Sweep(now time.Time, online func(roomID string) bool) {
+	// 判定结果与产生它的那条登记要一起带出锁外：登记里有探针的结果
+	// 通道，报告里有给日志看的字段，两者必须成对，不能用并行数组靠
+	// 下标对齐。
+	type verdict struct {
+		report Report
+		it     item
+	}
+
 	d.mu.Lock()
-	var reports []Report
+	var verdicts []verdict
 	for k, items := range d.pending {
 		// 断线期间收不到任何回显，此时判定全是误报。整桶顺延，不判定
 		// 也不丢弃——连接恢复后仍然没有回显的，下一轮照样报出来。
@@ -130,12 +184,15 @@ func (d *Detector) Sweep(now time.Time, online func(roomID string) bool) {
 				kept = append(kept, it)
 				continue
 			}
-			reports = append(reports, Report{
-				RoomID: k.roomID,
-				UID:    k.uid,
-				Text:   it.text,
-				SentAt: it.sentAt,
-				Waited: now.Sub(it.sentAt),
+			verdicts = append(verdicts, verdict{
+				report: Report{
+					RoomID: k.roomID,
+					UID:    k.uid,
+					Text:   it.text,
+					SentAt: it.sentAt,
+					Waited: now.Sub(it.sentAt),
+				},
+				it: it,
 			})
 		}
 		if len(kept) == 0 {
@@ -146,11 +203,12 @@ func (d *Detector) Sweep(now time.Time, online func(roomID string) bool) {
 	}
 	d.mu.Unlock()
 
-	// 回调放在锁外：回调里若再调本检测器的方法（比如探针回调中登记新的
-	// 一条），持锁调用会直接死锁。
-	for _, r := range reports {
+	// 回调与结果投递都放在锁外：回调里若再调本检测器的方法（比如探针
+	// 回调中登记新的一条），持锁调用会直接死锁。
+	for _, v := range verdicts {
+		v.it.settle(Outcome{Result: ResultGhost, Waited: v.report.Waited})
 		if d.OnGhost != nil {
-			d.OnGhost(r)
+			d.OnGhost(v.report)
 		}
 	}
 }

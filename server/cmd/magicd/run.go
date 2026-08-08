@@ -189,6 +189,42 @@ func (rt *roomRuntime) SendDanmaku(ctx context.Context, text string) error {
 	return err
 }
 
+// ghostProbeGrace 是探针在等待窗口之外多给的余量，覆盖发送本身的耗时
+// 与扫描循环的一个 tick。
+const ghostProbeGrace = 5 * time.Second
+
+// GhostProbe 发一条自检弹幕并等出结论。实现 httpapi.BindingRuntime。
+func (rt *roomRuntime) GhostProbe(ctx context.Context, text string) (httpapi.GhostProbeResult, error) {
+	// 连接没就绪时直接拒绝，而不是发出去干等：断线期间收不到任何回显，
+	// 检测器会把判定顺延，探针只会白等到超时，还报不出有用的原因。
+	if st := rt.client.State(); st != connector.StateConnected {
+		return httpapi.GhostProbeResult{},
+			fmt.Errorf("%s 当前连接状态为 %s，未连上直播间时无法自检", rt.label, st)
+	}
+
+	ch, err := rt.binding.SendDanmakuProbe(ctx, text)
+	if err != nil {
+		return httpapi.GhostProbeResult{}, err
+	}
+
+	// 超时兜底：正常情况下判定一定会在窗口内产生，走不到这里。真走到了
+	// 说明发出去之后连接就断了、判定被顺延，此时如实说等不到结论，不能
+	// 顺势报成幽灵——那是两回事。
+	timeout := rt.binding.Ghost.Window() + ghostProbeGrace
+	t := time.NewTimer(timeout)
+	defer t.Stop()
+
+	select {
+	case o := <-ch:
+		return httpapi.GhostProbeResult{Result: o.Result, Echo: o.Echo, Waited: o.Waited}, nil
+	case <-t.C:
+		return httpapi.GhostProbeResult{},
+			fmt.Errorf("%s 等待 %s 仍未拿到判定结果，多半是这期间连接断了", rt.label, timeout)
+	case <-ctx.Done():
+		return httpapi.GhostProbeResult{}, ctx.Err()
+	}
+}
+
 func (rt *roomRuntime) Block(ctx context.Context, uid string, hours int) error {
 	err := rt.binding.Block(ctx, uid, hours)
 	rt.recordManual(rules.Action{Type: rules.ActionBlock, Hours: hours},
