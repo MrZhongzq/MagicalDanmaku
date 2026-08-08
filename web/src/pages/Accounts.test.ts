@@ -303,3 +303,107 @@ describe('Accounts 直播间开播状态展示', () => {
     expect(bindingRowText(wrapper)).toContain('未知')
   })
 })
+
+describe('Accounts 弹幕自检', () => {
+  const 绑定fixture: Binding = {
+    id: 100,
+    accountId: 1,
+    accountName: '小号',
+    roomId: '1706666491',
+    enabled: true,
+    ruleCount: 0,
+    permissions: ['danmaku:send'],
+    isOwner: true,
+    liveStatus: 'living',
+    liveCheckedAt: '2026-08-09T12:00:00Z',
+    anchorUid: '20285041',
+    anchorName: '舞月雅白',
+  }
+
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.unstubAllGlobals()
+    localStorage.clear()
+    messageMock.success.mockClear()
+    messageMock.error.mockClear()
+    messageMock.warning.mockClear()
+  })
+
+  /** 让 ghost-probe 返回指定结果，其余请求照常。 */
+  function stubProbe(body: unknown) {
+    const f = vi.fn().mockImplementation((url: string) => {
+      if (url === '/api/accounts') return Promise.resolve(ok([小号]))
+      if (url === '/api/bindings') return Promise.resolve(ok([]))
+      if (url.endsWith('/ghost-probe')) return Promise.resolve(ok(body))
+      return Promise.resolve(ok({ status: 'ok' }))
+    })
+    vi.stubGlobal('fetch', f)
+    return f
+  }
+
+  function mountWithProbe(body: unknown) {
+    const f = stubProbe(body)
+    const wrapper = mount(Accounts)
+    useBindingsStore().list = [{ ...绑定fixture }]
+    return { wrapper, f }
+  }
+
+  async function clickProbe(wrapper: ReturnType<typeof mount>) {
+    const btn = wrapper.findAll('button').find((b) => b.text().includes('弹幕自检'))
+    expect(btn, '绑定行里应当有「弹幕自检」按钮').toBeTruthy()
+    await btn!.trigger('click')
+    await flushPromises()
+  }
+
+  it('点自检会 POST 到 ghost-probe，且不让前端指定弹幕内容', async () => {
+    const { wrapper, f } = mountWithProbe({ result: 'ok', text: '弹幕自检 a1b2c3d4' })
+    await flushPromises()
+    await clickProbe(wrapper)
+
+    const call = f.mock.calls.find((c) => String(c[0]).endsWith('/ghost-probe'))
+    expect(call, '应当请求 ghost-probe').toBeTruthy()
+    expect((call![1] as RequestInit).method).toBe('POST')
+    // 探针文本由服务端生成。前端塞 text 进去等于开了个任意发弹幕的口子。
+    expect(String((call![1] as RequestInit).body ?? '')).not.toContain('text')
+  })
+
+  it('判定为幽灵时给出的是结论，不是「成功」', async () => {
+    const { wrapper } = mountWithProbe({
+      result: 'ghost',
+      text: '弹幕自检 a1b2c3d4',
+      waitedMs: 10000,
+    })
+    await flushPromises()
+    await clickProbe(wrapper)
+
+    expect(messageMock.success).not.toHaveBeenCalled()
+    const warned = [...messageMock.warning.mock.calls, ...messageMock.error.mock.calls]
+      .map((c) => String(c[0]))
+      .join('\n')
+    expect(warned).toContain('幽灵')
+  })
+
+  it('一切正常时提示发得出去也看得见', async () => {
+    const { wrapper } = mountWithProbe({ result: 'ok', text: '弹幕自检 a1b2c3d4' })
+    await flushPromises()
+    await clickProbe(wrapper)
+
+    expect(String(messageMock.success.mock.calls[0]?.[0] ?? '')).toContain('正常')
+  })
+
+  it('回显被改写时点明是改写，并把两边内容都摆出来', async () => {
+    const { wrapper } = mountWithProbe({
+      result: 'mismatch',
+      text: '弹幕自检 a1b2c3d4',
+      echo: '弹幕自检 ****',
+    })
+    await flushPromises()
+    await clickProbe(wrapper)
+
+    const warned = [...messageMock.warning.mock.calls, ...messageMock.error.mock.calls]
+      .map((c) => String(c[0]))
+      .join('\n')
+    expect(warned).toContain('改写')
+    expect(warned).toContain('弹幕自检 ****')
+  })
+})

@@ -238,6 +238,56 @@ async function deleteAccount(acc: Account) {
   }
 }
 
+/**
+ * `POST /api/bindings/{id}/ghost-probe` 的响应。
+ *
+ * 弹幕内容由服务端生成并原样回传（`text`），前端不指定也不该指定——
+ * 那会把这个端点变成一个绕过校验的任意发弹幕通道。
+ */
+interface GhostProbeResult {
+  result: 'ok' | 'ghost' | 'mismatch'
+  text: string
+  echo?: string
+  waitedMs?: number
+}
+
+/** 正在自检的绑定 ID，用来只转这一行的按钮而不是全部。 */
+const probing = ref<number | null>(null)
+
+/**
+ * 发一条自检弹幕，当场判断这个账号在这个直播间是不是正在被静默吞弹幕。
+ *
+ * 三种结论对应三种语气：正常用 success；幽灵和被改写都是问题，用
+ * warning，且必须把结论说清楚——这个功能存在的意义就是把"明明发得出去
+ * 别人却看不见"这件事从猜测变成结论，提示语要是含糊成"操作完成"就白做了。
+ */
+async function probeGhost(b: Binding) {
+  probing.value = b.id
+  try {
+    const r = await request<GhostProbeResult>('POST', `/api/bindings/${b.id}/ghost-probe`)
+    if (r.result === 'ok') {
+      message.success(`房间 ${b.roomId} 弹幕正常：发得出去，也能在直播间里看到`)
+    } else if (r.result === 'mismatch') {
+      message.warning(
+        `房间 ${b.roomId} 的弹幕被改写了：发出去的是「${r.text}」，` +
+          `直播间里显示的是「${r.echo ?? ''}」。多半撞上了关键词规则。`,
+      )
+    } else {
+      const waited = r.waitedMs ? `${Math.round(r.waitedMs / 1000)} 秒` : '一段时间'
+      message.warning(
+        `房间 ${b.roomId} 疑似幽灵弹幕：「${r.text}」发送接口返回成功，` +
+          `但等了 ${waited} 也没在直播间广播里看到它。别人看不到这个账号的弹幕。`,
+      )
+    }
+  } catch (e) {
+    // 发送这步就失败（被禁言、发言过快）不是幽灵，是 B 站的明确拒绝，
+    // 后端已经把原话带回来了，原样显示——那句话正是操作者要看的。
+    message.error(e instanceof ApiError ? e.message : '自检失败')
+  } finally {
+    probing.value = null
+  }
+}
+
 async function toggleBinding(b: Binding, enabled: boolean) {
   try {
     await request('PATCH', `/api/bindings/${b.id}`, { enabled })
@@ -420,6 +470,16 @@ onMounted(() => void loadAccounts())
                 </NTag>
                 <NSwitch :value="b.enabled" @update:value="(v: boolean) => toggleBinding(b, v)" />
                 <span class="rule-count">{{ b.ruleCount }} 条规则</span>
+                <!-- 会真的往直播间发一条弹幕，所以放在删除左边、用普通
+                     文字按钮，不做成显眼的主操作。 -->
+                <NButton
+                  size="small"
+                  text
+                  :loading="probing === b.id"
+                  :disabled="probing !== null"
+                  @click="probeGhost(b)"
+                  >弹幕自检</NButton
+                >
                 <NButton size="small" text type="error" @click="confirmDeleteBinding(b)"
                   >删除</NButton
                 >
