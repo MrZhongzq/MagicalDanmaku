@@ -1127,3 +1127,39 @@ describe('Danmaku 页面：PK 播报子组件正确挂载并纳入 claimRule/dir
     expect(saveBtn()!.attributes('disabled')).toBeUndefined()
   })
 })
+
+describe('轮播规则的「仅直播中」开关', () => {
+  it('默认只在直播中轮播——主播下播后还在自说自话没有意义', () => {
+    expect(defaultBroadcastDraft().onlyWhenLive).toBe(true)
+  })
+
+  it('buildBroadcastRule 把开关带进规则', () => {
+    expect(buildBroadcastRule(defaultBroadcastDraft()).onlyWhenLive).toBe(true)
+    expect(
+      buildBroadcastRule({ ...defaultBroadcastDraft(), onlyWhenLive: false }).onlyWhenLive,
+    ).toBe(false)
+  })
+
+  it('parseBroadcastDraft 认得后端存下来的 false', () => {
+    const draft = parseBroadcastDraft({
+      name: '内置/轮播消息',
+      enabled: true,
+      schedule: '0 */10 * * * *',
+      onlyWhenLive: false,
+      do: [{ type: 'danmaku', template: ['喵'] }],
+    })
+    expect(draft.onlyWhenLive).toBe(false)
+  })
+
+  it('老规则没有这个字段时按开启处理，与后端默认值一致', () => {
+    // 后端 spec.Rule.OnlyWhenLive 是 *bool，未写即为 true。前端要是
+    // 按 false 回填，用户一进页面就会看到一个与实际行为相反的开关。
+    const draft = parseBroadcastDraft({
+      name: '内置/轮播消息',
+      enabled: true,
+      schedule: '0 */10 * * * *',
+      do: [{ type: 'danmaku', template: ['喵'] }],
+    })
+    expect(draft.onlyWhenLive).toBe(true)
+  })
+})

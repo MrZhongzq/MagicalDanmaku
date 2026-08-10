@@ -601,6 +601,8 @@ export const BROADCAST_RULE_NAME = '内置/轮播消息'
 
 export interface BroadcastDraft {
   enabled: boolean
+  /** 只在直播中轮播。默认开——主播下播后还在自说自话没有意义。 */
+  onlyWhenLive: boolean
   scheduleMode: ScheduleMode
   intervalMinutes: number
   cronExpr: string
@@ -611,6 +613,7 @@ export interface BroadcastDraft {
 export function defaultBroadcastDraft(): BroadcastDraft {
   return {
     enabled: true,
+    onlyWhenLive: true,
     scheduleMode: 'interval',
     intervalMinutes: 10,
     cronExpr: '0 */10 * * * *',
@@ -640,6 +643,7 @@ export function buildBroadcastRule(draft: BroadcastDraft): Rule {
     name: BROADCAST_RULE_NAME,
     enabled: draft.enabled,
     schedule: buildBroadcastSchedule(draft),
+    onlyWhenLive: draft.onlyWhenLive,
     do: [
       {
         type: 'danmaku',
@@ -655,6 +659,8 @@ export function parseBroadcastDraft(rule: Rule | null): BroadcastDraft {
   if (!rule) return draft
 
   draft.enabled = rule.enabled ?? true
+  // 后端 *bool 未写即为 true，这里必须 ?? true 而不是 ?? false。
+  draft.onlyWhenLive = rule.onlyWhenLive ?? true
   if (rule.schedule) {
     const m = INTERVAL_CRON_RE.exec(rule.schedule)
     if (m) {
@@ -1352,6 +1358,15 @@ function dismissPartialFailure() {
             表达式周期性触发（对应 spec.Rule 的 <code>schedule</code> 字段），
             不需要任何人进房或送礼。<code>on</code> 与 <code>schedule</code> 二选一，
             两个同时给后端会直接拒收，下面组装出的规则只会带 schedule。
+          </p>
+
+          <div class="row broadcast-only-live">
+            <NCheckbox v-model:checked="broadcastDraft.onlyWhenLive">只在直播中轮播</NCheckbox>
+          </div>
+          <p class="hint">
+            关掉之后，主播下播了也会继续按频率发——通常没有意义，除非你确实想在下播后
+            留话。只有<strong>确认未开播</strong>才会停；探测不到状态（比如网络抖动）时
+            照常发，不会因为拿不到状态就把机器人哑掉。
           </p>
 
           <h4>发送频率</h4>

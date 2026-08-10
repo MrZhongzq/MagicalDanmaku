@@ -36,10 +36,13 @@ type Room struct {
 // 存进数据库时 name 与 enabled 会被提到列上，JSONB 里不含这两个字段——
 // 同一个值存两处必然漂移。见 store/rule.go。
 type Rule struct {
-	Name          string     `yaml:"name"          json:"name,omitempty"`
-	Enabled       *bool      `yaml:"enabled"       json:"enabled,omitempty"` // 指针以区分「未写」与「写了 false」
-	On            []string   `yaml:"on"            json:"on,omitempty"`
-	Schedule      string     `yaml:"schedule"      json:"schedule,omitempty"`
+	Name     string   `yaml:"name"          json:"name,omitempty"`
+	Enabled  *bool    `yaml:"enabled"       json:"enabled,omitempty"` // 指针以区分「未写」与「写了 false」
+	On       []string `yaml:"on"            json:"on,omitempty"`
+	Schedule string   `yaml:"schedule"      json:"schedule,omitempty"`
+	// OnlyWhenLive 只对定时规则有意义，指针以区分「未写」与「写了 false」。
+	// 未写时默认为真——下播后还在轮播没有意义。
+	OnlyWhenLive  *bool      `yaml:"onlyWhenLive"  json:"onlyWhenLive,omitempty"`
 	When          *Condition `yaml:"when"          json:"when,omitempty"`
 	Aggregate     *Aggregate `yaml:"aggregate"     json:"aggregate,omitempty"`
 	Cooldown      Duration   `yaml:"cooldown"      json:"cooldown,omitempty"`

@@ -62,6 +62,17 @@ func (r Rule) ToRule() (rules.Rule, error) {
 		out.Enabled = *r.Enabled
 	}
 
+	// onlyWhenLive 只对定时规则有意义：事件驱动的规则没开播就收不到事件，
+	// 配了是无声的死配置，直接拒绝而不是静默忽略。
+	if r.OnlyWhenLive != nil && r.Schedule == "" {
+		return out, fmt.Errorf("onlyWhenLive 只能用在定时（schedule）规则上")
+	}
+	// 未写时默认为真：主播下播之后还在自说自话地轮播没有意义。
+	out.OnlyWhenLive = true
+	if r.OnlyWhenLive != nil {
+		out.OnlyWhenLive = *r.OnlyWhenLive
+	}
+
 	for _, name := range r.On {
 		t, ok := knownEventTypes[name]
 		if !ok {

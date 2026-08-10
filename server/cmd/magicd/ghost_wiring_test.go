@@ -96,3 +96,24 @@ func TestNewGhostDetectorCanBeDisabled(t *testing.T) {
 		t.Error("MAGICD_GHOST_DETECT=0 时应当返回 nil，表示不检测")
 	}
 }
+
+func TestShouldFireScheduled(t *testing.T) {
+	cases := []struct {
+		name         string
+		onlyWhenLive bool
+		liveOffline  bool
+		want         bool
+	}{
+		{"仅直播中 + 确认未开播 → 不触发", true, true, false},
+		{"仅直播中 + 未确认未开播 → 触发", true, false, true},
+		// 显式关掉开关的规则，下播了照样触发——这是用户主动选择的行为。
+		{"关掉开关 + 确认未开播 → 照常触发", false, true, true},
+		{"关掉开关 + 在播 → 触发", false, false, true},
+	}
+	for _, c := range cases {
+		if got := shouldFireScheduled(c.onlyWhenLive, c.liveOffline); got != c.want {
+			t.Errorf("%s: shouldFireScheduled(%v, %v) = %v，期望 %v",
+				c.name, c.onlyWhenLive, c.liveOffline, got, c.want)
+		}
+	}
+}

@@ -189,6 +189,15 @@ func (rt *roomRuntime) SendDanmaku(ctx context.Context, text string) error {
 	return err
 }
 
+// shouldFireScheduled 判断一条定时规则这一次该不该真的触发。
+//
+// offline 是「**确认**未开播」，探测失败与从未探测过都不落在这里——理由
+// 与 shouldSkipOfflineEvent 一致：拿不到状态不等于没开播，不能因为网络
+// 抖一下就把机器人哑掉。
+func shouldFireScheduled(onlyWhenLive, offline bool) bool {
+	return !(onlyWhenLive && offline)
+}
+
 // ghostProbeGrace 是探针在等待窗口之外多给的余量，覆盖发送本身的耗时
 // 与扫描循环的一个 tick。
 const ghostProbeGrace = 5 * time.Second
@@ -526,8 +535,15 @@ func assembleOne(
 	// 注册该绑定的定时规则。这一步失败与"规则非法"是不同性质的问题——
 	// 规则本身校验通过了，是调度器出了别的问题。
 	for _, r := range engine.ScheduledRules() {
-		name, eng := r.Name, engine
+		name, eng, onlyLive, rt := r.Name, engine, r.OnlyWhenLive, room
 		if err := sched.Add(r.Schedule, room.label+"/"+name, func() {
+			// 定时规则是独立于事件流的另一条触发路径，事件流上的
+			// shouldSkipOfflineEvent 管不到它——下播后轮播照发就是这么来的。
+			// rt.LiveOffline() 每次都要现读：心跳会异步改它，闭包外缓存
+			// 一次就等于把装配那一刻的状态钉死了。
+			if !shouldFireScheduled(onlyLive, rt.LiveOffline()) {
+				return
+			}
 			eng.FireScheduled(name)
 		}); err != nil {
 			return roomAssembly{}, err

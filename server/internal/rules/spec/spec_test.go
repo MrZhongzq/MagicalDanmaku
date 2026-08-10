@@ -468,3 +468,50 @@ func TestToRuleRejectsInvalidAggregateSolo(t *testing.T) {
 		t.Fatal("Solo.MinItems=0 应当在 ToRule 阶段报错")
 	}
 }
+
+func TestToRuleDefaultsOnlyWhenLiveToTrueForScheduledRules(t *testing.T) {
+	// 主播下播之后还在自说自话地轮播是没有意义的，所以未写时默认只在
+	// 直播中触发。
+	r, err := spec.Rule{
+		Name:     "轮播",
+		Schedule: "0 */3 * * * *",
+		Do:       []spec.Action{{Type: "log"}},
+	}.ToRule()
+	if err != nil {
+		t.Fatalf("ToRule 报错: %v", err)
+	}
+	if !r.OnlyWhenLive {
+		t.Error("未写 onlyWhenLive 时，定时规则应默认只在直播中触发")
+	}
+}
+
+func TestToRuleRespectsExplicitOnlyWhenLiveFalse(t *testing.T) {
+	no := false
+	r, err := spec.Rule{
+		Name:         "下播也要发",
+		Schedule:     "0 */3 * * * *",
+		OnlyWhenLive: &no,
+		Do:           []spec.Action{{Type: "log"}},
+	}.ToRule()
+	if err != nil {
+		t.Fatalf("ToRule 报错: %v", err)
+	}
+	if r.OnlyWhenLive {
+		t.Error("显式写 false 时应当下播后也照常触发")
+	}
+}
+
+func TestToRuleRejectsOnlyWhenLiveOnEventRules(t *testing.T) {
+	// 事件驱动的规则本来就只有开播时才有事件可收，配这个开关是无声的
+	// 死配置，和 Suppress 配在定时规则上是同一类问题。
+	yes := true
+	_, err := spec.Rule{
+		Name:         "进场欢迎",
+		On:           []string{"user_enter"},
+		OnlyWhenLive: &yes,
+		Do:           []spec.Action{{Type: "log"}},
+	}.ToRule()
+	if err == nil {
+		t.Error("事件驱动的规则配 onlyWhenLive 应当报错，而不是静默忽略")
+	}
+}

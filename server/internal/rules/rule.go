@@ -140,6 +140,18 @@ type Rule struct {
 	Cooldown      time.Duration  // 本规则最小触发间隔
 	CooldownGroup string         // 命名冷却组，可空
 
+	// OnlyWhenLive 为真时，本规则只在直播中触发。**只对定时（Schedule）
+	// 规则有意义**，事件驱动的规则配了会被 Validate 拒绝——没开播就没有
+	// 事件可收，那是个无声的死配置。
+	//
+	// 默认为真（见 spec.Rule.ToRule）：主播下播之后机器人还在自说自话地
+	// 轮播没有意义。想让某条定时规则下播后照发，显式写 false。
+	//
+	// 判定用的是「**确认**未开播」，探测失败不算——理由与事件流那条路
+	// 上的 shouldSkipOfflineEvent 完全一致：拿不到状态不等于没开播，不能
+	// 因为网络抖一下就把机器人哑掉。
+	OnlyWhenLive bool
+
 	// Suppress 列出本规则命中后要跳过的规则名。
 	//
 	// 典型场景：给某位舰长配了专属进房欢迎，就不该再触发通用进房欢迎，

@@ -125,6 +125,15 @@ export interface Rule {
   enabled?: boolean
   on?: string[]
   schedule?: string
+  /**
+   * `onlyWhenLive` 只对定时（`schedule`）规则有意义，事件驱动的规则配了
+   * 会被后端 422 拒收。
+   *
+   * 与 `enabled` 一样是 `boolean | undefined`：Go 侧是 `*bool`，**未写时
+   * 默认为 true**（下播后还在轮播没有意义）。因此回填时 `?? true`，
+   * 不是 `?? false`——否则一进页面就会看到一个与实际行为相反的开关。
+   */
+  onlyWhenLive?: boolean
   when?: Condition
   aggregate?: Aggregate
   cooldown?: Duration
