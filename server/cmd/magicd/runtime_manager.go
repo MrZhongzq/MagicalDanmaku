@@ -299,9 +299,9 @@ func (rm *runtimeManager) adoptLocked(ctx context.Context, asm roomAssembly) {
 			// 会被判成幽灵。
 			rm.settleEcho(rt, ev)
 
-			// 必须在进引擎之前丢：B 站对一次上舰会下发两个 CMD，两条都
+			// 必须在进引擎之前筛：B 站对一次上舰会下发两个 CMD，两条都
 			// 放进去就会被答谢两次（用户 08-10 报的问题）。
-			if rm.isDuplicateGuardBuy(rt, ev) {
+			if !rm.screenGuardBuy(rt, ev) {
 				continue
 			}
 
@@ -362,6 +362,40 @@ func (rm *runtimeManager) settleEcho(rt *roomRuntime, ev event.Event) {
 		return
 	}
 	rm.ghost.Observe(b.RoomID, b.Account.Session.UID, d.Text)
+}
+
+// screenGuardBuy 是上舰事件进规则引擎前的唯一一道闸：先留证据，再去重。
+//
+// 返回 false 表示这条应当被丢掉。
+//
+// **顺序不能反**：被丢掉的那条恰恰是 USER_TOAST_MSG，而它是两条广播里
+// 唯一带续费线索的（is_auto_renew、toast_msg）。诊断要是排在去重后面，
+// 那条永远不会被记下来，等于白做。把两步收进同一个函数就是为了让这个
+// 顺序有测试守着，而不是靠调用方记得先调哪个。
+func (rm *runtimeManager) screenGuardBuy(rt *roomRuntime, ev event.Event) bool {
+	if ev.Type != event.TypeGuardBuy {
+		return true
+	}
+	rm.logGuardRaw(rt, ev)
+	return !rm.isDuplicateGuardBuy(rt, ev)
+}
+
+// logGuardRaw 记录上舰消息的原始 JSON。
+//
+// **临时诊断**：现在去重保留的是先到的 GUARD_BUY（IsRenew 恒为 false），
+// 所以一律显示「开通」。要把「续费」判对，先得知道 B 站到底在这两个 CMD
+// 里给了哪些字段——activity_logs 只存归一化后的 detail，翻不到原始消息，
+// 而手上的 testdata 样本是早期抓的，GUARD_BUY 里没有任何能区分的字段。
+// 等真机上出现一次真实上舰、看清字段之后，这段就该换成正式的判定逻辑。
+//
+// 用 INFO 而不是 DEBUG：真机默认跑在 INFO，调成 DEBUG 会把整个事件流都
+// 刷出来。上舰是低频事件，这点日志量可以忽略。
+func (rm *runtimeManager) logGuardRaw(rt *roomRuntime, ev event.Event) {
+	if len(ev.Raw) == 0 {
+		return
+	}
+	rm.log.Info("上舰原始消息（诊断用，待定位续费判定）",
+		"binding", rt.label, "raw", string(ev.Raw))
 }
 
 // isDuplicateGuardBuy 报告这条上舰事件是不是同一次购买的第二次广播。

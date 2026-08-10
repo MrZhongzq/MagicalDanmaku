@@ -1,8 +1,11 @@
 package main
 
 import (
+	"context"
 	"io"
 	"log/slog"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -174,5 +177,66 @@ func TestIsDuplicateGuardBuyIsInertWithoutDedupe(t *testing.T) {
 	rm := &runtimeManager{log: testLogger()}
 	if rm.isDuplicateGuardBuy(newEchoTestRuntime(t), guardBuyEvent("111", "10086", 3, false)) {
 		t.Error("没有去重器时不该丢事件")
+	}
+}
+
+// capturingHandler 收集日志文本，供断言诊断有没有真的记下来。
+type capturingHandler struct {
+	mu    sync.Mutex
+	lines []string
+}
+
+func (h *capturingHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (h *capturingHandler) WithAttrs([]slog.Attr) slog.Handler       { return h }
+func (h *capturingHandler) WithGroup(string) slog.Handler            { return h }
+func (h *capturingHandler) Handle(_ context.Context, r slog.Record) error {
+	var sb strings.Builder
+	sb.WriteString(r.Message)
+	r.Attrs(func(a slog.Attr) bool {
+		sb.WriteString(" " + a.Key + "=" + a.Value.String())
+		return true
+	})
+	h.mu.Lock()
+	h.lines = append(h.lines, sb.String())
+	h.mu.Unlock()
+	return nil
+}
+func (h *capturingHandler) all() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]string{}, h.lines...)
+}
+
+func TestScreenGuardBuyLogsRawOfBothBroadcastsBeforeDeduping(t *testing.T) {
+	h := &capturingHandler{}
+	rm := &runtimeManager{
+		guardDedupe: guard.NewDedupe(guardDedupeWindow),
+		log:         slog.New(h),
+	}
+	rt := newEchoTestRuntime(t)
+
+	first := guardBuyEvent("111", "10086", 3, false)
+	first.Raw = []byte(`{"cmd":"GUARD_BUY","data":{"uid":10086}}`)
+	second := guardBuyEvent("111", "10086", 3, true)
+	second.Raw = []byte(`{"cmd":"USER_TOAST_MSG","data":{"uid":10086,"is_auto_renew":1}}`)
+
+	if !rm.screenGuardBuy(rt, first) {
+		t.Fatal("第一条应当放行")
+	}
+	if rm.screenGuardBuy(rt, second) {
+		t.Error("第二条是同一次上舰的重复广播，应当被丢掉")
+	}
+
+	// 关键：被丢掉的那条也必须留下 raw。诊断要是排在去重后面，
+	// USER_TOAST_MSG 就永远看不到了，而它恰恰是唯一带续费线索的那条。
+	joined := strings.Join(h.all(), "\n")
+	if !strings.Contains(joined, "GUARD_BUY") {
+		t.Error("没有记下 GUARD_BUY 的原始消息")
+	}
+	if !strings.Contains(joined, "USER_TOAST_MSG") {
+		t.Error("被去重丢掉的 USER_TOAST_MSG 也必须留下原始消息，否则诊断白做")
+	}
+	if !strings.Contains(joined, "is_auto_renew") {
+		t.Error("原始消息要完整，不能只记个 CMD 名")
 	}
 }
