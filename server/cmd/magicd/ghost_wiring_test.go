@@ -10,6 +10,7 @@ import (
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/connector/bilibili/auth"
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/event"
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/ghost"
+	"github.com/MrZhongzq/MagicalDanmaku/server/internal/guard"
 )
 
 // testLogger 返回一个丢弃输出的 logger，避免用例互相刷屏。
@@ -115,5 +116,63 @@ func TestShouldFireScheduled(t *testing.T) {
 			t.Errorf("%s: shouldFireScheduled(%v, %v) = %v，期望 %v",
 				c.name, c.onlyWhenLive, c.liveOffline, got, c.want)
 		}
+	}
+}
+
+// guardBuyEvent 造一条上舰事件。
+//
+// isRenew 必须能单独指定：同一次上舰的两条广播在这个字段上正好相反
+// （GUARD_BUY 给 false、USER_TOAST_MSG 给 true），这正是去重最容易踩的
+// 坑——把它放进判定键，两条就永远不相等，去重完全失效。
+func guardBuyEvent(roomID, uid string, level int, isRenew bool) event.Event {
+	return event.Event{
+		RoomID: roomID,
+		Type:   event.TypeGuardBuy,
+		Payload: event.GuardBuy{
+			User:       event.User{UID: uid},
+			GuardLevel: level,
+			GuardName:  "舰长",
+			IsRenew:    isRenew,
+		},
+	}
+}
+
+func TestIsDuplicateGuardBuyDropsSecondBroadcastOfSameBuy(t *testing.T) {
+	rm := &runtimeManager{
+		guardDedupe: guard.NewDedupe(guardDedupeWindow),
+		log:         testLogger(),
+	}
+	rt := newEchoTestRuntime(t) // 账号 uid 42、房间 111
+
+	// B 站对一次上舰下发 GUARD_BUY 与 USER_TOAST_MSG 两条，归一化后内容
+	// 相同，只有 IsRenew 相反——所以判定键里绝不能带 IsRenew。
+	if rm.isDuplicateGuardBuy(rt, guardBuyEvent("111", "10086", 3, false)) {
+		t.Fatal("第一条不该被当成重复")
+	}
+	if !rm.isDuplicateGuardBuy(rt, guardBuyEvent("111", "10086", 3, true)) {
+		t.Error("同一次上舰的第二次广播应当被判成重复并丢掉")
+	}
+}
+
+func TestIsDuplicateGuardBuyIgnoresOtherRooms(t *testing.T) {
+	rm := &runtimeManager{
+		guardDedupe: guard.NewDedupe(guardDedupeWindow),
+		log:         testLogger(),
+	}
+	rt := newEchoTestRuntime(t)
+
+	// PK 期间对面房间的事件会合流进同一个通道，不能拿来占本房间的坑。
+	if rm.isDuplicateGuardBuy(rt, guardBuyEvent("999", "10086", 3, false)) {
+		t.Fatal("别的房间的事件不该走本房间的去重")
+	}
+	if rm.isDuplicateGuardBuy(rt, guardBuyEvent("111", "10086", 3, false)) {
+		t.Error("本房间的第一条被对面房间的事件顶掉了")
+	}
+}
+
+func TestIsDuplicateGuardBuyIsInertWithoutDedupe(t *testing.T) {
+	rm := &runtimeManager{log: testLogger()}
+	if rm.isDuplicateGuardBuy(newEchoTestRuntime(t), guardBuyEvent("111", "10086", 3, false)) {
+		t.Error("没有去重器时不该丢事件")
 	}
 }

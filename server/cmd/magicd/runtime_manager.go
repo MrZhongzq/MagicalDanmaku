@@ -13,6 +13,7 @@ import (
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/connector"
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/event"
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/ghost"
+	"github.com/MrZhongzq/MagicalDanmaku/server/internal/guard"
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/httpapi"
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/logging"
 	"github.com/MrZhongzq/MagicalDanmaku/server/internal/scheduler"
@@ -92,6 +93,10 @@ type runtimeManager struct {
 	// 定时循环统一驱动，没必要按绑定各建一个。可能为 nil（检测关闭）。
 	ghost *ghost.Detector
 
+	// guardDedupe 把同一次上舰的两次广播收敛成一条，全部绑定共用一个
+	// （判定键里带房间号，互不干扰）。
+	guardDedupe *guard.Dedupe
+
 	// buildAccount 装配单个账号运行时，默认是 buildAccountRuntime（含一次
 	// 真实的 RefreshNav 网络请求）。抽成字段而不是直接调用包级函数，
 	// 只是为了让 ensureAccountRuntime 的"命中缓存但 Cookie 已经在数据库
@@ -131,6 +136,7 @@ func newRuntimeManager(
 		accounts:     accounts,
 		live:         make(map[int64]*liveBinding),
 		ghost:        detector,
+		guardDedupe:  guard.NewDedupe(guardDedupeWindow),
 		buildAccount: buildAccountRuntime,
 	}
 }
@@ -293,6 +299,12 @@ func (rm *runtimeManager) adoptLocked(ctx context.Context, asm roomAssembly) {
 			// 会被判成幽灵。
 			rm.settleEcho(rt, ev)
 
+			// 必须在进引擎之前丢：B 站对一次上舰会下发两个 CMD，两条都
+			// 放进去就会被答谢两次（用户 08-10 报的问题）。
+			if rm.isDuplicateGuardBuy(rt, ev) {
+				continue
+			}
+
 			if shouldSkipOfflineEvent(rt.LiveOffline(), ev.Type) {
 				continue
 			}
@@ -350,6 +362,30 @@ func (rm *runtimeManager) settleEcho(rt *roomRuntime, ev event.Event) {
 		return
 	}
 	rm.ghost.Observe(b.RoomID, b.Account.Session.UID, d.Text)
+}
+
+// isDuplicateGuardBuy 报告这条上舰事件是不是同一次购买的第二次广播。
+//
+// 只看本房间的事件：PK 期间对面房间的事件会合流进同一个通道，理由与
+// settleEcho 里那道房间号过滤一致。
+func (rm *runtimeManager) isDuplicateGuardBuy(rt *roomRuntime, ev event.Event) bool {
+	if rm.guardDedupe == nil || ev.Type != event.TypeGuardBuy {
+		return false
+	}
+	b := rt.binding
+	if b == nil || ev.RoomID != b.RoomID {
+		return false
+	}
+	g, ok := ev.Payload.(event.GuardBuy)
+	if !ok || g.User.UID == "" {
+		return false
+	}
+	if rm.guardDedupe.Accept(b.RoomID, g.User.UID, g.GuardLevel, time.Now()) {
+		return false
+	}
+	rm.log.Debug("丢弃重复的上舰广播",
+		"binding", rt.label, "uid", g.User.UID, "guard", g.GuardName)
+	return true
 }
 
 // StopBinding 反向拆除 bindingID 的运行时：停连接、注销定时任务、结算
@@ -528,6 +564,13 @@ func shouldSkipOfflineEvent(offline bool, evType event.Type) bool {
 // ghostSweepInterval 是幽灵检测的扫描间隔。判定精度只取决于等待窗口，
 // 这里扫得太密只是空转。
 const ghostSweepInterval = time.Second
+
+// guardDedupeWindow 是上舰去重的窗口。
+//
+// 真机数据里同一次上舰的两次广播相隔 0.3~0.6 秒，10 秒给足余量；同一个
+// 人在 10 秒内买两次同等级大航海不是现实场景，即便真发生了，只答谢一次
+// 也比答谢两次得体。
+const guardDedupeWindow = 10 * time.Second
 
 // runGhostSweeper 定时驱动幽灵检测器的判定，直到 ctx 取消。
 //
