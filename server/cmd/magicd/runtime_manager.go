@@ -93,9 +93,9 @@ type runtimeManager struct {
 	// 定时循环统一驱动，没必要按绑定各建一个。可能为 nil（检测关闭）。
 	ghost *ghost.Detector
 
-	// guardDedupe 把同一次上舰的两次广播收敛成一条，全部绑定共用一个
-	// （判定键里带房间号，互不干扰）。
-	guardDedupe *guard.Dedupe
+	// guardMerger 把同一次上舰的两次广播收敛成一条，并留下带 op_type 的
+	// 那条。全部绑定共用一个（判定键里带房间号，互不干扰）。
+	guardMerger *guard.Merger
 
 	// buildAccount 装配单个账号运行时，默认是 buildAccountRuntime（含一次
 	// 真实的 RefreshNav 网络请求）。抽成字段而不是直接调用包级函数，
@@ -136,7 +136,7 @@ func newRuntimeManager(
 		accounts:     accounts,
 		live:         make(map[int64]*liveBinding),
 		ghost:        detector,
-		guardDedupe:  guard.NewDedupe(guardDedupeWindow),
+		guardMerger:  guard.NewMerger(guardMergeWait, guardMergeSuppress),
 		buildAccount: buildAccountRuntime,
 	}
 }
@@ -301,7 +301,8 @@ func (rm *runtimeManager) adoptLocked(ctx context.Context, asm roomAssembly) {
 
 			// 必须在进引擎之前筛：B 站对一次上舰会下发两个 CMD，两条都
 			// 放进去就会被答谢两次（用户 08-10 报的问题）。
-			if !rm.screenGuardBuy(rt, ev) {
+			ev, ok := rm.screenGuardBuy(bID, rt, ev)
+			if !ok {
 				continue
 			}
 
@@ -364,62 +365,66 @@ func (rm *runtimeManager) settleEcho(rt *roomRuntime, ev event.Event) {
 	rm.ghost.Observe(b.RoomID, b.Account.Session.UID, d.Text)
 }
 
-// screenGuardBuy 是上舰事件进规则引擎前的唯一一道闸：先留证据，再去重。
+// screenGuardBuy 是上舰事件进规则引擎前的唯一一道闸。
 //
-// 返回 false 表示这条应当被丢掉。
+// 返回要真正送进引擎的那条事件与要不要送。**返回的可能不是传进来的
+// 那条**：B 站对同一次上舰会先后下发 GUARD_BUY 与 USER_TOAST_MSG，只有
+// 后者带 op_type（1 开通 / 2 续费），所以收敛器会押着先到的 GUARD_BUY
+// 等一下，等到了就换成信息更全的那条（见 internal/guard）。
 //
-// **顺序不能反**：被丢掉的那条恰恰是 USER_TOAST_MSG，而它是两条广播里
-// 唯一带续费线索的（is_auto_renew、toast_msg）。诊断要是排在去重后面，
-// 那条永远不会被记下来，等于白做。把两步收进同一个函数就是为了让这个
-// 顺序有测试守着，而不是靠调用方记得先调哪个。
-func (rm *runtimeManager) screenGuardBuy(rt *roomRuntime, ev event.Event) bool {
-	if ev.Type != event.TypeGuardBuy {
-		return true
-	}
-	rm.logGuardRaw(rt, ev)
-	return !rm.isDuplicateGuardBuy(rt, ev)
-}
-
-// logGuardRaw 记录上舰消息的原始 JSON。
-//
-// **临时诊断**：现在去重保留的是先到的 GUARD_BUY（IsRenew 恒为 false），
-// 所以一律显示「开通」。要把「续费」判对，先得知道 B 站到底在这两个 CMD
-// 里给了哪些字段——activity_logs 只存归一化后的 detail，翻不到原始消息，
-// 而手上的 testdata 样本是早期抓的，GUARD_BUY 里没有任何能区分的字段。
-// 等真机上出现一次真实上舰、看清字段之后，这段就该换成正式的判定逻辑。
-//
-// 用 INFO 而不是 DEBUG：真机默认跑在 INFO，调成 DEBUG 会把整个事件流都
-// 刷出来。上舰是低频事件，这点日志量可以忽略。
-func (rm *runtimeManager) logGuardRaw(rt *roomRuntime, ev event.Event) {
-	if len(ev.Raw) == 0 {
-		return
-	}
-	rm.log.Info("上舰原始消息（诊断用，待定位续费判定）",
-		"binding", rt.label, "raw", string(ev.Raw))
-}
-
-// isDuplicateGuardBuy 报告这条上舰事件是不是同一次购买的第二次广播。
-//
-// 只看本房间的事件：PK 期间对面房间的事件会合流进同一个通道，理由与
+// 只处理本房间的事件：PK 期间对面房间的事件会合流进同一个通道，理由与
 // settleEcho 里那道房间号过滤一致。
-func (rm *runtimeManager) isDuplicateGuardBuy(rt *roomRuntime, ev event.Event) bool {
-	if rm.guardDedupe == nil || ev.Type != event.TypeGuardBuy {
-		return false
+func (rm *runtimeManager) screenGuardBuy(bindingID int64, rt *roomRuntime, ev event.Event) (event.Event, bool) {
+	if rm.guardMerger == nil || ev.Type != event.TypeGuardBuy {
+		return ev, true
 	}
 	b := rt.binding
 	if b == nil || ev.RoomID != b.RoomID {
-		return false
+		return ev, true
 	}
-	g, ok := ev.Payload.(event.GuardBuy)
-	if !ok || g.User.UID == "" {
-		return false
+	return rm.guardMerger.Offer(bindingID, ev, time.Now())
+}
+
+// runGuardSweeper 定时把「等不到 USER_TOAST_MSG」的上舰事件交出来，
+// 直到 ctx 取消。
+//
+// 收敛器本身不起 goroutine、不看时钟（见 internal/guard），推进它是调用
+// 方的事，理由与 runGhostSweeper 一致。
+func (rm *runtimeManager) runGuardSweeper(ctx context.Context) {
+	if rm.guardMerger == nil {
+		return
 	}
-	if rm.guardDedupe.Accept(b.RoomID, g.User.UID, g.GuardLevel, time.Now()) {
-		return false
+	t := time.NewTicker(guardSweepInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-t.C:
+			for _, s := range rm.guardMerger.Sweep(now) {
+				rm.dispatchSettledGuard(s)
+			}
+		}
 	}
-	rm.log.Debug("丢弃重复的上舰广播",
-		"binding", rt.label, "uid", g.User.UID, "guard", g.GuardName)
-	return true
+}
+
+// dispatchSettledGuard 把一条等够了的上舰事件送进它所属绑定的引擎。
+//
+// 不重复事件分发循环里的 shouldSkipOfflineEvent：那道判断只掐高能榜与
+// 进房两类，上舰从来不在其中，在这里再写一遍是死代码。
+//
+// 绑定可能在等待的这两秒里被停用/删掉——找不到就放弃，不是错误。
+func (rm *runtimeManager) dispatchSettledGuard(s guard.Settled) {
+	rm.mu.Lock()
+	lb, ok := rm.live[s.Owner]
+	rm.mu.Unlock()
+	if !ok || lb.room == nil {
+		return
+	}
+	lb.room.Engine().Handle(s.Event)
+	if rm.api != nil {
+		rm.api.Publish(s.Owner, s.Event)
+	}
 }
 
 // StopBinding 反向拆除 bindingID 的运行时：停连接、注销定时任务、结算
@@ -599,12 +604,23 @@ func shouldSkipOfflineEvent(offline bool, evType event.Type) bool {
 // 这里扫得太密只是空转。
 const ghostSweepInterval = time.Second
 
-// guardDedupeWindow 是上舰去重的窗口。
+// guardSweepInterval 是上舰收敛器的扫描间隔。答谢时刻取决于
+// guardMergeWait，扫得比它密一档即可，再密只是空转。
+const guardSweepInterval = 500 * time.Millisecond
+
+// guardMergeWait 是上舰答谢等待「带 op_type 那条广播」的最长时间。
 //
-// 真机数据里同一次上舰的两次广播相隔 0.3~0.6 秒，10 秒给足余量；同一个
-// 人在 10 秒内买两次同等级大航海不是现实场景，即便真发生了，只答谢一次
-// 也比答谢两次得体。
-const guardDedupeWindow = 10 * time.Second
+// 真机数据里 GUARD_BUY 与 USER_TOAST_MSG 相隔 0.3~0.6 秒，2 秒给足余量。
+// 常态下并不会真的等满：带 op_type 的那条一到就立刻放行，答谢时刻与
+// 原来先到先得几乎一样。
+const guardMergeWait = 2 * time.Second
+
+// guardMergeSuppress 是一次上舰放行之后继续压制其余广播的时长。
+//
+// 比 guardMergeWait 长得多：等待拖慢答谢所以要短，压制只是防重复所以
+// 可以给足余量。同一个人在 10 秒内买两次同等级大航海不是现实场景，
+// 即便真发生了，只答谢一次也比答谢两次得体。
+const guardMergeSuppress = 10 * time.Second
 
 // runGhostSweeper 定时驱动幽灵检测器的判定，直到 ctx 取消。
 //

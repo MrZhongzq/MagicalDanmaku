@@ -58,6 +58,15 @@ type GuardBuy struct {
 	Count      int    // 购买月数
 	Price      int64  // 单位金瓜子
 	IsRenew    bool   // true 为续费，false 为新购
+	// RenewKnown 表示 IsRenew 是真的读出来的，还是只是缺省值。
+	//
+	// B 站对**同一次购买**会先后下发 GUARD_BUY 与 USER_TOAST_MSG，只有
+	// 后者带 op_type（1 开通 / 2 续费），前者两种情况下字段完全一样
+	// （2026-08-22 真机抓包对照过，连 price 都是同一个 198000，而续费
+	// 实际扣的是 168000）。所以 GUARD_BUY 只能报「不知道」——把「不知道」
+	// 和「确实是新购」在数据结构上分开，下游才有依据在两条广播里挑出
+	// 真正有信息的那条，而不是先到先得。
+	RenewKnown bool
 }
 
 // SuperChat 是一条醒目留言。

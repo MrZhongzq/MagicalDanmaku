@@ -49,17 +49,31 @@ func mapGuardBuy(ctx Context, raw json.RawMessage) ([]event.Event, error) {
 		GuardName:  name,
 		Count:      int(getInt64(data, "num")),
 		Price:      getInt64(data, "price"),
+		// GUARD_BUY 没有任何能区分开通与续费的字段：2026-08-22 真机上让
+		// 同一个账号先开通再续费，两次的 GUARD_BUY 逐字段一致，连 price
+		// 都同样是 198000（续费实际扣 168000）。所以这里只能报「不知道」。
 		IsRenew:    false,
+		RenewKnown: false,
 	}
 
 	ts := timeFromUnixSec(getInt64(data, "start_time"))
 	return []event.Event{NewEvent(ctx, event.TypeGuardBuy, ts, g, raw)}, nil
 }
 
-// mapUserToastMsg 解析大航海续费消息。
+// toastOpTypeRenew 是 USER_TOAST_MSG.op_type 里代表「续费」的取值。
 //
-// USER_TOAST_MSG 与 GUARD_BUY 描述同一类业务动作，归一化为同一事件类型，
-// 用 IsRenew 区分新购与续费。
+// 取值含义由真机成对抓包确定（2026-08-22，同一账号在同一房间先开通后
+// 续费）：op_type=1 的那条 toast_msg 写的是「开通了舰长」，op_type=2 的
+// 那条写的是「续费了舰长」。不按 toast_msg 的文案判，是因为那是给人看的
+// 展示文本，B 站随时可以改措辞；op_type 是枚举。
+const toastOpTypeRenew = 2
+
+// mapUserToastMsg 解析大航海开通/续费消息。
+//
+// USER_TOAST_MSG 与 GUARD_BUY 描述的是**同一次购买**（不是「一个新购一个
+// 续费」），归一化为同一事件类型。这里曾经把 IsRenew 写死成 true，前提是
+// 「USER_TOAST_MSG 就是续费消息」——真机数据证伪了这个前提，开通时这条
+// 照样会来。真正的判据是 op_type。
 func mapUserToastMsg(ctx Context, raw json.RawMessage) ([]event.Event, error) {
 	data, err := unmarshalData(raw, "USER_TOAST_MSG")
 	if err != nil {
@@ -83,7 +97,8 @@ func mapUserToastMsg(ctx Context, raw json.RawMessage) ([]event.Event, error) {
 		GuardName:  name,
 		Count:      int(getInt64(data, "num")),
 		Price:      getInt64(data, "price"),
-		IsRenew:    true,
+		IsRenew:    getInt64(data, "op_type") == toastOpTypeRenew,
+		RenewKnown: true,
 	}
 
 	ts := timeFromUnixSec(getInt64(data, "start_time"))

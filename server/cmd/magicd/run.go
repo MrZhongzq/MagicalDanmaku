@@ -750,6 +750,11 @@ func runRun(args []string) error {
 			rm.runGhostSweeper(ctx)
 		}()
 	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		rm.runGuardSweeper(ctx)
+	}()
 	if api != nil {
 		api.SetBindingLifecycle(rm)
 		// 账号参数（发送间隔/字数上限）保存后热传播给运行中的绑定

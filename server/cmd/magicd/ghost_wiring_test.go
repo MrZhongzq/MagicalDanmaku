@@ -1,11 +1,8 @@
 package main
 
 import (
-	"context"
 	"io"
 	"log/slog"
-	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -124,119 +121,101 @@ func TestShouldFireScheduled(t *testing.T) {
 
 // guardBuyEvent 造一条上舰事件。
 //
-// isRenew 必须能单独指定：同一次上舰的两条广播在这个字段上正好相反
-// （GUARD_BUY 给 false、USER_TOAST_MSG 给 true），这正是去重最容易踩的
-// 坑——把它放进判定键，两条就永远不相等，去重完全失效。
-func guardBuyEvent(roomID, uid string, level int, isRenew bool) event.Event {
+// renewKnown 是真机上区分两条广播的那个点：GUARD_BUY 没有 op_type，
+// USER_TOAST_MSG 有。isRenew 必须能单独指定——同一次上舰的两条广播在
+// 这个字段上正好相反，把它放进判定键，两条就永远不相等，收敛完全失效。
+func guardBuyEvent(roomID, uid string, level int, renewKnown, isRenew bool, raw string) event.Event {
 	return event.Event{
 		RoomID: roomID,
 		Type:   event.TypeGuardBuy,
+		Raw:    []byte(raw),
 		Payload: event.GuardBuy{
 			User:       event.User{UID: uid},
 			GuardLevel: level,
 			GuardName:  "舰长",
 			IsRenew:    isRenew,
+			RenewKnown: renewKnown,
 		},
 	}
 }
 
-func TestIsDuplicateGuardBuyDropsSecondBroadcastOfSameBuy(t *testing.T) {
+// TestScreenGuardBuyPrefersToastOverGuardBuy 钉住这道闸交给引擎的是
+// **带 op_type 的那条**，而不是先到的那条。
+//
+// 真机时序（2026-08-22 铃七直播间）：GUARD_BUY 先到，0.46 秒后
+// USER_TOAST_MSG 才到，只有后者带 op_type。原来先到先得，于是续费一律
+// 被说成「开通」。
+func TestScreenGuardBuyPrefersToastOverGuardBuy(t *testing.T) {
 	rm := &runtimeManager{
-		guardDedupe: guard.NewDedupe(guardDedupeWindow),
+		guardMerger: guard.NewMerger(guardMergeWait, guardMergeSuppress),
 		log:         testLogger(),
 	}
 	rt := newEchoTestRuntime(t) // 账号 uid 42、房间 111
 
-	// B 站对一次上舰下发 GUARD_BUY 与 USER_TOAST_MSG 两条，归一化后内容
-	// 相同，只有 IsRenew 相反——所以判定键里绝不能带 IsRenew。
-	if rm.isDuplicateGuardBuy(rt, guardBuyEvent("111", "10086", 3, false)) {
-		t.Fatal("第一条不该被当成重复")
+	first := guardBuyEvent("111", "10086", 3, false, false, "GUARD_BUY")
+	if _, ok := rm.screenGuardBuy(7, rt, first); ok {
+		t.Fatal("没有 op_type 的那条不该立刻放行——要等一下更全的那条")
 	}
-	if !rm.isDuplicateGuardBuy(rt, guardBuyEvent("111", "10086", 3, true)) {
-		t.Error("同一次上舰的第二次广播应当被判成重复并丢掉")
+
+	second := guardBuyEvent("111", "10086", 3, true, true, "USER_TOAST_MSG")
+	got, ok := rm.screenGuardBuy(7, rt, second)
+	if !ok {
+		t.Fatal("带 op_type 的那条应当立刻放行")
+	}
+	if string(got.Raw) != "USER_TOAST_MSG" {
+		t.Errorf("放行的是 %q，期望 USER_TOAST_MSG——放行了没有 op_type 的那条，"+
+			"续费就会被说成开通", got.Raw)
+	}
+	if !got.Payload.(event.GuardBuy).IsRenew {
+		t.Error("放行的那条应当带着续费结论")
 	}
 }
 
-func TestIsDuplicateGuardBuyIgnoresOtherRooms(t *testing.T) {
+// TestScreenGuardBuyIgnoresOtherRooms PK 期间对面房间的事件会合流进同一个
+// 通道，不能拿来占本房间的坑，也不该被押进缓冲。
+func TestScreenGuardBuyIgnoresOtherRooms(t *testing.T) {
 	rm := &runtimeManager{
-		guardDedupe: guard.NewDedupe(guardDedupeWindow),
+		guardMerger: guard.NewMerger(guardMergeWait, guardMergeSuppress),
 		log:         testLogger(),
 	}
 	rt := newEchoTestRuntime(t)
 
-	// PK 期间对面房间的事件会合流进同一个通道，不能拿来占本房间的坑。
-	if rm.isDuplicateGuardBuy(rt, guardBuyEvent("999", "10086", 3, false)) {
-		t.Fatal("别的房间的事件不该走本房间的去重")
+	if _, ok := rm.screenGuardBuy(7, rt, guardBuyEvent("999", "10086", 3, false, false, "对面")); !ok {
+		t.Fatal("别的房间的事件应当原样放行，不走本房间的收敛")
 	}
-	if rm.isDuplicateGuardBuy(rt, guardBuyEvent("111", "10086", 3, false)) {
-		t.Error("本房间的第一条被对面房间的事件顶掉了")
+	if _, ok := rm.screenGuardBuy(7, rt, guardBuyEvent("111", "10086", 3, true, false, "我方")); !ok {
+		t.Error("本房间的事件被对面房间的事件顶掉了")
 	}
 }
 
-func TestIsDuplicateGuardBuyIsInertWithoutDedupe(t *testing.T) {
+// TestScreenGuardBuyIsInertWithoutMerger 没有收敛器时必须原样放行，
+// 不能把上舰答谢整个吞掉。
+func TestScreenGuardBuyIsInertWithoutMerger(t *testing.T) {
 	rm := &runtimeManager{log: testLogger()}
-	if rm.isDuplicateGuardBuy(newEchoTestRuntime(t), guardBuyEvent("111", "10086", 3, false)) {
-		t.Error("没有去重器时不该丢事件")
+	ev := guardBuyEvent("111", "10086", 3, false, false, "GUARD_BUY")
+	got, ok := rm.screenGuardBuy(7, newEchoTestRuntime(t), ev)
+	if !ok {
+		t.Fatal("没有收敛器时不该丢事件")
+	}
+	if string(got.Raw) != "GUARD_BUY" {
+		t.Errorf("应当原样返回，实际 Raw = %q", got.Raw)
 	}
 }
 
-// capturingHandler 收集日志文本，供断言诊断有没有真的记下来。
-type capturingHandler struct {
-	mu    sync.Mutex
-	lines []string
-}
-
-func (h *capturingHandler) Enabled(context.Context, slog.Level) bool { return true }
-func (h *capturingHandler) WithAttrs([]slog.Attr) slog.Handler       { return h }
-func (h *capturingHandler) WithGroup(string) slog.Handler            { return h }
-func (h *capturingHandler) Handle(_ context.Context, r slog.Record) error {
-	var sb strings.Builder
-	sb.WriteString(r.Message)
-	r.Attrs(func(a slog.Attr) bool {
-		sb.WriteString(" " + a.Key + "=" + a.Value.String())
-		return true
-	})
-	h.mu.Lock()
-	h.lines = append(h.lines, sb.String())
-	h.mu.Unlock()
-	return nil
-}
-func (h *capturingHandler) all() []string {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return append([]string{}, h.lines...)
-}
-
-func TestScreenGuardBuyLogsRawOfBothBroadcastsBeforeDeduping(t *testing.T) {
-	h := &capturingHandler{}
+// TestNonGuardEventPassesScreenUnchanged 非上舰事件必须原样立刻放行——
+// 这道闸挡在全部事件的必经之路上，误伤面是整个事件流。
+func TestNonGuardEventPassesScreenUnchanged(t *testing.T) {
 	rm := &runtimeManager{
-		guardDedupe: guard.NewDedupe(guardDedupeWindow),
-		log:         slog.New(h),
+		guardMerger: guard.NewMerger(guardMergeWait, guardMergeSuppress),
+		log:         testLogger(),
 	}
-	rt := newEchoTestRuntime(t)
-
-	first := guardBuyEvent("111", "10086", 3, false)
-	first.Raw = []byte(`{"cmd":"GUARD_BUY","data":{"uid":10086}}`)
-	second := guardBuyEvent("111", "10086", 3, true)
-	second.Raw = []byte(`{"cmd":"USER_TOAST_MSG","data":{"uid":10086,"is_auto_renew":1}}`)
-
-	if !rm.screenGuardBuy(rt, first) {
-		t.Fatal("第一条应当放行")
+	ev := event.Event{
+		RoomID:  "111",
+		Type:    event.TypeDanmaku,
+		Payload: event.Danmaku{User: event.User{UID: "10086"}, Text: "你好"},
 	}
-	if rm.screenGuardBuy(rt, second) {
-		t.Error("第二条是同一次上舰的重复广播，应当被丢掉")
-	}
-
-	// 关键：被丢掉的那条也必须留下 raw。诊断要是排在去重后面，
-	// USER_TOAST_MSG 就永远看不到了，而它恰恰是唯一带续费线索的那条。
-	joined := strings.Join(h.all(), "\n")
-	if !strings.Contains(joined, "GUARD_BUY") {
-		t.Error("没有记下 GUARD_BUY 的原始消息")
-	}
-	if !strings.Contains(joined, "USER_TOAST_MSG") {
-		t.Error("被去重丢掉的 USER_TOAST_MSG 也必须留下原始消息，否则诊断白做")
-	}
-	if !strings.Contains(joined, "is_auto_renew") {
-		t.Error("原始消息要完整，不能只记个 CMD 名")
+	got, ok := rm.screenGuardBuy(7, newEchoTestRuntime(t), ev)
+	if !ok || got.Type != event.TypeDanmaku {
+		t.Errorf("非上舰事件应当原样放行，实际 ok=%v type=%s", ok, got.Type)
 	}
 }
