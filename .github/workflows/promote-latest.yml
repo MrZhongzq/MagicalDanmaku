@@ -1,0 +1,52 @@
+name: 移动 latest 标签
+
+# 把 ghcr.io/mrzhongzq/magicd:latest 指向某个已发布的版本。
+#
+# 为什么单独开一个工作流，而不是去掉 .goreleaser.yaml 里 latest manifest 的
+# skip_push: auto——那条 skip 拦的是「发一个预发布就自动把 latest 指过去」，
+# 去掉它以后，正式版发布之后再发一个 alpha，latest 会**倒退**回预发布，而
+# docker-compose.yml 默认拉的正是 latest。策略要留着，只是允许在明确知道
+# 自己在做什么的时候手动挪一次。
+#
+# 用法：Actions → 移动 latest 标签 → Run workflow，填 Docker 标签
+# （**不带 v 前缀**，如 7.0.0-alpha5；GitHub Release 的 tag 才带 v）。
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "要指向的 Docker 标签，不带 v 前缀（如 7.0.0-alpha5）"
+        required: true
+        type: string
+
+permissions:
+  packages: write
+
+jobs:
+  promote:
+    name: 移动 latest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: docker/setup-buildx-action@v3
+
+      - name: 登录 GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # 先确认来源标签真的存在。不做这一步的话，写错标签会在下一步报一个
+      # 看不出所以然的错，而不是「你要指的那个版本根本没发布过」。
+      - name: 确认来源标签存在
+        run: docker buildx imagetools inspect "ghcr.io/mrzhongzq/magicd:${{ inputs.tag }}"
+
+      # imagetools create 复制的是 manifest list 本身，amd64/arm64 两个架构
+      # 一起带过去，不需要把镜像拉下来再推。
+      - name: 指向 latest
+        run: |
+          docker buildx imagetools create \
+            -t "ghcr.io/mrzhongzq/magicd:latest" \
+            "ghcr.io/mrzhongzq/magicd:${{ inputs.tag }}"
+
+      - name: 复核结果
+        run: docker buildx imagetools inspect "ghcr.io/mrzhongzq/magicd:latest"
