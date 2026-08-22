@@ -198,6 +198,27 @@ func shouldFireScheduled(onlyWhenLive, offline bool) bool {
 	return !(onlyWhenLive && offline)
 }
 
+// scheduledRuleJob 造一条定时规则注册进调度器时要跑的函数。
+//
+// **定时规则有两处注册，都必须走这一个构造器**：启动装配（assembleOne）
+// 与热重载（roomRuntime.Reload）。当初「只在直播中轮播」这个开关只补进
+// 了前者，而 Reload 开头会 RemoveByPrefix 把带守卫的条目整组删掉、换上
+// 自己那份裸闭包——于是只要在 WebUI 保存过一次规则，开关就永久失效直到
+// 进程重启（用户 08-22 报的问题，真机上从 08-16 保存规则起一直发到被
+// 发现）。往调度器里塞闭包的地方多一处，就多一次把守卫漏掉的机会。
+//
+// rt.LiveOffline() 每次都要现读：心跳会异步改它，闭包外缓存一次就等于
+// 把注册那一刻的状态钉死了。
+func scheduledRuleJob(rt *roomRuntime, eng *rules.Engine, r rules.Rule) func() {
+	name, onlyLive := r.Name, r.OnlyWhenLive
+	return func() {
+		if !shouldFireScheduled(onlyLive, rt.LiveOffline()) {
+			return
+		}
+		eng.FireScheduled(name)
+	}
+}
+
 // ghostProbeGrace 是探针在等待窗口之外多给的余量，覆盖发送本身的耗时
 // 与扫描循环的一个 tick。
 const ghostProbeGrace = 5 * time.Second
@@ -384,14 +405,11 @@ func (rt *roomRuntime) Reload(ctx context.Context) error {
 	// 同一条规则一天触发两次
 	rt.sched.RemoveByPrefix(rt.label + "/")
 	for _, r := range next.ScheduledRules() {
-		name, eng := r.Name, next
-		if err := rt.sched.Add(r.Schedule, rt.label+"/"+name, func() {
-			eng.FireScheduled(name)
-		}); err != nil {
+		if err := rt.sched.Add(r.Schedule, rt.label+"/"+r.Name, scheduledRuleJob(rt, next, r)); err != nil {
 			// 引擎已经换上去了，定时规则没挂上不该让整次重载显示为失败——
 			// 弹幕规则是生效的。记日志，让用户从日志里看到这一条
 			rt.log.Error("重载后注册定时规则失败",
-				"binding", rt.label, "rule", name, "err", err)
+				"binding", rt.label, "rule", r.Name, "err", err)
 		}
 	}
 
@@ -535,17 +553,10 @@ func assembleOne(
 	// 注册该绑定的定时规则。这一步失败与"规则非法"是不同性质的问题——
 	// 规则本身校验通过了，是调度器出了别的问题。
 	for _, r := range engine.ScheduledRules() {
-		name, eng, onlyLive, rt := r.Name, engine, r.OnlyWhenLive, room
-		if err := sched.Add(r.Schedule, room.label+"/"+name, func() {
-			// 定时规则是独立于事件流的另一条触发路径，事件流上的
-			// shouldSkipOfflineEvent 管不到它——下播后轮播照发就是这么来的。
-			// rt.LiveOffline() 每次都要现读：心跳会异步改它，闭包外缓存
-			// 一次就等于把装配那一刻的状态钉死了。
-			if !shouldFireScheduled(onlyLive, rt.LiveOffline()) {
-				return
-			}
-			eng.FireScheduled(name)
-		}); err != nil {
+		// 定时规则是独立于事件流的另一条触发路径，事件流上的
+		// shouldSkipOfflineEvent 管不到它——下播后轮播照发就是这么来的。
+		// 闭包统一由 scheduledRuleJob 构造，热重载那一处也用它。
+		if err := sched.Add(r.Schedule, room.label+"/"+r.Name, scheduledRuleJob(room, engine, r)); err != nil {
 			return roomAssembly{}, err
 		}
 	}

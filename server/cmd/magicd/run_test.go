@@ -1381,3 +1381,84 @@ func TestNoBindingsDoesNotKillDaemonWhileWebUIIsUp(t *testing.T) {
 		}
 	}
 }
+
+// TestReloadKeepsOnlyWhenLiveGuard 钉住热重载重新注册定时规则时必须
+// 保留「只在直播中轮播」的守卫。
+//
+// 这条 bug 真实发生过（用户 08-22 报「开了开关，下播后还在轮播」）：
+// 定时规则有两处注册——启动装配 assembleOne 与热重载 roomRuntime.
+// Reload。守卫当初只补进了前者，而 Reload 开头会 RemoveByPrefix 把
+// 带守卫的条目整组删掉、换成自己那份**裸的**闭包。于是只要在 WebUI
+// 保存过一次规则，开关就永久失效，直到进程重启——真机上从 08-16 保存
+// 规则那一刻起一直发到 08-22 被发现。
+//
+// 测试走真调度器（cron 每秒一次）而不是直接调被注册的函数：bug 恰恰
+// 在「注册进调度器的是哪个闭包」这一步，绕开调度器就测不到它。
+//
+// 后半段（改回在播必须发得出来）不是锦上添花：没有它，规则因为任何
+// 无关原因根本没被注册，前半段照样是绿的。
+func TestReloadKeepsOnlyWhenLiveGuard(t *testing.T) {
+	st, _, bindingID := newReloadTestStore(t)
+	ctx := context.Background()
+
+	onlyWhenLive := true
+	if err := st.ReplaceRules(ctx, bindingID, []spec.Rule{{
+		Name:         "轮播",
+		Schedule:     "* * * * * *",
+		OnlyWhenLive: &onlyWhenLive,
+		Do:           []spec.Action{{Type: "danmaku", Template: []string{"轮播内容"}}},
+	}}); err != nil {
+		t.Fatalf("写规则报错: %v", err)
+	}
+
+	stub := &bindingStub{}
+	bot := newRoomBot(stub, ctx)
+
+	activity := logging.NewActivityWriter(logging.ActivityWriterOptions{
+		Flush: func(context.Context, []store.ActivityRow) error { return nil },
+	})
+	t.Cleanup(activity.Close)
+
+	sched := scheduler.New(slog.Default())
+	rt := &roomRuntime{
+		bot: bot, sink: activity.Sink(1, bindingID, "123"), storage: rules.NewMemStorage(),
+		label: "小号@123", roomID: "123", bindingID: bindingID,
+		st: st, sched: sched, log: slog.Default(),
+	}
+
+	// 确认未开播。这一步要在 Reload 之前，模拟真机：心跳早就把状态同步
+	// 过来了，用户才去 WebUI 按的保存。
+	rt.SetLiveOffline(true)
+
+	if err := rt.Reload(ctx); err != nil {
+		t.Fatalf("Reload 报错: %v", err)
+	}
+	sched.Start()
+	t.Cleanup(sched.Stop)
+
+	// 每秒一次的规则，2.5 秒足够触发两轮。
+	time.Sleep(2500 * time.Millisecond)
+
+	stub.mu.Lock()
+	offlineSent := append([]string{}, stub.sent...)
+	stub.mu.Unlock()
+	if len(offlineSent) != 0 {
+		t.Errorf("确认未开播时定时规则不该触发，实际发送 = %v"+
+			"（说明热重载把「只在直播中轮播」的守卫弄丢了）", offlineSent)
+	}
+
+	// 反证：改回在播就必须发得出来，否则上面的 0 条毫无意义。
+	rt.SetLiveOffline(false)
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		stub.mu.Lock()
+		n := len(stub.sent)
+		stub.mu.Unlock()
+		if n > 0 {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatal("恢复在播后定时规则仍然没有触发——前半段的「0 条」是假绿，" +
+		"规则可能根本没被注册进调度器")
+}
