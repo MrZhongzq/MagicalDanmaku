@@ -500,6 +500,7 @@ func (pl *PKPipeline) buildSnapshotEvent(b event.Battle, snapshots []OpponentSna
 	copy(members, b.Members)
 	for i, m := range members {
 		if snap, ok := byRoom[m.RoomID]; ok {
+			members[i].OnlineRank = snap.OnlineRank
 			members[i].Online = snap.Online
 			members[i].GuardTotal = snap.GuardTotal
 			members[i].GuardOnline = snap.GuardOnline

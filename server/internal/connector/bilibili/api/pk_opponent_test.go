@@ -272,3 +272,49 @@ func TestGuardOnlineStopsOnUntrustworthyCount(t *testing.T) {
 		t.Errorf("请求次数 = %d, 期望恰好 %d（应被安全上限精确拦住）", calls, guardOnlineMaxPages)
 	}
 }
+
+// TestOnlineRankCount 验证在线高能榜人数取的是 data.count。
+//
+// 这个数才是 PK 播报里该说的「对面有多少人」：room_info.online 是人气值
+// （一个活跃度加权指标，B 站 UI 早就不显示了），真机上同一时刻铃七房间
+// 人气 7562、看过 709、在线高能榜 8——播报「7562人在线」没有任何人能
+// 对得上。
+func TestOnlineRankCount(t *testing.T) {
+	var got url.Values
+	c, srv := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		got = r.URL.Query()
+		w.Write([]byte(guardOnlinePageJSON(37, `[{"uid":1,"guard_level":3}]`)))
+	})
+	c.SetBaseURL("guardOnline", srv.URL)
+
+	n, err := c.OnlineRankCount(context.Background(), "33333", "22222222")
+	if err != nil {
+		t.Fatalf("OnlineRankCount 失败: %v", err)
+	}
+	if n != 37 {
+		t.Errorf("OnlineRankCount = %d, 期望 37（data.count）", n)
+	}
+	if got.Get("type") != "online_rank" {
+		t.Errorf("type = %q, 期望 online_rank——换成别的榜单类型数出来的就不是在线人数了", got.Get("type"))
+	}
+	if got.Get("room_id") != "33333" || got.Get("ruid") != "22222222" {
+		t.Errorf("room_id/ruid 参数不对: %v", got)
+	}
+	// 只要总数，不要名单：page_size 拉满等于白白多传一整页数据。
+	if got.Get("page_size") != "1" {
+		t.Errorf("page_size = %q, 期望 1（只需要 data.count，不需要名单）", got.Get("page_size"))
+	}
+}
+
+// TestOnlineRankCountRejectsBadCount count 解析不了时必须报错降级为未知，
+// 不能悄悄当 0——0 会被播报成「对面0人在线」，看着正常实则是彻底错的。
+func TestOnlineRankCountRejectsBadCount(t *testing.T) {
+	c, srv := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"code":0,"data":{"count":"abc","item":[]}}`))
+	})
+	c.SetBaseURL("guardOnline", srv.URL)
+
+	if _, err := c.OnlineRankCount(context.Background(), "33333", "22222222"); err == nil {
+		t.Error("count 不是合法整数时应当报错，不能当 0")
+	}
+}

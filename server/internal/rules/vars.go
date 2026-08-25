@@ -170,6 +170,9 @@ func pkOpponentVars(m event.PkMember) map[string]any {
 		"votes":    m.Votes,
 		"isWinner": m.IsWinner,
 	}
+	if m.OnlineRank != nil {
+		o["onlineRank"] = *m.OnlineRank
+	}
 	if m.Online != nil {
 		o["online"] = *m.Online
 	}
@@ -392,8 +395,12 @@ func VariableCatalog() (common []Variable, byEvent map[event.Type][]Variable) {
 			{Path: "pk.opponent.uname", Label: "对手主播昵称", Optional: true},
 			{Path: "pk.opponent.votes", Label: "对手当前票数", Optional: true},
 			{Path: "pk.opponent.isWinner", Label: "对手是否是当前领先方", Optional: true},
-			{Path: "pk.opponent.online", Label: "对手直播间人数（PK 接通瞬间的一次性快照，" +
-				"接口失败或快照还未就绪时不存在，不要跟 0 混为一谈）", Optional: true},
+			{Path: "pk.opponent.onlineRank", Label: "对手在线高能榜人数（PK 接通瞬间的一次性快照，" +
+				"接口失败或快照还未就绪时不存在，不要跟 0 混为一谈）——" +
+				"要说「对面有多少人」用这个", Optional: true},
+			{Path: "pk.opponent.online", Label: "对手直播间人气值（同上，一次性快照）。" +
+				"**不是在线人数**：B 站 UI 早就不显示人气值了，真机上同一时刻" +
+				"人气 7562、在线高能榜 8，拿它播报没人对得上", Optional: true},
 			{Path: "pk.opponent.guardTotal", Label: "对手大航海总数（同上，一次性快照）", Optional: true},
 			{Path: "pk.opponent.guardOnline", Label: "对手大航海在线数（同上，一次性快照）", Optional: true},
 		},

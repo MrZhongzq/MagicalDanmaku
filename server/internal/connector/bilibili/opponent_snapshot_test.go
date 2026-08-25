@@ -112,9 +112,10 @@ func TestFetchOpponentSnapshotsSkipsSelf(t *testing.T) {
 	}
 
 	// members 里有 3 条记录，但自己会被跳过，实际只有 2 个对手；
-	// 2 个对手 * 3 个接口 = 6 次请求，不该因为多一方就漏查或错配。
-	if *calls != 6 {
-		t.Errorf("请求次数 = %d, 期望 6", *calls)
+	// 2 个对手 * 4 个接口（在线高能榜/人气值/大航海总数/大航海在线）
+	// = 8 次请求，不该因为多一方就漏查或错配。
+	if *calls != 8 {
+		t.Errorf("请求次数 = %d, 期望 8", *calls)
 	}
 }
 
@@ -225,5 +226,59 @@ func TestFetchOpponentSnapshotsRespectsBudget(t *testing.T) {
 	}
 	if snaps[0].Online != nil {
 		t.Errorf("Online = %v, 期望 nil（超预算应降级，不该等到慢接口真的返回值）", *snaps[0].Online)
+	}
+}
+
+// TestFetchOpponentSnapshotsTakesOnlineRankNotPopularity 钉住快照里的
+// 「对面有多少人」取的是**在线高能榜**，不是人气值。
+//
+// 两个数在同一份快照里都要有，但用途不同：OnlineRank 是播报用的（观众
+// 在高能榜上看得见），Online 是人气值，只进日志。真机对照
+// （2026-08-25 同一时刻）铃七房间人气 7562、在线高能榜 8——播报人气值
+// 等于报了一个谁也对不上的数。
+//
+// 两个接口都会带 switch 参数（同一个 queryContributionRank），靠
+// page_size 区分：只要总数的那次传 1，要名单分档的那次传 100。
+func TestFetchOpponentSnapshotsTakesOnlineRankNotPopularity(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		switch {
+		case q.Has("switch") && q.Get("page_size") == "1": // 在线高能榜总数
+			w.Write([]byte(`{"code":0,"data":{"item":[],"count":8}}`))
+		case q.Has("switch"): // 在线大航海分档
+			w.Write([]byte(`{"code":0,"data":{"item":[{"uid":1,"guard_level":3}],"count":1}}`))
+		case q.Has("roomid"): // guardTotal
+			w.Write([]byte(`{"code":0,"data":{"info":{"num":12}}}`))
+		default: // roomOnline（人气值）
+			w.Write([]byte(`{"code":0,"data":{"room_info":{"online":7562}}}`))
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	apiClient := api.New(nil, api.WithHTTPClient(srv.Client()))
+	for _, n := range []string{"roomOnline", "guardTotal", "guardOnline"} {
+		apiClient.SetBaseURL(n, srv.URL)
+	}
+	c := NewClient("21452505", apiClient, WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))))
+
+	snaps := c.FetchOpponentSnapshots(context.Background(),
+		[]event.PkMember{{RoomID: "33333", UID: "u33333"}})
+	if len(snaps) != 1 {
+		t.Fatalf("快照数量 = %d, 期望 1", len(snaps))
+	}
+	s := snaps[0]
+
+	if s.OnlineRank == nil {
+		t.Fatal("OnlineRank 为 nil——在线高能榜人数没抓到，播报就没数可用")
+	}
+	if *s.OnlineRank != 8 {
+		t.Errorf("OnlineRank = %d, 期望 8（在线高能榜 data.count）；"+
+			"若为 7562 说明取成了人气值，若为 1 说明取成了在线大航海数", *s.OnlineRank)
+	}
+	if s.Online == nil || *s.Online != 7562 {
+		t.Errorf("Online（人气值）= %v, 期望 7562——它要留着进日志，不能顺手删掉", s.Online)
+	}
+	if s.GuardOnline == nil || *s.GuardOnline != 1 {
+		t.Errorf("GuardOnline = %v, 期望 1——不能被在线高能榜那次请求顶掉", s.GuardOnline)
 	}
 }

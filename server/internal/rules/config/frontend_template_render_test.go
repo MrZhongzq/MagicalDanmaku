@@ -171,9 +171,13 @@ func TestPkMatchTemplateRenders(t *testing.T) {
 	vars := map[string]any{
 		"pk": map[string]any{
 			"opponent": map[string]any{
-				"uname":      "花花",
-				"online":     int64(1024),
-				"guardTotal": int64(8),
+				"uname": "花花",
+				// 播报用的是在线高能榜，不是人气值——两个都塞进来，
+				// 模板要是取错了字段这条就会渲染出人气值那个数。
+				// 三个数刻意互不相同：撞车的话，模板取错字段这条测试也发现不了。
+				"onlineRank": int64(8),
+				"online":     int64(7562),
+				"guardTotal": int64(12),
 			},
 		},
 	}
@@ -181,7 +185,7 @@ func TestPkMatchTemplateRenders(t *testing.T) {
 	if err != nil {
 		t.Fatalf("渲染报错: %v", err)
 	}
-	const want = "对面主播是花花，直播间1024人在线，大航海8位，一起加油！"
+	const want = "对面主播是花花，高能榜8人在线，大航海12位，一起加油！"
 	if got != want {
 		t.Errorf("渲染结果 = %q, 期望 %q", got, want)
 	}

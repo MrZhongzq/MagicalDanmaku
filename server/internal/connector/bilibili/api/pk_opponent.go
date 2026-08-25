@@ -207,3 +207,37 @@ func addGuardOnlineCounts(counts *GuardOnlineCounts, seenUIDs map[guardUID]bool,
 		}
 	}
 }
+
+// OnlineRankCount 获取指定直播间当前在线高能榜的人数。
+//
+// 与 RoomOnlineCount 的区别，是这次改动的全部理由：
+//
+//   - RoomOnlineCount 读的是 getInfoByRoom 的 room_info.online，那是**人气值**
+//     ——一个活跃度加权指标，B 站 UI 从 2021 年前后就不再显示它，接口里
+//     却一直留着。原 C++ 项目当年取它是对的，照搬到今天就成了拿一个没人
+//     看得见的数冒充「在线人数」。真机对照（2026-08-25 同一时刻）：铃七
+//     房间人气 7562、看过 709、在线高能榜 8。播报「7562人在线」谁也对不上。
+//   - 本函数读的是在线高能榜（queryContributionRank，type=online_rank）的
+//     data.count，就是观众在直播间高能榜上看到的那个实时人数。
+//
+// 与 GuardOnline 共用同一个接口，但只取总数、不翻页也不要名单，所以
+// page_size 传 1：多传一页数据只是浪费。
+//
+// count 解析不了时连带整个调用失败（flexibleCount 的行为），由调用方降级
+// 为「未知」，不能悄悄当 0——「对面0人在线」看着正常，实则彻底错了。
+func (c *Client) OnlineRankCount(ctx context.Context, roomID, uid string) (int64, error) {
+	params := url.Values{}
+	params.Set("ruid", uid)
+	params.Set("room_id", roomID)
+	params.Set("page", "1")
+	params.Set("page_size", "1")
+	params.Set("type", "online_rank")
+	params.Set("switch", "contribution_rank")
+	params.Set("platform", "web")
+
+	var data guardOnlinePage
+	if err := c.GetJSON(ctx, c.URLFor("guardOnline"), params, false, &data); err != nil {
+		return 0, fmt.Errorf("获取在线高能榜人数失败: %w", err)
+	}
+	return int64(data.Count), nil
+}

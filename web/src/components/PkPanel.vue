@@ -216,7 +216,7 @@ export interface PkDraft {
 
   /** 播报对面主播昵称。 */
   announceOpponentName: boolean
-  /** 播报对面直播间人数。 */
+  /** 播报对面在线高能榜人数（不是人气值，见 onlineRank 变量说明）。 */
   announceRoomCount: boolean
   /** 播报对面大航海总数。 */
   announceGuardTotal: boolean
@@ -246,7 +246,7 @@ export function defaultPkDraft(): PkDraft {
     announceGuardOnline: false,
     matchPickMode: 'random',
     matchTemplates: [
-      '对面主播是{{.pk.opponent.uname}}，直播间{{.pk.opponent.online}}人在线，' +
+      '对面主播是{{.pk.opponent.uname}}，高能榜{{.pk.opponent.onlineRank}}人在线，' +
         '大航海{{.pk.opponent.guardTotal}}位，一起加油！',
     ],
     visitGreetingEnabled: false,
@@ -419,9 +419,18 @@ interface VarHintRow {
 const PK_MATCH_TEMPLATE_VAR_ROWS: VarHintRow[] = [
   { variable: '{{.pk.opponent.uname}}', meaning: '对面主播昵称', example: '花花' },
   {
+    variable: '{{.pk.opponent.onlineRank}}',
+    meaning:
+      '对面在线高能榜人数（PK 接通瞬间的一次性快照，接口失败或还没就绪时不存在，不等于 0）——' +
+      '要说「对面有多少人」用这个，观众在高能榜上看得见这个数',
+    example: '8',
+  },
+  {
     variable: '{{.pk.opponent.online}}',
-    meaning: '对面直播间人数（PK 接通瞬间的一次性快照，接口失败或还没就绪时不存在，不等于 0）',
-    example: '1234',
+    meaning:
+      '对面直播间人气值（同上，一次性快照）。**不是在线人数**：B 站 UI 早就不显示人气值了，' +
+      '真机上同一时刻人气 7562、在线高能榜 8，拿它播报没人对得上',
+    example: '7562',
   },
   {
     variable: '{{.pk.opponent.guardTotal}}',
@@ -494,7 +503,7 @@ const PK_VISIT_TEMPLATE_VAR_ROWS: VarHintRow[] = [
         :checked="modelValue.announceRoomCount"
         @update:checked="(v: boolean) => patch({ announceRoomCount: v })"
       >
-        对面直播间人数
+        对面在线高能榜人数
       </NCheckbox>
       <NCheckbox
         :checked="modelValue.announceGuardTotal"

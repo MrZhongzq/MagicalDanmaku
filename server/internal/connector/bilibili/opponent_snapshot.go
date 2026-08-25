@@ -17,7 +17,15 @@ type OpponentSnapshot struct {
 	RoomID string
 	UID    string
 
-	Online      *int64 // 对面直播间在线人数；nil 表示未知（接口失败）
+	// OnlineRank 是对面在线高能榜人数——**播报里说「对面有多少人」时该用
+	// 的就是它**，观众在直播间高能榜上看得见这个数。
+	OnlineRank *int64 // nil 表示未知（接口失败）
+
+	// Online 是人气值（getInfoByRoom 的 room_info.online），不是在线人数。
+	// B 站 UI 从 2021 年前后就不再显示它，接口里却一直留着。留下这个字段
+	// 只为进日志备查，**不要拿它播报**：真机对照（2026-08-25 同一时刻）
+	// 铃七房间人气 7562、在线高能榜 8，播报人气值等于报一个谁也对不上的数。
+	Online      *int64
 	GuardTotal  *int64 // 对面大航海总数；nil 表示未知
 	GuardOnline *int64 // 对面大航海在线数；nil 表示未知
 }
@@ -62,8 +70,15 @@ func (c *Client) FetchOpponentSnapshots(ctx context.Context, members []event.PkM
 func (c *Client) fetchOneOpponentSnapshot(ctx context.Context, m event.PkMember) OpponentSnapshot {
 	snap := OpponentSnapshot{RoomID: m.RoomID, UID: m.UID}
 
+	if rank, err := c.api.OnlineRankCount(ctx, m.RoomID, m.UID); err != nil {
+		c.log.Warn("获取对面在线高能榜人数失败，降级为未知", "room", m.RoomID, "err", err)
+	} else {
+		snap.OnlineRank = &rank
+	}
+
+	// 人气值只抓来进日志，不进播报（见 OpponentSnapshot.Online 的注释）。
 	if online, err := c.api.RoomOnlineCount(ctx, m.RoomID); err != nil {
-		c.log.Warn("获取对面直播间人数失败，降级为未知", "room", m.RoomID, "err", err)
+		c.log.Warn("获取对面人气值失败，降级为未知", "room", m.RoomID, "err", err)
 	} else {
 		snap.Online = &online
 	}
@@ -81,5 +96,22 @@ func (c *Client) fetchOneOpponentSnapshot(ctx context.Context, m event.PkMember)
 		snap.GuardOnline = &total
 	}
 
+	c.log.Info("PK 对面快照",
+		"room", m.RoomID, "uname", m.Username,
+		"在线高能榜", int64OrUnknown(snap.OnlineRank),
+		"人气值", int64OrUnknown(snap.Online),
+		"大航海总数", int64OrUnknown(snap.GuardTotal),
+		"大航海在线", int64OrUnknown(snap.GuardOnline))
+
 	return snap
+}
+
+// int64OrUnknown 把可选字段渲染成日志里的值，nil 显示成「未知」而不是 0。
+// 「拿不到」和「真的是 0」在日志里也必须能分开——这正是排查这类问题时
+// 最先要看的一件事。
+func int64OrUnknown(v *int64) any {
+	if v == nil {
+		return "未知"
+	}
+	return *v
 }

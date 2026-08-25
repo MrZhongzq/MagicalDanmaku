@@ -143,9 +143,9 @@ type RoomStatsUpdate struct {
 // 带 RoomID 是为了让规则层能拿 Event.RoomID 比对出「自己」和「对面」——
 // 协议层不知道调用方绑定的是哪个房间，这个过滤故意不在这里做。
 //
-// Online/GuardTotal/GuardOnline 是 PK 接通瞬间为「对面」抓取的一次性
-// 快照（连接器层 FetchOpponentSnapshots 的结果，见
-// connector/bilibili/opponent_snapshot.go）。三个字段都是指针，nil 有
+// OnlineRank/Online/GuardTotal/GuardOnline 是 PK 接通瞬间为「对面」抓取
+// 的一次性快照（连接器层 FetchOpponentSnapshots 的结果，见
+// connector/bilibili/opponent_snapshot.go）。四个字段都是指针，nil 有
 // 两种成因，调用方不需要区分也不应该区分——都当「未知」处理：(1) 这一项
 // 是自己，从未为自己抓过这份数据；(2) 这一项是对面，但快照还没抓完/抓
 // 失败了，字段降级为未知。**用指针而不是 0 值，是为了让「拿不到」和
@@ -159,7 +159,12 @@ type PkMember struct {
 	Votes    int64
 	IsWinner bool
 
-	Online      *int64 // 对面直播间人数；nil 表示未知（自己，或快照未就绪/失败）
+	// OnlineRank 是对面在线高能榜人数，播报「对面有多少人」用的就是它。
+	OnlineRank *int64 // nil 表示未知（自己，或快照未就绪/失败）
+
+	// Online 是人气值，**不是在线人数**，只为进日志备查（见
+	// bilibili.OpponentSnapshot.Online 的注释）。
+	Online      *int64
 	GuardTotal  *int64 // 对面大航海总数；nil 表示未知
 	GuardOnline *int64 // 对面大航海在线数；nil 表示未知
 }
